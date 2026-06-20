@@ -346,7 +346,9 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 ### 6.1 Core Types (Go)
 
 ```go
-package fluxdocs
+// Package core là engine chính; thư mục core/, import path
+// github.com/fluxtoolkit/fluxdocs/core, dùng dưới dạng core.OpenDocument (§7.1).
+package core
 
 import "time"
 
@@ -858,7 +860,7 @@ Theo chuẩn Go: trả `error` là giá trị thứ hai, không dùng panic cho 
 ```go
 img, err := doc.RenderPage(0, opts)
 if err != nil {
-    // xử lý lỗi cụ thể, ví dụ kiểm tra errors.Is(err, fluxdocs.ErrPageNotFound)
+    // xử lý lỗi cụ thể, ví dụ kiểm tra errors.Is(err, core.ErrPageNotFound)
 }
 ```
 
