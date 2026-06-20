@@ -1,0 +1,55 @@
+# --- Go ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/dist/
+vendor/
+go.work.sum
+
+# WASM build artifacts
+*.wasm
+wasm_exec.js
+
+# --- Node / JS wrappers ---
+node_modules/
+.pnpm-store/
+packages/**/dist/
+packages/**/build/
+apps/**/dist/
+apps/**/.vite/
+apps/**/.cache/
+*.tsbuildinfo
+
+# --- Test / coverage ---
+coverage.out
+coverage.html
+*.coverprofile
+# golden files ARE committed; generated render output is not
+testing/**/*.actual.png
+testing/**/output/
+
+# --- Secrets & env ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_rsa
+credentials.json
+service-account*.json
+
+# Do NOT commit real PDFs with PII into the corpus.
+# Synthetic / anonymized fixtures are tracked explicitly.
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
