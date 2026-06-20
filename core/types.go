@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // ID dùng type alias có kiểm soát (tương đương branded type trong TS) để tránh
 // nhầm lẫn giữa các loại ID khi truyền vào hàm — không dùng string trần.
@@ -22,6 +25,15 @@ type Document struct {
 	Encrypted bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// Runtime state (unexported) — chỉ tồn tại khi document đang mở, không
+	// thuộc schema serialize ở Appendix A. Document vừa là DTO vừa là handle
+	// sống mà OpenDocument trả về.
+	mu                 sync.Mutex
+	closed             bool
+	onAnnotationChange func(a Annotation)
+	onPageRendered     func(pageIndex int, img []byte)
+	onFormFieldChange  func(f FormField)
 }
 
 type DocumentMetadata struct {
