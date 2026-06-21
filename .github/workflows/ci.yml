@@ -74,8 +74,15 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go build ./...
+      # Module cloud còn rỗng (chỉ .gitkeep) ở giai đoạn pre-build; go test với
+      # 0 package exit 1. Chỉ chạy khi đã có package Go thật.
       - name: Test (race)
-        run: go test -race ./...
+        run: |
+          if [ -n "$(go list ./... 2>/dev/null)" ]; then
+            go test -race ./...
+          else
+            echo "Cloud module chưa có package Go — bỏ qua test."
+          fi
 
   wasm:
     name: Build WASM (client-side core)
