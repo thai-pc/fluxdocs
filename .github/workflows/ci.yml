@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & Test (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Các file cần gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # Build mặc định PHẢI là pure-Go: core giữ MIT, không kéo theo CGO
+      # ngoài ý muốn. CGO chỉ được bật sau build tag (ocr, mupdf).
+      - name: Build (pure-Go, CGO disabled)
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      # Race detector cần CGO (C runtime); code vẫn pure-Go, CGO chỉ bật để
+      # dùng race runtime, không import C nào.
+      - name: Test (race)
+        run: go test -race ./...
+
+      # GATE bảo mật: nội dung sau redact không được extract lại (spec §13.4,
+      # .claude/SECURITY.md §1). Bắt buộc pass 100% khi đã có test.
+      - name: Redaction security gate
+        run: |
+          if ls testing/security/redaction/*_test.go >/dev/null 2>&1; then
+            go test ./testing/security/redaction/...
+          else
+            echo "Chưa có redaction test — gate ở chế độ placeholder."
+          fi
+
+  cloud:
+    name: Build & Test (cloud module)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Build (pure-Go)
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+      - name: Test (race)
+        run: go test -race ./...
+
+  wasm:
+    name: Build WASM (client-side core)
+    runs-on: ubuntu-latest
+    env:
+      GOOS: js
+      GOARCH: wasm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      # Khác biệt cốt lõi của sản phẩm: cùng core Go compile sang WASM chạy
+      # client-side. Build này phải luôn xanh.
+      - name: Build core + wasm entry for js/wasm
+        run: go build ./core/... ./wasm/...
