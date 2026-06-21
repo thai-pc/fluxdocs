@@ -39,6 +39,7 @@ Mục tiêu: lấp khoảng trống giữa SDK enterprise đắt đỏ (Nutrient
 - **Cloud backend:** Go + Chi/Echo + PostgreSQL 16 + sqlc + Cloudflare R2 + River queue + Stripe + Fly.io.
 - **Client wrappers:** `@fluxdocs/react`, `@fluxdocs/vue` (Wave 1); web-components, cloud-sdk sau.
 - **Monorepo:** `go.work` (Go multi-module) + `pnpm-workspace.yaml` (phần JS).
+- **Module path (reality):** repo hiện ở `github.com/thai-pc/fluxdocs` → import là `github.com/thai-pc/fluxdocs/core`. Spec (`docs/spec.md`) vẫn ghi brand đích `fluxtoolkit`; dùng path `thai-pc` cho mọi import/`go get` cho tới khi chuyển sang org.
 
 ## 4. Cấu trúc thư mục (xem cây thật trong repo)
 
