@@ -55,99 +55,105 @@ func isDelimiter(c byte) bool {
 
 func isRegular(c byte) bool { return !isWhitespace(c) && !isDelimiter(c) }
 
-// tokenize chuyển byte PDF thành chuỗi token cú pháp object. Không xử lý dữ
-// liệu thô sau từ khóa `stream` (cần /Length từ dict) — đó là việc của tầng
-// parse indirect object, sẽ thêm cùng xref.
-func tokenize(data []byte) ([]token, error) {
-	var toks []token
-	i := 0
+// nextToken đọc đúng MỘT token bắt đầu từ offset i (đã bỏ qua whitespace và
+// comment), trả token cùng offset ngay sau nó. Hết input trả token EOF. Hàm
+// thuần (không giữ state) nên cho phép peek/lookahead bằng cách gọi với offset
+// trả về mà chưa "commit" — đây là chìa khóa để đọc dữ liệu stream nhị phân:
+// parser dừng tokenize ở từ khóa `stream` rồi đọc byte thô theo offset.
+func nextToken(data []byte, i int) (token, int, error) {
 	n := len(data)
 
+	// Bỏ whitespace và comment.
 	for i < n {
 		c := data[i]
-
-		switch {
-		case isWhitespace(c):
+		if isWhitespace(c) {
 			i++
 			continue
-
-		case c == '%': // comment tới hết dòng
+		}
+		if c == '%' {
 			for i < n && data[i] != '\n' && data[i] != '\r' {
 				i++
 			}
 			continue
-
-		case c == '[':
-			toks = append(toks, token{kind: tokArrayOpen})
-			i++
-
-		case c == ']':
-			toks = append(toks, token{kind: tokArrayClose})
-			i++
-
-		case c == '<':
-			if i+1 < n && data[i+1] == '<' {
-				toks = append(toks, token{kind: tokDictOpen})
-				i += 2
-			} else {
-				s, ni, err := lexHexString(data, i)
-				if err != nil {
-					return nil, err
-				}
-				toks = append(toks, token{kind: tokString, str: s, hex: true})
-				i = ni
-			}
-
-		case c == '>':
-			if i+1 < n && data[i+1] == '>' {
-				toks = append(toks, token{kind: tokDictClose})
-				i += 2
-			} else {
-				return nil, fmt.Errorf("%w: '>' đơn lẻ tại offset %d", errLex, i)
-			}
-
-		case c == '(':
-			s, ni, err := lexLiteralString(data, i)
-			if err != nil {
-				return nil, err
-			}
-			toks = append(toks, token{kind: tokString, str: s})
-			i = ni
-
-		case c == '/':
-			name, ni, err := lexName(data, i)
-			if err != nil {
-				return nil, err
-			}
-			toks = append(toks, token{kind: tokName, name: name})
-			i = ni
-
-		case c == '{' || c == '}': // PostScript calculator function delimiter
-			toks = append(toks, token{kind: tokKeyword, kw: string(c)})
-			i++
-
-		case c == '+' || c == '-' || c == '.' || (c >= '0' && c <= '9'):
-			tok, ni, err := lexNumber(data, i)
-			if err != nil {
-				return nil, err
-			}
-			toks = append(toks, tok)
-			i = ni
-
-		default: // run ký tự thường = keyword (true/false/null/R/obj/...)
-			start := i
-			for i < n && isRegular(data[i]) {
-				i++
-			}
-			if i == start {
-				return nil, fmt.Errorf("%w: ký tự không hợp lệ %q tại offset %d", errLex, c, i)
-			}
-			toks = append(toks, token{kind: tokKeyword, kw: string(data[start:i])})
 		}
+		break
+	}
+	if i >= n {
+		return token{kind: tokEOF}, i, nil
 	}
 
-	toks = append(toks, token{kind: tokEOF})
-	return toks, nil
+	c := data[i]
+	switch {
+	case c == '[':
+		return token{kind: tokArrayOpen}, i + 1, nil
+	case c == ']':
+		return token{kind: tokArrayClose}, i + 1, nil
+
+	case c == '<':
+		if i+1 < n && data[i+1] == '<' {
+			return token{kind: tokDictOpen}, i + 2, nil
+		}
+		s, ni, err := lexHexString(data, i)
+		if err != nil {
+			return token{}, i, err
+		}
+		return token{kind: tokString, str: s, hex: true}, ni, nil
+
+	case c == '>':
+		if i+1 < n && data[i+1] == '>' {
+			return token{kind: tokDictClose}, i + 2, nil
+		}
+		return token{}, i, fmt.Errorf("%w: '>' đơn lẻ tại offset %d", errLex, i)
+
+	case c == '(':
+		s, ni, err := lexLiteralString(data, i)
+		if err != nil {
+			return token{}, i, err
+		}
+		return token{kind: tokString, str: s}, ni, nil
+
+	case c == '/':
+		name, ni, err := lexName(data, i)
+		if err != nil {
+			return token{}, i, err
+		}
+		return token{kind: tokName, name: name}, ni, nil
+
+	case c == '{' || c == '}':
+		return token{kind: tokKeyword, kw: string(c)}, i + 1, nil
+
+	case c == '+' || c == '-' || c == '.' || (c >= '0' && c <= '9'):
+		return lexNumber(data, i)
+
+	default: // run ký tự thường = keyword
+		start := i
+		for i < n && isRegular(data[i]) {
+			i++
+		}
+		if i == start {
+			return token{}, i, fmt.Errorf("%w: ký tự không hợp lệ %q tại offset %d", errLex, c, i)
+		}
+		return token{kind: tokKeyword, kw: string(data[start:i])}, i, nil
+	}
+}
+
+// tokenize chuyển toàn bộ byte thành chuỗi token (kết thúc bằng EOF). Dùng cho
+// parse object trực tiếp kích thước nhỏ; KHÔNG dùng cho file có stream nhị phân
+// (xem nextToken).
+func tokenize(data []byte) ([]token, error) {
+	var toks []token
+	i := 0
+	for {
+		t, ni, err := nextToken(data, i)
+		if err != nil {
+			return nil, err
+		}
+		toks = append(toks, t)
+		if t.kind == tokEOF {
+			return toks, nil
+		}
+		i = ni
+	}
 }
 
 func lexNumber(data []byte, i int) (token, int, error) {
