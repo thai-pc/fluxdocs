@@ -1,116 +1,180 @@
 # FluxDocs — Project Context & Rules for AI
 
-> Bản tóm tắt định hướng để bất kỳ AI assistant nào (Claude Code, Copilot, v.v.)
-> làm việc trong repo này hiểu **dự án là gì, viết code thế nào, và ranh giới nào không được vượt**.
-> Nguồn sự thật đầy đủ: `/Users/thai-pc/Downloads/fluxdocs-spec.md` (Technical Specification v0.1.0).
+> An orientation summary so any AI assistant (Claude Code, Copilot, etc.)
+> working in this repo understands **what the project is, how to write code, and
+> which boundaries must not be crossed**.
+> Full source of truth: `docs/spec.md` (Technical Specification v0.1.0).
+> Code conventions (comments, inputs, returns, errors): `.claude/CONVENTIONS.md`.
 
 ---
 
-## 1. Dự án là gì
+## 1. What the project is
 
-**FluxDocs** = SDK xử lý & annotate PDF, **core viết 100% bằng Go**, license MIT, thuộc họ Flux (FluxFiles, FluxGantt).
+**FluxDocs** = a PDF processing & annotation SDK, with a **core written 100% in
+Go**, MIT-licensed, part of the Flux family (FluxFiles, FluxGantt).
 
-Mục tiêu: lấp khoảng trống giữa SDK enterprise đắt đỏ (Nutrient/PSPDFKit $25k–220k/năm) và các lib OSS rời rạc (pdf.js chỉ render, pdf-lib chỉ edit cơ bản).
+Goal: fill the gap between expensive enterprise SDKs (Nutrient/PSPDFKit
+$25k–220k/year) and scattered OSS libraries (pdf.js renders only, pdf-lib does
+basic editing only).
 
-Điểm khác biệt kỹ thuật cốt lõi — **luôn giữ đúng khi code**:
-1. **Core Go thật**, không phải binding mỏng qua CGO. Phần nặng (parse + render PDF) chạy hoàn toàn trong Go.
-2. **Một core, hai build target**: native binary (server/CLI) + WASM (`GOOS=js GOARCH=wasm`) chạy client-side.
-3. **Privacy-first qua WASM**: tài liệu nhạy cảm xử lý hoàn toàn trong browser, không gửi byte nào lên server.
-4. **Annotation tách biệt PDF gốc**: lưu dưới dạng JSON layer riêng, áp lên khi render hoặc khi flatten.
+Core technical differentiators — **always keep these true when coding**:
+1. **A real Go core**, not a thin binding over CGO. The heavy work (parse +
+   render PDF) runs entirely in Go.
+2. **One core, two build targets**: native binary (server/CLI) + WASM
+   (`GOOS=js GOARCH=wasm`) running client-side.
+3. **Privacy-first via WASM**: sensitive documents are processed entirely in the
+   browser; not a single byte is sent to a server.
+4. **Annotations kept separate from the original PDF**: stored as a separate JSON
+   layer, applied at render time or on flatten.
 
-## 2. Ba tầng sản phẩm (ảnh hưởng tới việc đặt code ở đâu)
+## 2. Three product tiers (this drives where code goes)
 
-| Tier | License | Tính năng | Vị trí code |
+| Tier | License | Features | Code location |
 |---|---|---|---|
-| **Core** | MIT, free | render, annotation cơ bản, text extraction, merge/split, WASM | `core/` (trừ `ocr/`, `sign/`) |
+| **Core** | MIT, free | render, basic annotation, text extraction, merge/split, WASM | `core/` (except `ocr/`, `sign/`) |
 | **Pro** | One-time | form fill, e-signature, redaction, OCR, compare, watermark, PDF/A | `core/form`, `core/sign`, `core/docops/redact`, `core/ocr` |
 | **Cloud** | Subscription | AI Q&A, structured extraction, auto-redact PII, collaboration, hosted API | `cloud/` |
 
-**Quy tắc license-tách-tầng:** Code MIT thuần không được `import` package phụ thuộc CGO (OCR Tesseract, MuPDF). Phần CGO PHẢI nằm sau **build tag** (`//go:build ocr` / `//go:build mupdf`) để build mặc định giữ MIT 100%. Đây là ràng buộc pháp lý, không phải tùy chọn.
+**License-tier separation rule:** pure-MIT code must not `import` a
+CGO-dependent package (Tesseract OCR, MuPDF). CGO parts MUST sit behind a **build
+tag** (`//go:build ocr` / `//go:build mupdf`) so the default build stays 100%
+MIT. This is a legal constraint, not an option.
 
 ## 3. Tech stack
 
-- **Ngôn ngữ core:** Go 1.23+. Build target thêm WASM.
-- **PDF parsing:** tự viết parser theo **PDF 32000-1:2008 (ISO)**. Clean-room — KHÔNG tham khảo source Nutrient/Apryse (xem `SECURITY.md` mục Legal).
-- **Render:** raster PNG/JPEG (server thumbnail) + SVG (client vector-accurate) + Canvas API (WASM).
-- **Concurrency:** goroutine worker pool, giới hạn bằng `runtime.NumCPU()`.
-- **OCR:** Tesseract qua CGO, build tag `ocr` (Pro).
-- **AI:** gọi LLM API (Claude) qua HTTP client Go chuẩn — không thêm SDK ngôn ngữ khác.
-- **Cloud backend:** Go + Chi/Echo + PostgreSQL 16 + sqlc + Cloudflare R2 + River queue + Stripe + Fly.io.
-- **Client wrappers:** `@fluxdocs/react`, `@fluxdocs/vue` (Wave 1); web-components, cloud-sdk sau.
-- **Monorepo:** `go.work` (Go multi-module) + `pnpm-workspace.yaml` (phần JS).
-- **Module path (reality):** repo hiện ở `github.com/thai-pc/fluxdocs` → import là `github.com/thai-pc/fluxdocs/core`. Spec (`docs/spec.md`) vẫn ghi brand đích `fluxtoolkit`; dùng path `thai-pc` cho mọi import/`go get` cho tới khi chuyển sang org.
+- **Core language:** Go 1.23+. Plus a WASM build target.
+- **PDF parsing:** a hand-written parser following **PDF 32000-1:2008 (ISO)**.
+  Clean-room — do NOT consult Nutrient/Apryse source (see `SECURITY.md`, Legal).
+- **Rendering:** raster PNG/JPEG (server thumbnails) + SVG (vector-accurate
+  client) + Canvas API (WASM).
+- **Concurrency:** a goroutine worker pool, bounded by `runtime.NumCPU()`.
+- **OCR:** Tesseract via CGO, build tag `ocr` (Pro).
+- **AI:** call an LLM API (Claude) over a standard Go HTTP client — no other
+  language SDKs.
+- **Cloud backend:** Go + Chi/Echo + PostgreSQL 16 + sqlc + Cloudflare R2 + River
+  queue + Stripe + Fly.io.
+- **Client wrappers:** `@fluxdocs/react`, `@fluxdocs/vue` (Wave 1); web-components,
+  cloud-sdk later.
+- **Monorepo:** `go.work` (Go multi-module) + `pnpm-workspace.yaml` (JS side).
+- **Module path (reality):** the repo currently lives at
+  `github.com/thai-pc/fluxdocs` → imports are `github.com/thai-pc/fluxdocs/core`.
+  The spec (`docs/spec.md`) still names the target brand `fluxtoolkit`; use the
+  `thai-pc` path for all imports/`go get` until we move to an org.
 
-## 4. Cấu trúc thư mục (xem cây thật trong repo)
+## 4. Directory structure (see the real tree in the repo)
 
 ```
-core/        # engine Go chính: parse, render, annotation, docops, form, sign, extract, ocr
-cmd/         # CLI tool `fluxdocs`
-cloud/       # backend Go (Cloud tier): api, queue, db
-wasm/        # entry point build WASM, export func qua syscall/js
-packages/    # JS/TS wrapper (@fluxdocs/*)
-examples/    # demo go-server, react, vue, cli-batch-redact, ai-extraction
+core/        # main Go engine: parse, render, annotation, docops, form, sign, extract, ocr
+cmd/         # the `fluxdocs` CLI tool
+cloud/       # Go backend (Cloud tier): api, queue, db
+wasm/        # WASM build entry point, exporting funcs via syscall/js
+packages/    # JS/TS wrappers (@fluxdocs/*)
+examples/    # demos: go-server, react, vue, cli-batch-redact, ai-extraction
 apps/        # docs site + landing page
-testing/     # corpus PDF, golden files, security tests, e2e, benchmark, fixtures
-.claude/     # tài liệu này + AGENTS.md + SECURITY.md
+testing/     # PDF corpus, golden files, security tests, e2e, benchmarks, fixtures
+.claude/     # this file + AGENTS.md + CONVENTIONS.md + SECURITY.md
 ```
 
-Đặt code đúng package theo §10.4 spec: `core`, `render`, `annotation`, `extract`, `ocr`, `sign`, `cloud`.
+Place code in the right package per spec §10.4: `core`, `render`, `annotation`,
+`extract`, `ocr`, `sign`, `cloud`.
 
-## 5. Coding conventions (BẮT BUỘC tuân theo)
+## 5. Coding conventions
+
+The full rulebook lives in **`.claude/CONVENTIONS.md`** (comments, inputs,
+outputs/returns, errors, naming, concurrency, tests). Highlights:
 
 ### Go
-- **Naming:** PascalCase exported, verb đứng trước. KHÔNG dùng prefix `Get` cho field đơn giản (theo Effective Go). Tên package: ngắn, lowercase, không underscore.
-  - Đúng: `doc.RenderPage(0, opts)`, `doc.AddAnnotation(a)`, `doc.ExtractText(opts)`
-  - Sai: `doc.GetRenderedPageAsImage(0)`, `doc.render_page(...)`, `doc.DoOperation("render", 0)`
-- **Error handling:** trả `error` là giá trị thứ hai. KHÔNG `panic` cho lỗi runtime thường (chỉ panic cho bug logic không phục hồi được). Dùng sentinel error + `errors.Is`:
-  - `ErrPageNotFound`, `ErrEncryptedDocument`, `ErrInvalidPDF` (định nghĩa trong `core/errors.go`).
-- **ID types:** dùng type alias có kiểm soát (`DocumentID`, `PageID`, `AnnotationID`, `LayerID`) — tránh nhầm lẫn ID, không truyền `string` trần.
-- **Concurrency:** worker pool giới hạn bằng semaphore `make(chan struct{}, runtime.NumCPU())`. Mỗi trang render độc lập (giữa các trang parallel, trong 1 trang tuần tự vì content stream stateful).
-- **Build tags:** mọi thứ CGO/license-phụ-thuộc nằm sau build tag riêng.
+- **Naming:** PascalCase for exported, verb-first. No `Get` prefix for simple
+  fields (per Effective Go) — but follow the spec for the documented §7 API
+  surface. Package names: short, lowercase, no underscores.
+  - Good: `doc.RenderPage(0, opts)`, `doc.AddAnnotation(a)`, `doc.ExtractText(opts)`
+  - Bad: `doc.GetRenderedPageAsImage(0)`, `doc.render_page(...)`, `doc.DoOperation("render", 0)`
+- **Error handling:** return `error` as the last value. Do NOT `panic` for normal
+  runtime errors (only for unrecoverable logic bugs). Use sentinel errors +
+  `errors.Is`: `ErrPageNotFound`, `ErrEncryptedDocument`, `ErrInvalidPDF`
+  (defined in `core/errors.go`).
+- **ID types:** use controlled type aliases (`DocumentID`, `PageID`,
+  `AnnotationID`, `LayerID`) — avoid mixing IDs; never pass bare `string`.
+- **Concurrency:** a worker pool bounded by a semaphore
+  `make(chan struct{}, runtime.NumCPU())`. Each page renders independently
+  (pages parallel; within a page sequential, since the content stream is
+  stateful).
+- **Build tags:** anything CGO/license-dependent sits behind its own build tag.
 
-### CSS / Client UI (BEM, prefix `fd-`)
-- Class: `.fd-viewer`, `.fd-viewer__canvas`, `.fd-annotation--highlight`, `.fd-annotation--selected`.
+### Language
+- **All code, comments, identifiers, commits, and docs are in English.**
+  Vietnamese is for maintainer chat only.
+
+### CSS / Client UI (BEM, `fd-` prefix)
+- Classes: `.fd-viewer`, `.fd-viewer__canvas`, `.fd-annotation--highlight`,
+  `.fd-annotation--selected`.
 - CSS custom property prefix: `--fd-*`.
-- Tránh xung đột với host application — luôn prefix `fd-`.
+- Avoid collisions with the host application — always prefix `fd-`.
 
-### Design tokens (xem §8.2 spec)
-- Primary `#6366f1` (indigo), annotation default amber `#f59e0b`, redact fill `#18181b` (đen đặc, KHÔNG trong suốt).
-- Font: Inter (UI), JetBrains Mono (code). Base size 13px (density cao).
-- Tôn trọng `prefers-reduced-motion`. WCAG 2.1 AA cho toolbar/sidebar.
+### Design tokens (see spec §8.2)
+- Primary `#6366f1` (indigo), default annotation amber `#f59e0b`, redact fill
+  `#18181b` (solid black, NOT transparent).
+- Fonts: Inter (UI), JetBrains Mono (code). Base size 13px (high density).
+- Respect `prefers-reduced-motion`. WCAG 2.1 AA for toolbar/sidebar.
 
-## 6. Testing rules (xem `testing/README.md` chi tiết)
+## 6. Testing rules (see `testing/README.md` for details)
 
-- **Parser:** table-driven test. Corpus PDF thật trong `testing/corpus/` — bao gồm cả file **malformed** (đa số PDF thực tế vi phạm spec). Lenient parsing + fallback brute-force scan.
-- **Render:** golden-file test — so output PNG với reference trong `*/testdata/golden/`. Khi đổi render, regenerate golden có chủ đích, review kỹ diff.
-- **CI (GitHub Actions):** phải green cả **native** và **WASM** target trước khi merge.
-- **Redaction:** xem mục 7 — test bắt buộc, không thương lượng.
-- **Coverage tăng dần:** Wave 1 chỉ cần hỗ trợ tốt subset 90% PDF thực tế (sinh từ Word, LaTeX, Chrome print, Adobe). Không ép 100% spec ngày đầu.
+- **Parser:** table-driven tests. Real PDFs in `testing/corpus/` — including
+  **malformed** files (most real-world PDFs violate the spec). Lenient parsing +
+  brute-force scan fallback.
+- **Render:** golden-file tests — compare PNG output against references in
+  `*/testdata/golden/`. When rendering changes, regenerate goldens deliberately
+  and review the diff carefully.
+- **CI (GitHub Actions):** must be green for both **native** and **WASM** targets
+  before merge.
+- **Redaction:** see section 7 — mandatory tests, non-negotiable.
+- **Coverage grows incrementally:** Wave 1 only needs to handle the common ~90%
+  of real PDFs (from Word, LaTeX, Chrome print, Adobe). Do not force 100% spec
+  coverage on day one.
 
-## 7. SECURITY — đọc kỹ, đây là rủi ro reputation #1
+## 7. SECURITY — read carefully, this is reputation risk #1
 
-Chi tiết đầy đủ trong `.claude/SECURITY.md`. Tóm tắt ràng buộc cứng:
+Full detail in `.claude/SECURITY.md`. Hard constraints in brief:
 
-1. **Redaction phải XÓA VĨNH VIỄN nội dung trong content stream**, không chỉ vẽ hình chữ nhật đen đè lên. Lỗi "vẽ đè" là lỗ hổng phổ biến đã phá hủy uy tín nhiều tổ chức.
-   - Sau mọi thao tác redact, test BẮT BUỘC chạy lại `ExtractText()` trên vùng đã redact → phải trả về rỗng / không khớp nội dung gốc.
-   - PR đụng vào redaction KHÔNG được merge nếu `testing/security/redaction/` không pass 100%.
-   - Phải xóa cả metadata/annotation ẩn có thể chứa nội dung tương tự.
-2. **Privacy WASM:** ở chế độ client-side, KHÔNG được thêm bất kỳ network call nào gửi nội dung PDF ra ngoài. Đây là lời hứa lõi của sản phẩm.
-3. **Parser an toàn:** input là file không tin cậy. Chống decompression bomb, vòng lặp xref vô hạn (incremental update `/Prev`), object stream lồng nhau, integer overflow khi tính kích thước canvas. Fuzz seeds trong `testing/security/fuzz/`.
-4. **Cloud:** secret/PII không log. `api_keys` lưu **hash** (không plaintext), share link có `password_hash` + `expires_at`. Mọi query scoped theo `org_id` (multi-tenant isolation). Xác thực JWT/OAuth.
-5. **License/legal:** clean-room implementation từ ISO 32000 công khai. MuPDF (AGPL) chỉ qua build tag `mupdf`, document rõ binary build tag đó chịu AGPL.
+1. **Redaction must PERMANENTLY remove content from the content stream**, not
+   just paint a black rectangle over it. The "paint-over" bug is a common flaw
+   that has destroyed organizations' reputations.
+   - After any redaction, a mandatory test re-runs `ExtractText()` over the
+     redacted region → it must return empty / not match the original content.
+   - A PR touching redaction does NOT merge unless `testing/security/redaction/`
+     passes 100%.
+   - Hidden metadata/annotations that may hold the same content must also be
+     removed.
+2. **WASM privacy:** in client-side mode, do NOT add any network call that sends
+   PDF content out. This is the product's core promise.
+3. **Safe parser:** input is an untrusted file. Defend against decompression
+   bombs, infinite xref loops (incremental-update `/Prev`), nested object
+   streams, integer overflow when computing canvas size. Fuzz seeds in
+   `testing/security/fuzz/`.
+4. **Cloud:** never log secrets/PII. `api_keys` store a **hash** (not plaintext);
+   share links have `password_hash` + `expires_at`. Every query is scoped by
+   `org_id` (multi-tenant isolation). Authenticate via JWT/OAuth.
+5. **License/legal:** clean-room implementation from the public ISO 32000. MuPDF
+   (AGPL) only via the `mupdf` build tag; document clearly that binaries with
+   that tag are subject to AGPL.
 
-## 8. Roadmap (biết đang ở đâu)
+## 8. Roadmap (know where we are)
 
-- **Wave 1 (Tuần 1–8, Core MIT):** parser, render raster+WASM, annotation 4 loại, React/Vue wrapper, merge/split, text extraction, docs+launch.
-- **Wave 2 (Tuần 11–18, Pro):** forms, e-signature PKCS#7, **redaction an toàn**, OCR, compare, watermark, PDF/A.
-- **Wave 3 (Tháng 6+, Cloud):** backend API, AI extraction/Q&A, auto-redact PII, collaboration CRDT-lite, webhook/Zapier.
+- **Wave 1 (Weeks 1–8, Core MIT):** parser, raster+WASM rendering, 4 annotation
+  types, React/Vue wrappers, merge/split, text extraction, docs + launch.
+- **Wave 2 (Weeks 11–18, Pro):** forms, PKCS#7 e-signature, **safe redaction**,
+  OCR, compare, watermark, PDF/A.
+- **Wave 3 (Month 6+, Cloud):** backend API, AI extraction/Q&A, auto-redact PII,
+  CRDT-lite collaboration, webhook/Zapier.
 
-## 9. Khi AI làm việc trong repo này
+## 9. When an AI works in this repo
 
-- Mặc định **pure-Go, MIT-safe**. Nếu một thay đổi cần CGO → đặt sau build tag và nói rõ.
-- Giữ annotation **tách biệt** PDF gốc (JSON layer), đừng bake trừ khi gọi `Flatten*`.
-- Trước khi viết code redaction/parser/crypto → đọc `.claude/SECURITY.md`.
-- Tôn trọng ranh giới tier: đừng để code Core import code Pro/Cloud.
-- Khi không chắc về hành vi đúng của PDF → tra ISO 32000-1:2008, không đoán.
-- Brand voice trong docs/comment: trực tiếp, kỹ thuật, benchmark cụ thể. Tránh "revolutionary", "enterprise-grade" sáo rỗng.
+- Default to **pure-Go, MIT-safe**. If a change needs CGO → put it behind a build
+  tag and say so explicitly.
+- Keep annotations **separate** from the original PDF (JSON layer); don't bake
+  them in unless calling `Flatten*`.
+- Before writing redaction/parser/crypto code → read `.claude/SECURITY.md`.
+- Respect tier boundaries: don't let Core code import Pro/Cloud code.
+- When unsure about correct PDF behavior → consult ISO 32000-1:2008, don't guess.
+- Brand voice in docs/comments: direct, technical, concrete benchmarks. Avoid
+  hollow "revolutionary" / "enterprise-grade" filler.

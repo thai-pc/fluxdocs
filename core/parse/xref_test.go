@@ -6,8 +6,9 @@ import (
 	"testing"
 )
 
-// buildMinimalPDF dựng một PDF hợp lệ tối thiểu (catalog -> pages -> page +
-// một content stream) với xref table cổ điển, offset tính động để không lệch.
+// buildMinimalPDF builds a minimal valid PDF (catalog -> pages -> page + one
+// content stream) with a classic xref table; offsets are computed dynamically
+// so they never drift.
 func buildMinimalPDF() []byte {
 	var b bytes.Buffer
 	off := map[int]int{}
@@ -61,16 +62,16 @@ func TestParseXref(t *testing.T) {
 		t.Errorf("len(Entries) = %d, want 5", len(x.Entries))
 	}
 	if e := x.Entries[0]; !e.Free {
-		t.Error("entry 0 phải là free")
+		t.Error("entry 0 must be free")
 	}
 	if e := x.Entries[1]; e.Free || e.Offset <= 0 {
-		t.Errorf("entry 1 = %+v, muốn in-use với offset > 0", e)
+		t.Errorf("entry 1 = %+v, want in-use with offset > 0", e)
 	}
 	if size, ok := x.Trailer.GetInt("Size"); !ok || size != 5 {
 		t.Errorf("trailer /Size = %d,%v want 5,true", size, ok)
 	}
 	if _, ok := x.Trailer.GetReference("Root"); !ok {
-		t.Error("trailer /Root phải là reference")
+		t.Error("trailer /Root must be a reference")
 	}
 }
 
@@ -120,7 +121,7 @@ func TestResolverStreamContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Object 4 là content stream.
+	// Object 4 is the content stream.
 	obj, err := r.object(4)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +140,7 @@ func TestResolverStreamContent(t *testing.T) {
 }
 
 func TestParseIndirectObject_Stream_LengthFallback(t *testing.T) {
-	// /Length cố tình SAI (0) -> phải fallback quét 'endstream'.
+	// /Length is deliberately WRONG (0) -> must fall back to scanning 'endstream'.
 	content := "raw stream bytes here"
 	src := fmt.Sprintf("9 0 obj\n<< /Length 0 >>\nstream\n%s\nendstream\nendobj\n", content)
 	num, gen, obj, _, err := ParseIndirectObjectAt([]byte(src), 0)
@@ -154,12 +155,12 @@ func TestParseIndirectObject_Stream_LengthFallback(t *testing.T) {
 		t.Fatalf("obj = %T, want *Stream", obj)
 	}
 	if string(st.Raw) != content {
-		t.Errorf("raw = %q, want %q (fallback quét endstream)", st.Raw, content)
+		t.Errorf("raw = %q, want %q (endstream-scan fallback)", st.Raw, content)
 	}
 }
 
 func TestParseXref_MissingStartxref(t *testing.T) {
 	if _, err := ParseXref([]byte("%PDF-1.7\nrubbish")); err == nil {
-		t.Error("ParseXref không có startxref phải lỗi")
+		t.Error("ParseXref without startxref must error")
 	}
 }

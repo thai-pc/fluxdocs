@@ -1,93 +1,110 @@
 # AGENTS.md — FluxDocs
 
-> Hướng dẫn vận hành cho AI coding agent (Claude Code, Cursor, Copilot Agent, Aider…) làm việc trong repo FluxDocs.
-> Đọc cùng `.claude/CLAUDE.md` (project rules) và `.claude/SECURITY.md` (ràng buộc bảo mật).
-> Đây là repo greenfield (pre-build): nhiều thư mục còn placeholder `.gitkeep` — bạn sẽ là người tạo file thật.
+> Operating guide for AI coding agents (Claude Code, Cursor, Copilot Agent,
+> Aider…) working in the FluxDocs repo.
+> Read alongside `.claude/CLAUDE.md` (project rules), `.claude/CONVENTIONS.md`
+> (code conventions), and `.claude/SECURITY.md` (security constraints).
+> This is a greenfield repo (pre-build): many directories are still `.gitkeep`
+> placeholders — you will be the one creating real files.
 
 ---
 
-## TL;DR cho agent
+## TL;DR for agents
 
-- **Ngôn ngữ chính:** Go 1.23+. Core phải pure-Go, MIT-safe.
-- **Hai build target:** native + WASM. Đừng làm vỡ build WASM.
-- **Tách license theo tier:** Core (MIT) ⊄ Pro/Cloud. CGO chỉ sau build tag.
-- **Redaction & parser an toàn = ưu tiên tuyệt đối.** Xem SECURITY.md trước khi đụng.
-- **Annotation tách rời PDF gốc** (JSON layer), không bake trừ khi `Flatten*`.
+- **Primary language:** Go 1.23+. The core must be pure-Go, MIT-safe.
+- **Two build targets:** native + WASM. Don't break the WASM build.
+- **Tier-separated license:** Core (MIT) ⊄ Pro/Cloud. CGO only behind a build tag.
+- **Safe redaction & parser = top priority.** Read SECURITY.md before touching.
+- **Annotations are separate** from the original PDF (JSON layer); don't bake
+  them in unless `Flatten*`.
+- **All committed text is English.** Vietnamese only in maintainer chat.
 
-## Cách tổ chức công việc
+## How to organize work
 
-1. **Xác định tier** của thay đổi (Core / Pro / Cloud) → quyết định đặt code ở package nào (xem bảng §2 trong CLAUDE.md).
-2. **Lập kế hoạch nhỏ, commit theo từng package.** Đừng trộn parse + render + cloud trong một thay đổi.
-3. **Viết test cùng lúc với code** (table-driven cho parser, golden-file cho render).
-4. **Chạy gate cục bộ** (xem dưới) trước khi báo hoàn thành.
+1. **Identify the tier** of the change (Core / Pro / Cloud) → decide which
+   package the code goes in (see the table in CLAUDE.md §2).
+2. **Plan small, commit per package.** Don't mix parse + render + cloud in one
+   change.
+3. **Write tests alongside code** (table-driven for parsers, golden-file for
+   rendering).
+4. **Run the local gates** (below) before reporting done.
 
-## Build & test commands (dùng / tạo khi có `go.work`)
+## Build & test commands (use / create once `go.work` exists)
 
 ```bash
-# Build native
+# Native build
 go build ./...
 
-# Build WASM (PHẢI green — đây là khác biệt cốt lõi của sản phẩm)
+# WASM build (MUST stay green — the product's core differentiator)
 GOOS=js GOARCH=wasm go build -o /dev/null ./wasm
 
-# Test toàn bộ (race detector bật cho code concurrency)
+# Full test suite (race detector on for concurrency code)
 go test -race ./...
 
-# Test kèm build tag Pro (CGO)
+# Test with the Pro (CGO) build tag
 go test -tags ocr ./core/ocr/...
 
-# Security gate: redaction leak test — PHẢI pass 100% mới được merge
+# Security gate: redaction leak test — MUST pass 100% to merge
 go test ./testing/security/redaction/...
 
 # Lint / vet
 go vet ./...
-gofmt -l .          # không được có output (mọi file đã format)
+gofmt -l .          # must print nothing (everything formatted)
 
 # Benchmark
 go test -bench=. ./testing/benchmark/...
 ```
 
-> JS wrappers: `pnpm install && pnpm -r build && pnpm -r test` trong `packages/`.
+> JS wrappers: `pnpm install && pnpm -r build && pnpm -r test` under `packages/`.
 
-## Definition of Done (checklist agent tự verify trước khi báo xong)
+## Definition of Done (agent self-verifies before reporting done)
 
-- [ ] `go build ./...` xanh
-- [ ] `GOOS=js GOARCH=wasm go build ./wasm` xanh (nếu đụng core/render/annotation)
-- [ ] `go test -race ./...` xanh
-- [ ] `gofmt -l .` không có output; `go vet ./...` sạch
-- [ ] Nếu đụng redaction → `testing/security/redaction/` pass 100%
-- [ ] Không có code Core import package Pro/Cloud hoặc package CGO (trừ sau build tag)
-- [ ] Không thêm network call gửi nội dung PDF ra ngoài ở đường WASM/client
-- [ ] Test mới đi kèm; golden file (nếu đổi render) được regenerate có chủ đích và review
+- [ ] `go build ./...` green
+- [ ] `GOOS=js GOARCH=wasm go build ./wasm` green (if touching core/render/annotation)
+- [ ] `go test -race ./...` green
+- [ ] `gofmt -l .` prints nothing; `go vet ./...` clean
+- [ ] If touching redaction → `testing/security/redaction/` passes 100%
+- [ ] No Core code imports a Pro/Cloud package or a CGO package (except behind a build tag)
+- [ ] No network call sending PDF content out on the WASM/client path
+- [ ] New tests included; goldens (if rendering changed) regenerated deliberately and reviewed
+- [ ] No Vietnamese in committed files
 
-## Ranh giới — agent KHÔNG được tự ý làm
+## Boundaries — what an agent must NOT do on its own
 
-- ❌ Bypass / nới lỏng / skip test redaction để cho "pass".
-- ❌ Thêm dependency CGO vào đường build mặc định (phá vỡ MIT).
-- ❌ Copy code từ Nutrient/Apryse/MuPDF source (clean-room — chỉ tham khảo ISO 32000 công khai).
-- ❌ Đẩy nội dung PDF / PII lên service ngoài trong chế độ client-side privacy.
-- ❌ Commit secret, key thật, hay file PDF chứa dữ liệu nhạy cảm thật vào `testing/corpus/`.
-- ❌ Thêm `import` chéo tier làm Core kéo theo Pro/Cloud.
-- ❌ Tự ý `git push` / publish npm / tạo release khi chưa được yêu cầu rõ.
+- ❌ Bypass / weaken / skip redaction tests to make them "pass".
+- ❌ Add a CGO dependency to the default build path (breaks MIT).
+- ❌ Copy code from Nutrient/Apryse/MuPDF source (clean-room — only the public
+  ISO 32000).
+- ❌ Send PDF content / PII to an external service in client-side privacy mode.
+- ❌ Commit secrets, real keys, or PDFs with real sensitive data into
+  `testing/corpus/`.
+- ❌ Add cross-tier `import`s that drag Pro/Cloud into Core.
+- ❌ `git push` / publish npm / cut a release without being clearly asked.
 
-## Khi nào dừng lại và hỏi người dùng
+## When to stop and ask the maintainer
 
-- Cần đánh đổi license (vd: dùng MuPDF CGO để render đúng hơn) → hỏi trước.
-- Hành vi PDF mơ hồ mà ISO 32000 không quyết được → nêu phương án, hỏi.
-- Thay đổi public API (`core/fluxdocs.go`, type trong `core/types.go`) → xác nhận vì ảnh hưởng consumer.
-- Quyết định schema DB Cloud (`cloud/db/schema.sql`) → ảnh hưởng migration, xác nhận.
+- A change needs a license trade-off (e.g. using MuPDF via CGO for better
+  rendering) → ask first.
+- Ambiguous PDF behavior that ISO 32000 doesn't settle → propose options, ask.
+- Changing the public API (`core/fluxdocs.go`, types in `core/types.go`) →
+  confirm, since it affects consumers.
+- Cloud DB schema decisions (`cloud/db/schema.sql`) → affects migrations, confirm.
 
-## Style nhanh
+## Quick style
 
-- Go: theo `gofmt` + Effective Go. Sentinel error + `errors.Is`. Không `Get` prefix thừa.
-- Comment & docs: brand voice trực tiếp, kỹ thuật, có benchmark cụ thể. Tránh marketing sáo rỗng.
+- Go: follow `gofmt` + Effective Go. Sentinel errors + `errors.Is`. No redundant
+  `Get` prefix. Full conventions: `.claude/CONVENTIONS.md`.
+- Comments & docs: direct, technical, concrete benchmarks. No marketing filler.
 - CSS: BEM, prefix `fd-` / `--fd-*`.
-- Commit message: ngắn, mô tả thay đổi theo package, vd `core/parse: handle compressed xref streams`.
+- Commit messages: short, describe the change per package, e.g.
+  `core/parse: handle compressed xref streams`.
 
-## Tham chiếu
+## References
 
-- Spec đầy đủ: `/Users/thai-pc/Downloads/fluxdocs-spec.md`
+- Full spec: `docs/spec.md`
 - Project rules: `.claude/CLAUDE.md`
+- Code conventions: `.claude/CONVENTIONS.md`
 - Security constraints: `.claude/SECURITY.md`
 - Testing strategy: `testing/README.md`
-- Thuật toán tham chiếu (xref resolution, content stream, redaction, parallel render): §13 + Appendix B của spec.
+- Reference algorithms (xref resolution, content stream, redaction, parallel
+  render): spec §13 + Appendix B.

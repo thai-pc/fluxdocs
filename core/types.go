@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// ID dùng type alias có kiểm soát (tương đương branded type trong TS) để tránh
-// nhầm lẫn giữa các loại ID khi truyền vào hàm — không dùng string trần.
+// IDs use controlled type aliases (the equivalent of branded types in TS) to
+// avoid mixing up ID kinds when passing them to functions — never pass a bare
+// string.
 type (
 	DocumentID   string
 	PageID       string
@@ -14,8 +15,9 @@ type (
 	LayerID      string
 )
 
-// Document là một tài liệu PDF đã mở. Pages được resolve sẵn (flat array) ngay
-// khi OpenDocument để tránh duyệt lại page tree mỗi lần render (xem Appendix B).
+// Document is an opened PDF document. Pages are resolved up front (a flat array)
+// at OpenDocument time to avoid re-walking the page tree on every render (see
+// Appendix B).
 type Document struct {
 	ID        DocumentID
 	Title     string
@@ -26,9 +28,9 @@ type Document struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
-	// Runtime state (unexported) — chỉ tồn tại khi document đang mở, không
-	// thuộc schema serialize ở Appendix A. Document vừa là DTO vừa là handle
-	// sống mà OpenDocument trả về.
+	// Runtime state (unexported) — exists only while the document is open and
+	// is not part of the serialized schema in Appendix A. A Document is both a
+	// DTO and the live handle returned by OpenDocument.
 	mu                 sync.Mutex
 	closed             bool
 	onAnnotationChange func(a Annotation)
@@ -44,8 +46,8 @@ type DocumentMetadata struct {
 	Custom   map[string]string
 }
 
-// Page mô tả kích thước hình học của một trang. Đơn vị là point (1/72 inch),
-// theo hệ tọa độ PDF.
+// Page describes the geometry of a single page. Units are points (1/72 inch),
+// in PDF coordinate space.
 type Page struct {
 	ID       PageID
 	Index    int     // 0-based
@@ -66,24 +68,25 @@ const (
 	AnnotationSignature AnnotationType = "signature"
 )
 
-// Annotation lưu độc lập với PDF gốc và chỉ áp lên khi render hoặc khi flatten.
-// Cho phép multi-user annotate không sửa file gốc, dễ undo và đồng bộ.
+// Annotation is stored independently of the original PDF and is applied only
+// when rendering or flattening. This lets multiple users annotate without
+// modifying the source file, and makes undo and syncing easy.
 type Annotation struct {
 	ID        AnnotationID
 	PageID    PageID
 	Type      AnnotationType
 	Rect      Rect
-	Color     string  // hex, ví dụ "#f59e0b"
+	Color     string  // hex, e.g. "#f59e0b"
 	Opacity   float64 // 0..1
-	Content   string  // text nếu là note/stamp
-	Points    []Point // dùng cho draw (freehand)
+	Content   string  // text for note/stamp
+	Points    []Point // used for draw (freehand)
 	AuthorID  string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Meta      map[string]any
 }
 
-// Rect theo hệ tọa độ PDF (gốc ở góc dưới-trái, đơn vị point).
+// Rect is in PDF coordinate space (origin at bottom-left, units in points).
 type Rect struct {
 	X, Y, Width, Height float64
 }
@@ -106,39 +109,39 @@ type FormField struct {
 	Name     string
 	Type     FormFieldType
 	Value    string
-	Options  []string // cho dropdown/radio
+	Options  []string // for dropdown/radio
 	Required bool
 	ReadOnly bool
 }
 
-// RenderOptions điều khiển một lần render trang.
+// RenderOptions controls a single page render.
 type RenderOptions struct {
-	DPI       int    // mặc định 150
+	DPI       int    // default 150
 	Format    string // "png" | "jpeg" | "svg"
-	PageRange []int  // rỗng = toàn bộ
-	Quality   int    // 1-100, áp dụng cho jpeg
+	PageRange []int  // empty = all pages
+	Quality   int    // 1-100, applies to jpeg
 }
 
-// ExtractOptions điều khiển việc trích xuất text/table.
+// ExtractOptions controls text/table extraction.
 type ExtractOptions struct {
 	PreserveLayout bool
 	IncludeTables  bool
-	OCRFallback    bool // nếu trang là ảnh scan, fallback sang OCR (Pro)
+	OCRFallback    bool // if the page is a scanned image, fall back to OCR (Pro)
 }
 
-// AnnotationLayer là tập annotation lưu tách biệt với PDF gốc (§6.2), có thể
-// export/import độc lập để multi-user review.
+// AnnotationLayer is a set of annotations stored separately from the original
+// PDF (§6.2); it can be exported/imported independently for multi-user review.
 type AnnotationLayer struct {
 	ID          LayerID
 	DocumentID  DocumentID
-	Name        string // ví dụ "Bản review của Long"
+	Name        string // e.g. "Long's review"
 	Annotations []Annotation
 	Visible     bool
 	CreatedAt   time.Time
 }
 
-// ViewerConfig cấu hình viewer ở client wrapper (§6.3). Các callback dùng cho
-// binding sự kiện vì Go core không có event loop native.
+// ViewerConfig configures the viewer in a client wrapper (§6.3). The callbacks
+// are used for event binding because the Go core has no native event loop.
 type ViewerConfig struct {
 	Theme            string // "light" | "dark" | "auto"
 	InitialZoom      float64
@@ -152,10 +155,11 @@ type ViewerConfig struct {
 	OnFormFieldChange  func(field FormField)
 }
 
-// --- Supporting types được public API §7 tham chiếu (chưa định nghĩa ở §6) ---
+// --- Supporting types referenced by the public API in §7 (not defined in §6) ---
 
-// AnnotationPatch mô tả cập nhật một phần một Annotation. Field nil = giữ
-// nguyên, tránh ghi đè ngoài ý muốn khi chỉ đổi một thuộc tính.
+// AnnotationPatch describes a partial update to an Annotation. A nil field
+// means "leave unchanged", avoiding accidental overwrites when changing a
+// single attribute.
 type AnnotationPatch struct {
 	Rect    *Rect
 	Color   *string
@@ -165,19 +169,19 @@ type AnnotationPatch struct {
 	Meta    map[string]any
 }
 
-// Table là kết quả ExtractTables: lưới ô đã detect trên một trang.
+// Table is the result of ExtractTables: a grid of cells detected on a page.
 type Table struct {
 	PageIndex int
-	Rows      [][]string // [hàng][cột]
+	Rows      [][]string // [row][column]
 	Bounds    Rect
 }
 
-// SignatureOptions cấu hình SignDocument (Pro, PKCS#7).
+// SignatureOptions configures SignDocument (Pro, PKCS#7).
 type SignatureOptions struct {
 	Reason      string
 	Location    string
 	ContactInfo string
-	CertPEM     []byte // certificate dạng PEM
-	KeyPEM      []byte // private key dạng PEM — không nhúng vào client/WASM bundle
-	FieldName   string // form field chữ ký để gắn, rỗng = tạo invisible signature
+	CertPEM     []byte // certificate in PEM form
+	KeyPEM      []byte // private key in PEM form — never embed in a client/WASM bundle
+	FieldName   string // signature form field to attach to; empty = invisible signature
 }

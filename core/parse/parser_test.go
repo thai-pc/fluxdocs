@@ -55,7 +55,7 @@ func TestParseScalarsAndComposites(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseObject([]byte(tt.in))
 			if err != nil {
-				t.Fatalf("ParseObject(%q) lỗi: %v", tt.in, err)
+				t.Fatalf("ParseObject(%q) error: %v", tt.in, err)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ParseObject(%q) = %#v, want %#v", tt.in, got, tt.want)
@@ -87,7 +87,7 @@ func TestParseStrings(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseObject([]byte(tt.in))
 			if err != nil {
-				t.Fatalf("ParseObject(%q) lỗi: %v", tt.in, err)
+				t.Fatalf("ParseObject(%q) error: %v", tt.in, err)
 			}
 			s, ok := got.(String)
 			if !ok {
@@ -121,7 +121,7 @@ func TestParseErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := ParseObject([]byte(tt.in)); err == nil {
-				t.Errorf("ParseObject(%q) = nil error, want lỗi", tt.in)
+				t.Errorf("ParseObject(%q) = nil error, want an error", tt.in)
 			}
 		})
 	}
@@ -155,9 +155,9 @@ func TestDictAccessors(t *testing.T) {
 		t.Error("GetDict(Resources) ok=false, want true")
 	}
 	if _, ok := d.GetInt("Type"); ok {
-		t.Error("GetInt(Type) ok=true dù Type là Name, want false")
+		t.Error("GetInt(Type) ok=true though Type is a Name, want false")
 	}
 	if _, ok := d.GetName("Missing"); ok {
-		t.Error("GetName(Missing) ok=true dù không có key, want false")
+		t.Error("GetName(Missing) ok=true though the key is absent, want false")
 	}
 }

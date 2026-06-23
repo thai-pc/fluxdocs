@@ -1,59 +1,62 @@
-// Package parse hiện thực lớp parse PDF theo ISO 32000-1:2008: object model,
-// lexer, xref, page tree, content stream. Clean-room — chỉ dựa trên spec công
-// khai (xem .claude/SECURITY.md §6).
+// Package parse implements the PDF parsing layer per ISO 32000-1:2008: object
+// model, lexer, xref, page tree, and content streams. It is a clean-room
+// implementation based solely on the public specification (see
+// .claude/SECURITY.md §6).
 //
-// File này định nghĩa object model: 8 loại object cơ bản của PDF (§7.3 spec
-// ISO) cộng Reference (indirect object) và Stream.
+// This file defines the object model: the eight basic PDF object types
+// (ISO §7.3) plus Reference (indirect object) and Stream.
 package parse
 
 import "fmt"
 
-// Object là một giá trị trong object model của PDF. Tập kín: Null, Boolean,
+// Object is a value in the PDF object model. The set is closed: Null, Boolean,
 // Integer, Real, String, Name, Array, Dict, Reference, Stream.
 type Object interface {
-	// String trả biểu diễn debug, không phải serialize PDF.
+	// String returns a debug representation, not a PDF serialization.
 	String() string
 
 	isObject()
 }
 
-// Null là đối tượng null của PDF (từ khóa `null`).
+// Null is the PDF null object (the `null` keyword).
 type Null struct{}
 
-// Boolean là `true` / `false`.
+// Boolean is `true` / `false`.
 type Boolean bool
 
-// Integer là số nguyên PDF (lưu int64 để chứa offset lớn).
+// Integer is a PDF integer, stored as int64 to hold large byte offsets.
 type Integer int64
 
-// Real là số thực PDF.
+// Real is a PDF real number.
 type Real float64
 
-// String là chuỗi PDF đã decode về byte thô. Hex ghi lại cú pháp gốc
-// (literal `(...)` hay hex `<...>`) để re-encode trung thực khi cần.
+// String is a PDF string decoded to raw bytes. Hex records the original syntax
+// (literal `(...)` vs hex `<...>`) so it can be re-encoded faithfully.
 type String struct {
 	Value []byte
 	Hex   bool
 }
 
-// Name là tên PDF, lưu KHÔNG kèm dấu `/` mở đầu và đã decode chuỗi thoát `#xx`.
+// Name is a PDF name, stored WITHOUT the leading '/' and with `#xx` escapes
+// decoded.
 type Name string
 
-// Array là mảng PDF; phần tử có thể là bất kỳ Object nào, kể cả Reference.
+// Array is a PDF array; elements may be any Object, including a Reference.
 type Array []Object
 
-// Dict là từ điển PDF. Khóa luôn là Name (theo spec). Dùng cho cả dictionary
-// thường lẫn phần dictionary của một Stream.
+// Dict is a PDF dictionary. Keys are always Name (per spec). Used for both
+// plain dictionaries and the dictionary part of a Stream.
 type Dict map[Name]Object
 
-// Reference là tham chiếu gián tiếp `n g R` tới một indirect object.
+// Reference is an indirect reference `n g R` to an indirect object.
 type Reference struct {
 	Number     int
 	Generation int
 }
 
-// Stream là một dictionary kèm dữ liệu thô (chưa giải nén theo /Filter). Việc
-// decode (Flate/LZW/…) thuộc về bước render/extract, không phải lexer.
+// Stream is a dictionary paired with its raw bytes (not yet decoded per
+// /Filter). Decoding (Flate/LZW/…) belongs to the render/extract layers, not
+// the lexer.
 type Stream struct {
 	Dict Dict
 	Raw  []byte
@@ -102,33 +105,34 @@ func (s *Stream) String() string {
 	return fmt.Sprintf("%s stream(%d bytes)", s.Dict.String(), len(s.Raw))
 }
 
-// --- Helper truy cập có kiểm tra kiểu, tránh type-assert lặp ở caller ---
+// --- Type-checked accessors, to avoid repeated type assertions at call sites ---
 
-// GetName trả giá trị Name tại key, ok=false nếu thiếu hoặc sai kiểu.
+// GetName returns the Name value at key; ok is false if the key is missing or
+// has a different type.
 func (d Dict) GetName(key Name) (Name, bool) {
 	n, ok := d[key].(Name)
 	return n, ok
 }
 
-// GetInt trả giá trị Integer tại key.
+// GetInt returns the Integer value at key.
 func (d Dict) GetInt(key Name) (Integer, bool) {
 	i, ok := d[key].(Integer)
 	return i, ok
 }
 
-// GetDict trả Dict con tại key.
+// GetDict returns the nested Dict at key.
 func (d Dict) GetDict(key Name) (Dict, bool) {
 	sub, ok := d[key].(Dict)
 	return sub, ok
 }
 
-// GetArray trả Array tại key.
+// GetArray returns the Array at key.
 func (d Dict) GetArray(key Name) (Array, bool) {
 	a, ok := d[key].(Array)
 	return a, ok
 }
 
-// GetReference trả Reference tại key.
+// GetReference returns the Reference at key.
 func (d Dict) GetReference(key Name) (Reference, bool) {
 	r, ok := d[key].(Reference)
 	return r, ok

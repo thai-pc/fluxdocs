@@ -1,51 +1,55 @@
 # Testing — FluxDocs
 
-Chiến lược test cho core Go + WASM. Xem ràng buộc bảo mật ở `.claude/SECURITY.md`.
+Test strategy for the Go core + WASM. See security constraints in
+`.claude/SECURITY.md`.
 
-## Cấu trúc
+## Layout
 
 ```
 testing/
-├── corpus/              # PDF thật để test parser/render (KHÔNG chứa PII thật)
-│   ├── clean/           # PDF đúng spec (Word, LaTeX, Chrome print, Adobe)
-│   ├── malformed/       # PDF vi phạm spec / corrupt — phải lenient-parse được
-│   ├── encrypted/       # PDF mã hóa — test ErrEncryptedDocument
+├── corpus/              # real PDFs for parser/render tests (NO real PII)
+│   ├── clean/           # spec-compliant PDFs (Word, LaTeX, Chrome print, Adobe)
+│   ├── malformed/       # spec-violating / corrupt PDFs — must parse leniently
+│   ├── encrypted/       # encrypted PDFs — test ErrEncryptedDocument
 │   ├── forms/           # AcroForm/XFA — test parse + fill (Pro)
-│   └── scanned/         # ảnh scan — test OCR fallback (Pro)
-├── golden/              # render reference dùng chung (PNG)
+│   └── scanned/         # scanned images — test OCR fallback (Pro)
+├── golden/              # shared render references (PNG)
 ├── security/
-│   ├── redaction/       # GATE: extract-after-redact phải rỗng. Pass 100% mới merge.
-│   ├── fuzz/            # seed corpus cho go test -fuzz (parser/tokenizer)
-│   └── encryption/      # test crypto / signature / share-link
-├── e2e/                 # end-to-end qua client wrapper (React/Vue + WASM)
+│   ├── redaction/       # GATE: extract-after-redact must be empty. 100% to merge.
+│   ├── fuzz/            # seed corpus for go test -fuzz (parser/tokenizer)
+│   └── encryption/      # crypto / signature / share-link tests
+├── e2e/                 # end-to-end via client wrappers (React/Vue + WASM)
 ├── benchmark/           # benchmark suite (ms/page, MB/s, bundle size)
-└── fixtures/            # JSON annotation layer, processing job mẫu
+└── fixtures/            # sample annotation layers, processing jobs (JSON)
 ```
 
-Mỗi package Go cũng có `testdata/` riêng (vd `core/render/testdata/golden/`).
+Each Go package also has its own `testdata/` (e.g.
+`core/render/testdata/golden/`).
 
-## Loại test
+## Test kinds
 
-| Loại | Phạm vi | Cách làm |
+| Kind | Scope | How |
 |---|---|---|
-| **Table-driven** | parser, tokenizer, type | input/expected dạng bảng, `go test` |
-| **Golden-file** | render raster/svg | so output PNG với reference; regenerate có chủ đích |
-| **Fuzz** | parse/xref/content stream | `go test -fuzz`, seed trong `security/fuzz/` |
+| **Table-driven** | parser, tokenizer, types | input/expected as a table, `go test` |
+| **Golden-file** | raster/svg render | compare PNG output against a reference; regenerate deliberately |
+| **Fuzz** | parse/xref/content stream | `go test -fuzz`, seeds in `security/fuzz/` |
 | **Security gate** | redaction, isolation | extract-after-redact, cross-org access |
-| **Race** | goroutine pool render | `go test -race` |
-| **Benchmark** | hiệu năng | `go test -bench`, publish so với pdf.js/MuPDF |
-| **E2E** | wrapper + WASM | chạy viewer thật trong browser headless |
+| **Race** | render goroutine pool | `go test -race` |
+| **Benchmark** | performance | `go test -bench`, publish vs pdf.js/MuPDF |
+| **E2E** | wrapper + WASM | run the real viewer in a headless browser |
 
-## Gate trước khi merge (CI GitHub Actions)
+## Pre-merge gate (CI GitHub Actions)
 
-1. `go build ./...` + `GOOS=js GOARCH=wasm go build ./wasm` — cả hai xanh.
-2. `go test -race ./...` xanh.
-3. `gofmt -l .` rỗng, `go vet ./...` sạch.
-4. `go test ./testing/security/redaction/...` **pass 100%** (chặn cứng).
-5. Golden diff (nếu có) được review thủ công.
+1. `go build ./...` + `GOOS=js GOARCH=wasm go build ./wasm` — both green.
+2. `go test -race ./...` green.
+3. `gofmt -l .` empty, `go vet ./...` clean.
+4. `go test ./testing/security/redaction/...` **passes 100%** (hard block).
+5. Golden diffs (if any) reviewed by hand.
 
-## Nguyên tắc corpus
+## Corpus principles
 
-- Coverage tăng dần: Wave 1 ưu tiên 90% PDF thực tế (Word/LaTeX/Chrome/Adobe).
-- File `malformed/` quan trọng — đa số PDF ngoài đời vi phạm spec; parser phải lenient + fallback brute-force.
-- KHÔNG commit tài liệu chứa PII thật. Dùng synthetic / đã ẩn danh.
+- Coverage grows incrementally: Wave 1 prioritizes the common ~90% of real PDFs
+  (Word/LaTeX/Chrome/Adobe).
+- The `malformed/` files matter — most real-world PDFs violate the spec; the
+  parser must be lenient + fall back to a brute-force scan.
+- Do NOT commit documents containing real PII. Use synthetic / anonymized data.

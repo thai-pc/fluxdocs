@@ -5,38 +5,44 @@ import (
 	"fmt"
 )
 
-// XrefEntry là một mục trong cross-reference table.
+// XrefEntry is one entry in the cross-reference table.
 type XrefEntry struct {
-	Offset int64 // offset byte tới indirect object (type 'n')
+	Offset int64 // byte offset to the indirect object (type 'n')
 	Gen    int
-	Free   bool // type 'f' — object đã bị xóa
+	Free   bool // type 'f' — the object has been deleted
 }
 
-// Xref là cross-reference table đã merge theo chuỗi /Prev (bản mới nhất thắng),
-// kèm trailer dictionary mới nhất.
+// Xref is the cross-reference table merged along the /Prev chain (newest entry
+// wins), together with the most recent trailer dictionary.
 type Xref struct {
 	Entries map[int]XrefEntry
 	Trailer Dict
 }
 
-const maxXrefChain = 64 // chặn vòng lặp /Prev độc hại (SECURITY.md §2)
+const maxXrefChain = 64 // bound a malicious /Prev loop (SECURITY.md §2)
 
-// FindStartXref đọc ngược từ cuối file tìm "startxref" và trả offset của xref
-// section mới nhất.
+// FindStartXref scans backward from the end of the file for "startxref" and
+// returns the byte offset of the most recent xref section.
+//
+// Returns a wrapped errLex if "startxref" or its offset is absent.
 func FindStartXref(data []byte) (int, error) {
 	idx := bytes.LastIndex(data, []byte("startxref"))
 	if idx < 0 {
-		return 0, fmt.Errorf("%w: thiếu 'startxref'", errLex)
+		return 0, fmt.Errorf("%w: missing 'startxref'", errLex)
 	}
 	t, _, err := nextToken(data, idx+len("startxref"))
 	if err != nil || t.kind != tokInt {
-		return 0, fmt.Errorf("%w: 'startxref' không theo sau bởi offset", errLex)
+		return 0, fmt.Errorf("%w: 'startxref' not followed by an offset", errLex)
 	}
 	return int(t.int), nil
 }
 
-// ParseXref dựng cross-reference table đầy đủ: bắt đầu từ startxref rồi đi theo
-// /Prev. Chỉ hỗ trợ xref table cổ điển; xref stream (PDF 1.5+) là việc về sau.
+// ParseXref builds the full cross-reference table: it starts at startxref and
+// follows the /Prev chain. Only the classic xref table is supported; xref
+// streams (PDF 1.5+) are future work.
+//
+// Returns the merged Xref, or a wrapped errLex on malformed input or a /Prev
+// chain longer than maxXrefChain.
 func ParseXref(data []byte) (*Xref, error) {
 	start, err := FindStartXref(data)
 	if err != nil {
@@ -50,7 +56,7 @@ func ParseXref(data []byte) (*Xref, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Bản mới nhất thắng: chỉ thêm entry chưa có.
+		// Newest wins: only add entries not already present.
 		for num, e := range entries {
 			if _, exists := x.Entries[num]; !exists {
 				x.Entries[num] = e
@@ -64,23 +70,25 @@ func ParseXref(data []byte) (*Xref, error) {
 		}
 		off = prev
 	}
-	return nil, fmt.Errorf("%w: chuỗi /Prev quá dài (nghi vòng lặp)", errLex)
+	return nil, fmt.Errorf("%w: /Prev chain too long (suspected loop)", errLex)
 }
 
-// parseXrefSection parse một "xref ... trailer << >>" tại offset off. Trả entry,
-// trailer, và offset /Prev (-1 nếu không có).
+// parseXrefSection parses one "xref ... trailer << >>" at offset off.
+//
+// Returns the section's entries, its trailer dictionary, and the /Prev offset
+// (-1 if absent), or a wrapped errLex on malformed input.
 func parseXrefSection(data []byte, off int) (map[int]XrefEntry, Dict, int, error) {
 	t, pos, err := nextToken(data, off)
 	if err != nil {
 		return nil, nil, -1, err
 	}
 	if t.kind != tokKeyword || t.kw != "xref" {
-		return nil, nil, -1, fmt.Errorf("%w: xref stream chưa hỗ trợ (offset %d không phải 'xref')", errLex, off)
+		return nil, nil, -1, fmt.Errorf("%w: xref streams unsupported (offset %d is not 'xref')", errLex, off)
 	}
 
 	entries := make(map[int]XrefEntry)
 	for {
-		// Header subsection "start count", hoặc 'trailer' để kết thúc.
+		// Subsection header "start count", or 'trailer' to finish.
 		ht, hp, err := nextToken(data, pos)
 		if err != nil {
 			return nil, nil, -1, err
@@ -90,11 +98,11 @@ func parseXrefSection(data []byte, off int) (map[int]XrefEntry, Dict, int, error
 			break
 		}
 		if ht.kind != tokInt {
-			return nil, nil, -1, fmt.Errorf("%w: xref subsection header không hợp lệ", errLex)
+			return nil, nil, -1, fmt.Errorf("%w: invalid xref subsection header", errLex)
 		}
 		ct, cp, err := nextToken(data, hp)
 		if err != nil || ct.kind != tokInt {
-			return nil, nil, -1, fmt.Errorf("%w: xref subsection thiếu count", errLex)
+			return nil, nil, -1, fmt.Errorf("%w: xref subsection missing count", errLex)
 		}
 		startNum, count := int(ht.int), int(ct.int)
 		pos = cp
@@ -102,15 +110,15 @@ func parseXrefSection(data []byte, off int) (map[int]XrefEntry, Dict, int, error
 		for k := 0; k < count; k++ {
 			offTok, p1, err := nextToken(data, pos)
 			if err != nil || offTok.kind != tokInt {
-				return nil, nil, -1, fmt.Errorf("%w: xref entry thiếu offset", errLex)
+				return nil, nil, -1, fmt.Errorf("%w: xref entry missing offset", errLex)
 			}
 			genTok, p2, err := nextToken(data, p1)
 			if err != nil || genTok.kind != tokInt {
-				return nil, nil, -1, fmt.Errorf("%w: xref entry thiếu generation", errLex)
+				return nil, nil, -1, fmt.Errorf("%w: xref entry missing generation", errLex)
 			}
 			typeTok, p3, err := nextToken(data, p2)
 			if err != nil || typeTok.kind != tokKeyword || (typeTok.kw != "n" && typeTok.kw != "f") {
-				return nil, nil, -1, fmt.Errorf("%w: xref entry thiếu loại n/f", errLex)
+				return nil, nil, -1, fmt.Errorf("%w: xref entry missing n/f type", errLex)
 			}
 			num := startNum + k
 			if _, exists := entries[num]; !exists {
@@ -124,15 +132,15 @@ func parseXrefSection(data []byte, off int) (map[int]XrefEntry, Dict, int, error
 		}
 	}
 
-	// trailer dictionary.
+	// Trailer dictionary.
 	p := &iparser{data: data, pos: pos}
 	tobj, err := p.parseValue()
 	if err != nil {
-		return nil, nil, -1, fmt.Errorf("%w: trailer không parse được: %v", errLex, err)
+		return nil, nil, -1, fmt.Errorf("%w: trailer failed to parse: %v", errLex, err)
 	}
 	trailer, ok := tobj.(Dict)
 	if !ok {
-		return nil, nil, -1, fmt.Errorf("%w: trailer không phải dictionary", errLex)
+		return nil, nil, -1, fmt.Errorf("%w: trailer is not a dictionary", errLex)
 	}
 
 	prev := -1

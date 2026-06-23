@@ -5,16 +5,20 @@ import (
 	"fmt"
 )
 
-// iparser là parser tăng dần theo offset trên []byte gốc, dùng nextToken. Khác
-// với parser (dựa trên slice token đã tokenize sẵn), iparser đọc được file có
-// stream nhị phân vì nó dừng đúng tại từ khóa `stream` rồi cắt byte thô.
+// iparser is an offset-incremental parser over the original []byte, driven by
+// nextToken. Unlike a slice-of-tokens parser, iparser can read files that
+// contain binary streams because it stops exactly at the `stream` keyword and
+// then slices the raw bytes itself.
 type iparser struct {
 	data []byte
 	pos  int
 }
 
-// tryReference khớp mẫu "int int R" tại vị trí hiện tại. Chỉ commit (dời pos)
-// khi khớp đủ; nếu không, pos giữ nguyên để parseValue đọc lại như số thường.
+// tryReference matches the pattern "int int R" at the current position. It
+// commits (advances pos) only on a full match; otherwise pos is left unchanged
+// so parseValue can re-read the leading integer as a plain number.
+//
+// Returns the Reference and true on match, or the zero Reference and false.
 func (p *iparser) tryReference() (Reference, bool) {
 	t0, n0, err := nextToken(p.data, p.pos)
 	if err != nil || t0.kind != tokInt {
@@ -32,6 +36,8 @@ func (p *iparser) tryReference() (Reference, bool) {
 	return Reference{Number: int(t0.int), Generation: int(t1.int)}, true
 }
 
+// parseValue reads one object at the current position, advancing pos past it.
+// Returns the Object, or a wrapped errLex on syntax error.
 func (p *iparser) parseValue() (Object, error) {
 	if ref, ok := p.tryReference(); ok {
 		return ref, nil
@@ -65,15 +71,17 @@ func (p *iparser) parseValue() (Object, error) {
 		case "null":
 			return Null{}, nil
 		default:
-			return nil, fmt.Errorf("%w: từ khóa không mong đợi %q", errLex, t.kw)
+			return nil, fmt.Errorf("%w: unexpected keyword %q", errLex, t.kw)
 		}
 	case tokEOF:
-		return nil, fmt.Errorf("%w: hết input khi đang chờ object", errLex)
+		return nil, fmt.Errorf("%w: end of input while expecting an object", errLex)
 	default:
-		return nil, fmt.Errorf("%w: token không mong đợi", errLex)
+		return nil, fmt.Errorf("%w: unexpected token", errLex)
 	}
 }
 
+// parseArray parses elements until ']'. Assumes the opening '[' was already
+// consumed.
 func (p *iparser) parseArray() (Object, error) {
 	arr := Array{}
 	for {
@@ -86,7 +94,7 @@ func (p *iparser) parseArray() (Object, error) {
 			p.pos = ni
 			return arr, nil
 		case tokEOF:
-			return nil, fmt.Errorf("%w: mảng không đóng ']'", errLex)
+			return nil, fmt.Errorf("%w: unterminated array (missing ']')", errLex)
 		default:
 			obj, err := p.parseValue()
 			if err != nil {
@@ -97,8 +105,9 @@ func (p *iparser) parseArray() (Object, error) {
 	}
 }
 
-// parseDictOrStream parse dictionary; nếu sau '>>' là từ khóa `stream` thì đọc
-// tiếp dữ liệu thô và trả *Stream.
+// parseDictOrStream parses a dictionary; if a `stream` keyword follows the
+// closing '>>', it reads the raw stream data and returns a *Stream. Assumes the
+// opening '<<' was already consumed.
 func (p *iparser) parseDictOrStream() (Object, error) {
 	d := Dict{}
 	for {
@@ -118,30 +127,32 @@ func (p *iparser) parseDictOrStream() (Object, error) {
 			}
 			d[Name(t.name)] = val
 		case tokEOF:
-			return nil, fmt.Errorf("%w: dictionary không đóng '>>'", errLex)
+			return nil, fmt.Errorf("%w: unterminated dictionary (missing '>>')", errLex)
 		default:
-			return nil, fmt.Errorf("%w: khóa dictionary phải là Name", errLex)
+			return nil, fmt.Errorf("%w: dictionary key must be a Name", errLex)
 		}
 	}
 }
 
-// maybeStream kiểm tra từ khóa `stream` ngay sau dictionary. Dữ liệu thô được
-// cắt theo /Length nếu là Integer trực tiếp và nhất quán; ngược lại fallback
-// quét tới `endstream` (lenient, an toàn với /Length là indirect reference).
+// maybeStream checks for a `stream` keyword right after a dictionary. If absent,
+// it returns the dictionary unchanged. If present, raw bytes are sliced by
+// /Length when it is a consistent direct Integer; otherwise it falls back to
+// scanning for `endstream` (lenient, and safe when /Length is an indirect
+// reference).
 func (p *iparser) maybeStream(d Dict) (Object, error) {
 	t, ni, err := nextToken(p.data, p.pos)
 	if err != nil || t.kind != tokKeyword || t.kw != "stream" {
-		return d, nil // dictionary thường
+		return d, nil // plain dictionary
 	}
 
-	// Sau 'stream' bắt buộc là CRLF hoặc LF (§7.3.8.1); bỏ qua một EOL.
+	// `stream` must be followed by CRLF or LF (§7.3.8.1); skip one EOL.
 	start := skipStreamEOL(p.data, ni)
 
 	end := -1
 	if length, ok := d.GetInt("Length"); ok && int(length) >= 0 {
 		cand := start + int(length)
 		if cand <= len(p.data) {
-			// Xác thực: sau Length byte (bỏ EOL) phải là 'endstream'.
+			// Validate: after Length bytes (skipping EOL) must come 'endstream'.
 			probe := skipStreamEOL(p.data, cand)
 			if bytes.HasPrefix(p.data[probe:], []byte("endstream")) {
 				end = cand
@@ -150,14 +161,14 @@ func (p *iparser) maybeStream(d Dict) (Object, error) {
 		}
 	}
 
-	if end == -1 { // fallback: quét 'endstream'
+	if end == -1 { // fallback: scan for 'endstream'
 		idx := bytes.Index(p.data[start:], []byte("endstream"))
 		if idx < 0 {
-			return nil, fmt.Errorf("%w: stream không có 'endstream'", errLex)
+			return nil, fmt.Errorf("%w: stream has no 'endstream'", errLex)
 		}
 		end = start + idx
 		p.pos = end + len("endstream")
-		end = trimTrailingEOL(p.data, start, end) // bỏ EOL ngay trước endstream
+		end = trimTrailingEOL(p.data, start, end) // drop the EOL just before endstream
 	}
 
 	raw := make([]byte, end-start)
@@ -165,6 +176,7 @@ func (p *iparser) maybeStream(d Dict) (Object, error) {
 	return &Stream{Dict: d, Raw: raw}, nil
 }
 
+// skipStreamEOL advances past a single EOL (\r\n, \n, or \r) if present.
 func skipStreamEOL(data []byte, i int) int {
 	if i < len(data) && data[i] == '\r' {
 		i++
@@ -177,8 +189,8 @@ func skipStreamEOL(data []byte, i int) int {
 	return i
 }
 
-// trimTrailingEOL lùi end qua đúng một EOL (\r\n, \n hoặc \r) nếu có, nhưng
-// không lùi quá start.
+// trimTrailingEOL moves end back over exactly one EOL (\r\n, \n, or \r) if
+// present, but never past start.
 func trimTrailingEOL(data []byte, start, end int) int {
 	if end > start && data[end-1] == '\n' {
 		end--
@@ -191,23 +203,26 @@ func trimTrailingEOL(data []byte, start, end int) int {
 	return end
 }
 
-// ParseIndirectObjectAt parse "num gen obj <object> endobj" bắt đầu tại offset
-// off trong data. Trả số hiệu, generation, object và offset ngay sau 'endobj'
-// (hoặc sau object nếu thiếu 'endobj' — lenient).
+// ParseIndirectObjectAt parses "num gen obj <object> endobj" starting at offset
+// off in data.
+//
+// Returns the object number, generation, the parsed Object, and the offset just
+// past 'endobj' (or just past the object if 'endobj' is missing — lenient). On
+// failure it returns a wrapped errLex and next == off.
 func ParseIndirectObjectAt(data []byte, off int) (num, gen int, obj Object, next int, err error) {
 	p := &iparser{data: data, pos: off}
 
 	t0, n0, e := nextToken(data, p.pos)
 	if e != nil || t0.kind != tokInt {
-		return 0, 0, nil, off, fmt.Errorf("%w: thiếu số hiệu object tại offset %d", errLex, off)
+		return 0, 0, nil, off, fmt.Errorf("%w: missing object number at offset %d", errLex, off)
 	}
 	t1, n1, e := nextToken(data, n0)
 	if e != nil || t1.kind != tokInt {
-		return 0, 0, nil, off, fmt.Errorf("%w: thiếu generation tại offset %d", errLex, off)
+		return 0, 0, nil, off, fmt.Errorf("%w: missing generation at offset %d", errLex, off)
 	}
 	t2, n2, e := nextToken(data, n1)
 	if e != nil || t2.kind != tokKeyword || t2.kw != "obj" {
-		return 0, 0, nil, off, fmt.Errorf("%w: thiếu từ khóa 'obj' tại offset %d", errLex, off)
+		return 0, 0, nil, off, fmt.Errorf("%w: missing 'obj' keyword at offset %d", errLex, off)
 	}
 
 	p.pos = n2
@@ -216,7 +231,7 @@ func ParseIndirectObjectAt(data []byte, off int) (num, gen int, obj Object, next
 		return 0, 0, nil, off, err
 	}
 
-	// 'endobj' tùy chọn (lenient): bỏ qua nếu có.
+	// 'endobj' is optional (lenient): consume it if present.
 	if et, en, ee := nextToken(data, p.pos); ee == nil && et.kind == tokKeyword && et.kw == "endobj" {
 		p.pos = en
 	}

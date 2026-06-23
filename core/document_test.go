@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// newTestDoc dựng Document đã resolve sẵn n trang, dùng cho test các method
-// thao tác theo index mà không cần parser thật.
+// newTestDoc builds a Document with n pre-resolved pages, for testing
+// index-based methods without a real parser.
 func newTestDoc(n int) *Document {
 	pages := make([]Page, n)
 	for i := range pages {
@@ -52,17 +52,17 @@ func TestGetPage(t *testing.T) {
 			}
 			if tt.wantErr == nil {
 				if p == nil {
-					t.Fatalf("GetPage(%d) trả page nil dù không có lỗi", tt.index)
+					t.Fatalf("GetPage(%d) returned a nil page with no error", tt.index)
 				}
 				if p.Index != tt.index {
 					t.Errorf("page.Index = %d, want %d", p.Index, tt.index)
 				}
-				// Phải là con trỏ tới phần tử thật trong Pages, không phải bản sao.
+				// Must be a pointer to the actual element in Pages, not a copy.
 				if p != &doc.Pages[tt.index] {
-					t.Errorf("GetPage(%d) không trả con trỏ tới Pages[%d]", tt.index, tt.index)
+					t.Errorf("GetPage(%d) did not return a pointer to Pages[%d]", tt.index, tt.index)
 				}
 			} else if p != nil {
-				t.Errorf("GetPage(%d) trả page non-nil kèm lỗi: %+v", tt.index, p)
+				t.Errorf("GetPage(%d) returned a non-nil page alongside an error: %+v", tt.index, p)
 			}
 		})
 	}
@@ -72,19 +72,19 @@ func TestClose_Idempotent(t *testing.T) {
 	doc := newTestDoc(1)
 
 	if err := doc.Close(); err != nil {
-		t.Fatalf("Close() lần 1 = %v, want nil", err)
+		t.Fatalf("Close() call 1 = %v, want nil", err)
 	}
 	if !doc.closed {
-		t.Error("sau Close(), doc.closed = false, want true")
+		t.Error("after Close(), doc.closed = false, want true")
 	}
-	// Gọi lại phải an toàn, không panic, vẫn nil.
+	// Calling again must be safe: no panic, still nil.
 	if err := doc.Close(); err != nil {
-		t.Fatalf("Close() lần 2 = %v, want nil", err)
+		t.Fatalf("Close() call 2 = %v, want nil", err)
 	}
 }
 
 func TestRenderAllPages(t *testing.T) {
-	t.Run("zero pages trả slice rỗng, không lỗi", func(t *testing.T) {
+	t.Run("zero pages returns empty slice, no error", func(t *testing.T) {
 		imgs, err := newTestDoc(0).RenderAllPages(RenderOptions{})
 		if err != nil {
 			t.Fatalf("RenderAllPages() = %v, want nil", err)
@@ -94,9 +94,9 @@ func TestRenderAllPages(t *testing.T) {
 		}
 	})
 
-	t.Run("lỗi từ RenderPage được propagate", func(t *testing.T) {
-		// RenderPage chưa hiện thực -> errNotImplemented cho trang in-range;
-		// RenderAllPages phải trả về đúng lỗi đó.
+	t.Run("error from RenderPage is propagated", func(t *testing.T) {
+		// RenderPage is unimplemented -> errNotImplemented for an in-range page;
+		// RenderAllPages must surface that exact error.
 		_, err := newTestDoc(4).RenderAllPages(RenderOptions{DPI: 150, Format: "png"})
 		if !errors.Is(err, errNotImplemented) {
 			t.Fatalf("RenderAllPages() err = %v, want errNotImplemented", err)
@@ -104,9 +104,10 @@ func TestRenderAllPages(t *testing.T) {
 	})
 }
 
-// TestPageIndexedMethods_BoundsError kiểm tra mọi method nhận pageIndex đều
-// trả ErrPageNotFound khi index ngoài [0, PageCount) — TRƯỚC khi chạm vào phần
-// chưa hiện thực (không được trả errNotImplemented cho index sai).
+// TestPageIndexedMethods_BoundsError checks that every method taking a
+// pageIndex returns ErrPageNotFound for an index outside [0, PageCount) —
+// BEFORE reaching unimplemented code (it must not return errNotImplemented for
+// a bad index).
 func TestPageIndexedMethods_BoundsError(t *testing.T) {
 	doc := newTestDoc(2)
 	const badIndex = 5
@@ -153,7 +154,7 @@ func TestEventCallbacks_Register(t *testing.T) {
 	doc := newTestDoc(1)
 
 	if doc.onAnnotationChange != nil || doc.onPageRendered != nil || doc.onFormFieldChange != nil {
-		t.Fatal("callback phải nil trước khi đăng ký")
+		t.Fatal("callbacks must be nil before registration")
 	}
 
 	doc.OnAnnotationChange(func(Annotation) {})
@@ -161,25 +162,25 @@ func TestEventCallbacks_Register(t *testing.T) {
 	doc.OnFormFieldChange(func(FormField) {})
 
 	if doc.onAnnotationChange == nil {
-		t.Error("OnAnnotationChange không lưu callback")
+		t.Error("OnAnnotationChange did not store the callback")
 	}
 	if doc.onPageRendered == nil {
-		t.Error("OnPageRendered không lưu callback")
+		t.Error("OnPageRendered did not store the callback")
 	}
 	if doc.onFormFieldChange == nil {
-		t.Error("OnFormFieldChange không lưu callback")
+		t.Error("OnFormFieldChange did not store the callback")
 	}
 }
 
-// TestOpenDocument_Unimplemented đánh dấu trạng thái hiện tại (pre-build):
-// OpenDocument chưa parse được nên trả errNotImplemented. Cập nhật test này khi
-// parser layer được xây.
+// TestOpenDocument_Unimplemented records the current (pre-build) state:
+// OpenDocument cannot parse yet and returns errNotImplemented. Update this test
+// once the parser layer is wired in.
 func TestOpenDocument_Unimplemented(t *testing.T) {
 	doc, err := OpenDocument("testdata/nonexistent.pdf")
 	if !errors.Is(err, errNotImplemented) {
-		t.Fatalf("OpenDocument() err = %v, want errNotImplemented (chưa hiện thực)", err)
+		t.Fatalf("OpenDocument() err = %v, want errNotImplemented (not yet implemented)", err)
 	}
 	if doc != nil {
-		t.Errorf("OpenDocument() trả doc non-nil kèm lỗi: %+v", doc)
+		t.Errorf("OpenDocument() returned a non-nil doc alongside an error: %+v", doc)
 	}
 }

@@ -1,79 +1,121 @@
 # SECURITY.md — FluxDocs
 
-> Ràng buộc bảo mật bắt buộc cho mọi người (và AI agent) đóng góp code.
-> Bối cảnh: FluxDocs xử lý tài liệu nhạy cảm (hợp đồng, hồ sơ y tế, tài chính). Một lỗ hổng công khai = mất uy tín sản phẩm vĩnh viễn. Đây không phải checklist tùy chọn.
+> Mandatory security constraints for everyone (and every AI agent) contributing
+> code.
+> Context: FluxDocs processes sensitive documents (contracts, medical records,
+> finance). A single public vulnerability = permanent loss of product trust.
+> This is not an optional checklist.
 
-Tham chiếu spec: §13.4 (Redaction), §18 (Risk Assessment), §5.2 (Design Principles).
-
----
-
-## 1. Redaction — rủi ro #1, ràng buộc cứng
-
-**Lỗ hổng phổ biến nhất:** tool redact kém chỉ vẽ hình chữ nhật đen đè lên, nhưng text gốc vẫn nằm trong content stream → extract/copy được. Nhiều chính phủ & tổ chức đã lộ thông tin theo cách này.
-
-**FluxDocs PHẢI làm đúng:**
-- Khi redact, **loại bỏ hoàn toàn** operator vẽ text (`Tj`/`TJ`) giao với vùng redact khỏi content stream, rồi re-encode stream. KHÔNG chỉ vẽ đè.
-- Xóa luôn metadata, annotation, alt-text, và mọi object ẩn có thể chứa nội dung tương tự trong vùng đó.
-- Hình chữ nhật đen (`--fd-redact-fill: #18181b`, đặc, không trong suốt) chỉ để hiển thị — KHÔNG phải cơ chế bảo mật chính.
-- `RedactAndFlatten()` là thao tác **không phục hồi được** — document rõ trong API.
-
-**Test gate (không thương lượng):**
-- Sau mọi redact, chạy lại `ExtractText()` + thử copy-paste trên vùng đã redact → phải rỗng / không khớp nội dung gốc.
-- Bộ test sống ở `testing/security/redaction/`. **PR đụng redaction không merge nếu pass rate < 100%.**
-- Cân nhắc audit bảo mật độc lập trước khi quảng bá mạnh tính năng redaction (§18.4).
-
-## 2. Parser nhận input không tin cậy
-
-Mọi file PDF là input thù địch tiềm tàng. Bắt buộc phòng thủ:
-
-- **Decompression bomb:** giới hạn kích thước sau giải nén (`/Filter` FlateDecode/LZW). Có ngưỡng + tỉ lệ nén tối đa.
-- **Xref loop:** chuỗi `/Prev` trong incremental update có thể tạo vòng lặp vô hạn → giới hạn độ sâu, phát hiện cycle.
-- **Object stream lồng nhau:** giới hạn độ sâu đệ quy khi resolve compressed object.
-- **Integer overflow:** khi tính `width = MediaBox.width * DPI/72` → kiểm tra biên trước khi alloc canvas (chống cấp phát khổng lồ gây DoS).
-- **Brute-force fallback an toàn:** scan `obj`/`endobj` cho file corrupt nhưng vẫn trong giới hạn tài nguyên.
-- **Fuzzing:** seeds trong `testing/security/fuzz/`. Chạy `go test -fuzz` cho parser/tokenizer trong CI định kỳ.
-
-Mục tiêu: file độc hại làm hỏng 1 lần parse, KHÔNG được crash process, OOM, hay rò bộ nhớ.
-
-## 3. Privacy-first qua WASM
-
-- Ở chế độ client-side, pipeline (parse → render → annotate → redact → extract) chạy hoàn toàn trong browser.
-- **KHÔNG được thêm bất kỳ network request nào** gửi nội dung PDF / annotation / kết quả extract ra ngoài trong đường WASM. Đây là lời hứa lõi với khách hàng privacy-sensitive.
-- Telemetry (nếu có) chỉ được là metric ẩn danh, opt-in, KHÔNG kèm nội dung tài liệu.
-
-## 4. Cloud tier (backend Go)
-
-- **Secret & PII:** không bao giờ log nội dung tài liệu, PII, hay secret. Scrub log.
-- **API keys:** lưu `key_hash` (hash, không plaintext) + `prefix` để hiển thị. Hỗ trợ `revoked_at`. Scope theo `scopes[]`.
-- **Share links:** `token` đủ entropy (≥ 64 ký tự), `password_hash` (không plaintext), `expires_at` bắt buộc kiểm tra, đếm `view_count`.
-- **Multi-tenant isolation:** MỌI query phải scoped theo `org_id`. Không truy vấn cross-org. Kiểm tra membership + role trước mọi thao tác.
-- **Auth:** JWT + OAuth (Better-Auth hoặc tự viết). Verify chữ ký, kiểm hạn token.
-- **Storage:** file gốc trong R2 với `storage_key` không đoán được; `sha256` để dedupe + integrity check.
-- **Object storage access:** dùng signed URL có hạn, không public bucket.
-- **Rate limiting** trên endpoint upload/extract/ask để chống abuse và bảo vệ chi phí LLM.
-
-## 5. Digital signature & crypto (Pro)
-
-- PKCS#7 đúng chuẩn; verify chain, kiểm hạn cert khi verify signature có sẵn.
-- Dùng thư viện crypto chuẩn của Go (`crypto/*`), không tự cuộn thuật toán.
-- Không nhúng private key vào client/WASM bundle.
-
-## 6. Legal / License (xem §18.4)
-
-- **Clean-room:** implement parser/render chỉ dựa trên **ISO 32000-1:2008 công khai**. KHÔNG đọc/copy source của Nutrient, Apryse, hay MuPDF.
-- **MuPDF (AGPL):** chỉ qua build tag `mupdf`. Document rõ trong README: binary build với tag này chịu AGPL; build mặc định (pure Go) giữ MIT. Tư vấn luật SHTT trước khi ship.
-- **Tesseract OCR:** qua build tag `ocr`, license phụ thuộc được nêu rõ.
-- **Redaction disclaimer:** docs Pro phải có disclaimer + test suite công khai chứng minh độ an toàn (giảm rủi ro pháp lý cho khách hàng).
-
-## 7. Dữ liệu test
-
-- KHÔNG commit PDF chứa PII / dữ liệu nhạy cảm thật vào `testing/corpus/`. Dùng tài liệu synthetic hoặc đã ẩn danh.
-- KHÔNG commit secret, API key thật, cert private key vào repo.
-
-## Quy trình báo lỗi bảo mật
-
-Lỗ hổng bảo mật báo riêng tư tới security@fluxdocs.dev (không mở issue công khai). Coordinated disclosure trước khi public.
+Spec references: §13.4 (Redaction), §18 (Risk Assessment), §5.2 (Design
+Principles).
 
 ---
 
-**Nguyên tắc vàng:** nếu một thay đổi làm yếu đi bất kỳ mục nào ở trên để "cho nhanh" hoặc "cho pass test" — DỪNG lại và hỏi. Trong FluxDocs, đúng-về-bảo-mật quan trọng hơn nhanh.
+## 1. Redaction — risk #1, hard constraint
+
+**The most common flaw:** a weak redaction tool just paints a black rectangle
+over content, but the original text remains in the content stream → extractable
+and copyable. Many governments and organizations have leaked information this way.
+
+**FluxDocs MUST do it correctly:**
+- When redacting, **completely remove** the text-drawing operators (`Tj`/`TJ`)
+  that intersect the redaction region from the content stream, then re-encode
+  the stream. Do NOT just paint over.
+- Also remove metadata, annotations, alt-text, and any hidden objects that may
+  contain the same content in that region.
+- The black rectangle (`--fd-redact-fill: #18181b`, solid, non-transparent) is
+  for display only — NOT the primary security mechanism.
+- `RedactAndFlatten()` is an **irreversible** operation — document this clearly
+  in the API.
+
+**Test gate (non-negotiable):**
+- After any redaction, re-run `ExtractText()` and attempt copy-paste over the
+  redacted region → it must be empty / not match the original content.
+- The living test suite is in `testing/security/redaction/`. **A PR touching
+  redaction does not merge unless the pass rate is 100%.**
+- Consider an independent security audit before heavily promoting the redaction
+  feature (§18.4).
+
+## 2. Parser receives untrusted input
+
+Every PDF file is potentially hostile input. Mandatory defenses:
+
+- **Decompression bomb:** bound the decompressed size (`/Filter` FlateDecode/LZW).
+  Enforce a threshold and a maximum compression ratio.
+- **Xref loop:** the `/Prev` chain in an incremental update can form an infinite
+  loop → bound the depth, detect cycles.
+- **Nested object streams:** bound recursion depth when resolving compressed
+  objects.
+- **Integer overflow:** when computing `width = MediaBox.width * DPI/72`, check
+  bounds before allocating a canvas (prevent giant allocations causing DoS).
+- **Safe brute-force fallback:** scan for `obj`/`endobj` on a corrupt file, but
+  stay within resource limits.
+- **Fuzzing:** seeds in `testing/security/fuzz/`. Run `go test -fuzz` for the
+  parser/tokenizer in CI periodically.
+
+Goal: a malicious file fails a single parse; it must NOT crash the process, OOM,
+or leak memory.
+
+## 3. Privacy-first via WASM
+
+- In client-side mode the whole pipeline (parse → render → annotate → redact →
+  extract) runs entirely in the browser.
+- **Do NOT add any network request** that sends PDF content / annotations /
+  extraction results out on the WASM path. This is the core promise to
+  privacy-sensitive customers.
+- Telemetry (if any) may only be anonymous, opt-in metrics, NEVER including
+  document content.
+
+## 4. Cloud tier (Go backend)
+
+- **Secrets & PII:** never log document content, PII, or secrets. Scrub logs.
+- **API keys:** store `key_hash` (hashed, not plaintext) + a `prefix` for
+  display. Support `revoked_at`. Scope by `scopes[]`.
+- **Share links:** `token` with enough entropy (≥ 64 chars), `password_hash`
+  (not plaintext), mandatory `expires_at` check, track `view_count`.
+- **Multi-tenant isolation:** EVERY query must be scoped by `org_id`. No
+  cross-org queries. Check membership + role before any operation.
+- **Auth:** JWT + OAuth (Better-Auth or hand-written). Verify signatures, check
+  token expiry.
+- **Storage:** original files in R2 with an unguessable `storage_key`; `sha256`
+  for dedupe + integrity check.
+- **Object storage access:** use time-limited signed URLs, no public buckets.
+- **Rate limiting** on upload/extract/ask endpoints to prevent abuse and protect
+  LLM costs.
+
+## 5. Digital signatures & crypto (Pro)
+
+- PKCS#7 per spec; verify the chain and check cert expiry when verifying an
+  existing signature.
+- Use Go's standard crypto libraries (`crypto/*`); never roll your own
+  algorithms.
+- Never embed a private key in a client/WASM bundle.
+
+## 6. Legal / License (see §18.4)
+
+- **Clean-room:** implement the parser/renderer based solely on the **public ISO
+  32000-1:2008**. Do NOT read/copy source from Nutrient, Apryse, or MuPDF.
+- **MuPDF (AGPL):** only via the `mupdf` build tag. Document clearly in the
+  README: a binary built with this tag is subject to AGPL; the default build
+  (pure Go) stays MIT. Consult IP counsel before shipping this feature.
+- **Tesseract OCR:** via the `ocr` build tag, with its dependent license stated
+  clearly.
+- **Redaction disclaimer:** the Pro docs must include a disclaimer + a public
+  test suite proving safety (reducing legal risk for customers).
+
+## 7. Test data
+
+- Do NOT commit PDFs containing real PII / sensitive data into
+  `testing/corpus/`. Use synthetic or anonymized documents.
+- Do NOT commit secrets, real API keys, or private cert keys into the repo.
+
+## Reporting a security issue
+
+Report security vulnerabilities privately to security@fluxdocs.dev (do not open a
+public issue). Coordinated disclosure before going public.
+
+---
+
+**Golden rule:** if a change weakens any item above to "go faster" or to "make a
+test pass" — STOP and ask. In FluxDocs, being security-correct matters more than
+being fast.

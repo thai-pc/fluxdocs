@@ -6,8 +6,8 @@ import (
 	"strconv"
 )
 
-// errLex là lỗi cú pháp ở tầng lexer; parser bọc lại thành ErrInvalidPDF ở
-// tầng core khi dựng object model thất bại.
+// errLex is a lexer-level syntax error; the core layer wraps it into
+// ErrInvalidPDF when building the object model fails.
 var errLex = errors.New("parse: lexer error")
 
 type tokenKind int
@@ -16,13 +16,13 @@ const (
 	tokEOF tokenKind = iota
 	tokInt
 	tokReal
-	tokString // chuỗi đã decode về byte thô
-	tokName   // tên đã bỏ '/' và decode '#xx'
+	tokString // string decoded to raw bytes
+	tokName   // name with '/' removed and '#xx' decoded
 	tokArrayOpen
 	tokArrayClose
 	tokDictOpen
 	tokDictClose
-	tokKeyword // true/false/null/R/obj/endobj/stream/... và mọi run ký tự thường
+	tokKeyword // true/false/null/R/obj/endobj/stream/... and any regular-char run
 )
 
 type token struct {
@@ -35,7 +35,7 @@ type token struct {
 	kw   string
 }
 
-// isWhitespace theo Table 1, §7.2.2 ISO 32000-1.
+// isWhitespace per Table 1, ISO 32000-1 §7.2.2.
 func isWhitespace(c byte) bool {
 	switch c {
 	case 0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20:
@@ -44,7 +44,7 @@ func isWhitespace(c byte) bool {
 	return false
 }
 
-// isDelimiter theo Table 2, §7.2.2 ISO 32000-1.
+// isDelimiter per Table 2, ISO 32000-1 §7.2.2.
 func isDelimiter(c byte) bool {
 	switch c {
 	case '(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
@@ -55,15 +55,16 @@ func isDelimiter(c byte) bool {
 
 func isRegular(c byte) bool { return !isWhitespace(c) && !isDelimiter(c) }
 
-// nextToken đọc đúng MỘT token bắt đầu từ offset i (đã bỏ qua whitespace và
-// comment), trả token cùng offset ngay sau nó. Hết input trả token EOF. Hàm
-// thuần (không giữ state) nên cho phép peek/lookahead bằng cách gọi với offset
-// trả về mà chưa "commit" — đây là chìa khóa để đọc dữ liệu stream nhị phân:
-// parser dừng tokenize ở từ khóa `stream` rồi đọc byte thô theo offset.
+// nextToken reads exactly ONE token starting at offset i (after skipping
+// whitespace and comments) and returns the token plus the offset just past it.
+// At end of input it returns an EOF token. The function is pure (holds no
+// state), which allows peeking/lookahead by calling it with the returned offset
+// without committing. This is the key to reading binary stream data: the parser
+// stops tokenizing at the `stream` keyword and then slices raw bytes by offset.
 func nextToken(data []byte, i int) (token, int, error) {
 	n := len(data)
 
-	// Bỏ whitespace và comment.
+	// Skip whitespace and comments.
 	for i < n {
 		c := data[i]
 		if isWhitespace(c) {
@@ -103,7 +104,7 @@ func nextToken(data []byte, i int) (token, int, error) {
 		if i+1 < n && data[i+1] == '>' {
 			return token{kind: tokDictClose}, i + 2, nil
 		}
-		return token{}, i, fmt.Errorf("%w: '>' đơn lẻ tại offset %d", errLex, i)
+		return token{}, i, fmt.Errorf("%w: stray '>' at offset %d", errLex, i)
 
 	case c == '(':
 		s, ni, err := lexLiteralString(data, i)
@@ -125,21 +126,21 @@ func nextToken(data []byte, i int) (token, int, error) {
 	case c == '+' || c == '-' || c == '.' || (c >= '0' && c <= '9'):
 		return lexNumber(data, i)
 
-	default: // run ký tự thường = keyword
+	default: // regular-char run = keyword (true/false/null/R/obj/...)
 		start := i
 		for i < n && isRegular(data[i]) {
 			i++
 		}
 		if i == start {
-			return token{}, i, fmt.Errorf("%w: ký tự không hợp lệ %q tại offset %d", errLex, c, i)
+			return token{}, i, fmt.Errorf("%w: invalid character %q at offset %d", errLex, c, i)
 		}
 		return token{kind: tokKeyword, kw: string(data[start:i])}, i, nil
 	}
 }
 
-// tokenize chuyển toàn bộ byte thành chuỗi token (kết thúc bằng EOF). Dùng cho
-// parse object trực tiếp kích thước nhỏ; KHÔNG dùng cho file có stream nhị phân
-// (xem nextToken).
+// tokenize converts all bytes into a token slice (terminated by EOF). It is
+// used for parsing small standalone objects; it is NOT for files containing
+// binary streams (see nextToken).
 func tokenize(data []byte) ([]token, error) {
 	var toks []token
 	i := 0
@@ -178,13 +179,13 @@ func lexNumber(data []byte, i int) (token, int, error) {
 	if isReal {
 		f, err := strconv.ParseFloat(lit, 64)
 		if err != nil {
-			return token{}, i, fmt.Errorf("%w: số thực không hợp lệ %q", errLex, lit)
+			return token{}, i, fmt.Errorf("%w: invalid real number %q", errLex, lit)
 		}
 		return token{kind: tokReal, real: f}, i, nil
 	}
 	v, err := strconv.ParseInt(lit, 10, 64)
 	if err != nil {
-		// "+" / "-" / "." đơn lẻ: coi như 0 theo tinh thần lenient parsing.
+		// Lone "+" / "-" / ".": treat as 0 in the spirit of lenient parsing.
 		return token{kind: tokInt, int: 0}, i, nil
 	}
 	return token{kind: tokInt, int: v}, i, nil
@@ -192,7 +193,7 @@ func lexNumber(data []byte, i int) (token, int, error) {
 
 func lexName(data []byte, i int) (string, int, error) {
 	n := len(data)
-	i++ // bỏ '/'
+	i++ // drop '/'
 	var out []byte
 	for i < n && isRegular(data[i]) {
 		c := data[i]
@@ -209,7 +210,7 @@ func lexName(data []byte, i int) (string, int, error) {
 
 func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 	n := len(data)
-	i++ // bỏ '('
+	i++ // drop '('
 	depth := 1
 	var out []byte
 	for i < n {
@@ -218,7 +219,7 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 		case '\\':
 			i++
 			if i >= n {
-				return nil, i, fmt.Errorf("%w: chuỗi literal kết thúc đột ngột", errLex)
+				return nil, i, fmt.Errorf("%w: literal string ended abruptly", errLex)
 			}
 			e := data[i]
 			switch e {
@@ -234,13 +235,13 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 				out = append(out, '\f')
 			case '(', ')', '\\':
 				out = append(out, e)
-			case '\r': // line continuation, nuốt cả \r\n
+			case '\r': // line continuation, also swallow \r\n
 				if i+1 < n && data[i+1] == '\n' {
 					i++
 				}
 			case '\n': // line continuation
 			default:
-				if e >= '0' && e <= '7' { // octal \ddd (1-3 chữ số)
+				if e >= '0' && e <= '7' { // octal \ddd (1-3 digits)
 					val := int(e - '0')
 					for k := 0; k < 2 && i+1 < n && data[i+1] >= '0' && data[i+1] <= '7'; k++ {
 						i++
@@ -248,7 +249,7 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 					}
 					out = append(out, byte(val))
 				} else {
-					out = append(out, e) // backslash dư: giữ ký tự
+					out = append(out, e) // stray backslash: keep the character
 				}
 			}
 			i++
@@ -269,18 +270,18 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 			i++
 		}
 	}
-	return nil, i, fmt.Errorf("%w: chuỗi literal không đóng ')'", errLex)
+	return nil, i, fmt.Errorf("%w: unterminated literal string (missing ')')", errLex)
 }
 
 func lexHexString(data []byte, i int) ([]byte, int, error) {
 	n := len(data)
-	i++ // bỏ '<'
+	i++ // drop '<'
 	var nibbles []byte
 	for i < n {
 		c := data[i]
 		if c == '>' {
 			i++
-			if len(nibbles)%2 == 1 { // chữ số lẻ cuối: ngầm thêm 0 (spec §7.3.4.3)
+			if len(nibbles)%2 == 1 { // odd final digit: implicit trailing 0 (§7.3.4.3)
 				nibbles = append(nibbles, 0)
 			}
 			out := make([]byte, len(nibbles)/2)
@@ -294,12 +295,12 @@ func lexHexString(data []byte, i int) ([]byte, int, error) {
 			continue
 		}
 		if !isHex(c) {
-			return nil, i, fmt.Errorf("%w: ký tự hex không hợp lệ %q", errLex, c)
+			return nil, i, fmt.Errorf("%w: invalid hex character %q", errLex, c)
 		}
 		nibbles = append(nibbles, hexVal(c))
 		i++
 	}
-	return nil, i, fmt.Errorf("%w: chuỗi hex không đóng '>'", errLex)
+	return nil, i, fmt.Errorf("%w: unterminated hex string (missing '>')", errLex)
 }
 
 func isHex(c byte) bool {

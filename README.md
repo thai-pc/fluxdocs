@@ -2,69 +2,90 @@
 
 > **View. Annotate. Extract. All in Go, all in MIT.**
 
-FluxDocs là bộ SDK đọc và chú thích (annotate) PDF với phần lõi viết **hoàn toàn bằng Go**, phát hành theo giấy phép MIT và biên dịch được sang **WASM** để chạy ngay trên trình duyệt — không cần gửi tài liệu lên máy chủ. Đây là mảnh còn thiếu giữa hai thái cực: các SDK thương mại đắt đỏ (Nutrient/PSPDFKit) và những thư viện mã nguồn mở rời rạc, thiếu tính năng (pdf.js, pdf-lib).
+FluxDocs is an SDK for viewing and annotating PDFs, with a core written
+**entirely in Go**, released under the MIT license and compilable to **WASM** so
+it runs directly in the browser — no need to send documents to a server. It
+fills the gap between two extremes: expensive commercial SDKs (Nutrient/PSPDFKit)
+and scattered, feature-thin open-source libraries (pdf.js, pdf-lib).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Go core](https://img.shields.io/badge/core-100%25%20Go-00ADD8)
 ![Status](https://img.shields.io/badge/status-pre--build-orange)
 
-> **Trạng thái:** Pre-build / Planning (v0.1.0) — đang dựng nền móng. Xem mục [Tiến độ](#tiến-độ).
+> **Status:** Pre-build / Planning (v0.1.0) — laying the foundations. See
+> [Progress](#progress).
 
-## Vì sao chọn FluxDocs
+## Why FluxDocs
 
-- **Lõi Go thực thụ** — toàn bộ việc phân tích và kết xuất PDF chạy trong Go, không phải lớp bọc mỏng (binding) gọi xuống thư viện C/C++ qua CGO.
-- **Một codebase, hai đích biên dịch** — cùng một mã nguồn cho ra binary native (máy chủ, CLI) lẫn WASM (trình duyệt).
-- **Ưu tiên quyền riêng tư** — tài liệu nhạy cảm (hợp đồng, hồ sơ y tế, tài chính) được xử lý ngay trong trình duyệt, không một byte nào rời khỏi máy người dùng.
-- **Giấy phép MIT** — tự vận hành phần lõi miễn phí, giá minh bạch, không phải liên hệ sales để báo giá như Nutrient ($25k–220k/năm).
+- **A real Go core** — all PDF parsing and rendering runs in Go, not a thin
+  binding calling down into a C/C++ library through CGO.
+- **One codebase, two build targets** — the same source produces a native binary
+  (server, CLI) and WASM (browser).
+- **Privacy-first** — sensitive documents (contracts, medical records, finance)
+  are processed right in the browser; not a single byte leaves the user's
+  machine.
+- **MIT-licensed** — self-host the core for free, with transparent pricing and no
+  sales-gated quotes like Nutrient ($25k–220k/year).
 
-## Ba cấp sản phẩm
+## Three product tiers
 
-| Cấp | Giấy phép | Tính năng |
+| Tier | License | Features |
 |---|---|---|
-| **Core** | MIT, miễn phí | kết xuất, chú thích cơ bản, trích xuất văn bản, gộp/tách, build WASM |
-| **Pro** | Mua một lần | điền biểu mẫu, ký số, redaction an toàn, OCR, so sánh tài liệu, watermark |
-| **Cloud** | Thuê bao | hỏi đáp tài liệu bằng AI, trích xuất có cấu trúc, tự động che PII, cộng tác, API lưu trữ |
+| **Core** | MIT, free | rendering, basic annotation, text extraction, merge/split, WASM build |
+| **Pro** | One-time | form fill, e-signature, safe redaction, OCR, document compare, watermark |
+| **Cloud** | Subscription | AI document Q&A, structured extraction, automatic PII redaction, collaboration, hosted API |
 
-## Cấu trúc kho mã
+## Repository layout
 
 ```
-core/        engine Go (parse, render, annotation, docops, form, sign, extract, ocr)
-cmd/         công cụ dòng lệnh `fluxdocs`
-cloud/       backend Go cho cấp Cloud
-wasm/        điểm vào để build WASM
-packages/    wrapper JS/TS (@fluxdocs/react, /vue, …)
-examples/    demo: go-server, react, vue, cli-batch-redact, ai-extraction
-apps/        trang tài liệu + landing page
-testing/     corpus PDF, golden file, test bảo mật, benchmark
-docs/        spec.md — bản đặc tả kỹ thuật đầy đủ (tài liệu tham chiếu chuẩn)
-.claude/     hướng dẫn cho AI: CLAUDE.md, AGENTS.md, SECURITY.md
+core/        Go engine (parse, render, annotation, docops, form, sign, extract, ocr)
+cmd/         the `fluxdocs` command-line tool
+cloud/       Go backend for the Cloud tier
+wasm/        entry point for the WASM build
+packages/    JS/TS wrappers (@fluxdocs/react, /vue, …)
+examples/    demos: go-server, react, vue, cli-batch-redact, ai-extraction
+apps/        docs site + landing page
+testing/     PDF corpus, golden files, security tests, benchmarks
+docs/        spec.md — the full technical specification (reference document)
+.claude/     guidance for AI: CLAUDE.md, AGENTS.md, CONVENTIONS.md, SECURITY.md
 ```
 
-## Tiến độ
+## Progress
 
-Đã có:
-- Bộ kiểu dữ liệu lõi và toàn bộ bề mặt API của `Document` (theo §6–§7 đặc tả).
-- Lớp phân tích PDF: object model, lexer, indirect object, stream, bảng xref (cổ điển) và resolver giải tham chiếu.
-- CI tự động (GitHub Actions): build native + WASM, `go test -race`, cổng kiểm tra redaction.
+Done:
+- Core type system and the full `Document` API surface (per spec §6–§7).
+- PDF parsing layer: object model, lexer, indirect objects, streams, the
+  (classic) xref table, and a reference resolver.
+- Continuous integration (GitHub Actions): native + WASM builds, `go test -race`,
+  and a redaction security gate.
 
-Đang làm tiếp: trang resolver thành page tree, kết xuất trang đầu tiên ra ảnh raster.
+Next: turn the resolver into a flattened page tree, then render the first page to
+a raster image.
 
-## Bắt đầu phát triển
+## Developing
 
-Chi tiết lệnh build/test và tiêu chí hoàn thành nằm trong [`.claude/AGENTS.md`](.claude/AGENTS.md). Tóm tắt:
+Build/test commands and the definition of done are in
+[`.claude/AGENTS.md`](.claude/AGENTS.md); coding conventions are in
+[`.claude/CONVENTIONS.md`](.claude/CONVENTIONS.md). In short:
 
 ```bash
-go build ./...                                    # build native
-GOOS=js GOARCH=wasm go build -o /dev/null ./wasm  # build WASM (phải xanh)
-go test -race ./...                               # chạy test kèm race detector
+go build ./...                                    # native build
+GOOS=js GOARCH=wasm go build -o /dev/null ./wasm  # WASM build (must stay green)
+go test -race ./...                               # tests with the race detector
 ```
 
-> Cổng bảo mật redaction (`go test ./testing/security/redaction/...`) sẽ chạy trong CI khi đã có test thực sự; xem [`.claude/SECURITY.md`](.claude/SECURITY.md).
+> The redaction security gate (`go test ./testing/security/redaction/...`) runs
+> in CI once real tests exist; see [`.claude/SECURITY.md`](.claude/SECURITY.md).
 
-## Bảo mật
+## Security
 
-Redaction phải xóa nội dung **vĩnh viễn** khỏi tài liệu (không chỉ vẽ đè hình chữ nhật đen), trình phân tích luôn coi tệp đầu vào là không đáng tin, và đường WASM không gửi bất kỳ dữ liệu nào ra ngoài. Chi tiết: [`.claude/SECURITY.md`](.claude/SECURITY.md). Báo lỗ hổng: security@fluxdocs.dev.
+Redaction must **permanently** remove content from the document (not just paint a
+black rectangle over it), the parser always treats input files as untrusted, and
+the WASM path sends no data anywhere. Details: [`.claude/SECURITY.md`](.claude/SECURITY.md).
+Report vulnerabilities to security@fluxdocs.dev.
 
-## Giấy phép
+## License
 
-Phần lõi: [MIT](LICENSE). Các tính năng tùy chọn bật bằng build tag (`mupdf` — AGPL, `ocr` — Apache-2.0) tuân theo giấy phép riêng — xem ghi chú trong [`LICENSE`](LICENSE).
+Core: [MIT](LICENSE). Optional features enabled via build tags (`mupdf` — AGPL,
+`ocr` — Apache-2.0) are governed by their own licenses — see the note in
+[`LICENSE`](LICENSE).
