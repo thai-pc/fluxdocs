@@ -14,23 +14,45 @@
 
 ## Overview
 
-FluxDocs là SDK xử lý và annotate PDF, core engine viết bằng **Go**, license MIT, nhắm vào khoảng trống giữa hai cực: SDK enterprise siêu đắt (Nutrient/PSPDFKit — license self-hosted entry-level $25,000–40,000/năm, trung bình $76,000/năm, lên tới $220,000+ cho deployment lớn) và các lựa chọn open-source rời rạc, thiếu tính năng (pdf.js chỉ render, pdf-lib chỉ chỉnh sửa cơ bản, không cái nào có annotation engine + server processing + AI extraction tích hợp).
+FluxDocs is an SDK for processing and annotating PDFs, with a core engine written
+in **Go** and an MIT license, targeting the gap between two extremes: ultra-expensive
+enterprise SDKs (Nutrient/PSPDFKit — self-hosted entry-level licenses at
+$25,000–40,000/year, averaging $76,000/year, up to $220,000+ for large
+deployments) and scattered, feature-thin open-source options (pdf.js renders
+only, pdf-lib does basic editing only, none of them have an integrated
+annotation engine + server processing + AI extraction).
 
-Sản phẩm thuộc họ Flux (cùng FluxFiles, FluxGantt), kế thừa toàn bộ design system, brand voice, và mô hình monetization 3 tầng đã được kiểm chứng.
+The product belongs to the Flux family (alongside FluxFiles and FluxGantt),
+inheriting its entire design system, brand voice, and the proven three-tier
+monetization model.
 
-**Vì sao Go, và Go đóng vai trò gì:**
+**Why Go, and what role Go plays:**
 
-PDF processing là bài toán byte-level, CPU-bound, không cần I/O bất đồng bộ phức tạp — đúng sở trường của Go. FluxDocs dùng kiến trúc **"core Go thật"**: toàn bộ phần nặng (parse PDF structure, render trang ra raster/SVG, ghép annotation layer, merge/split, redact, OCR trigger, digital signature) chạy trong Go server hoặc Go binary CLI. Phần UI viewer ở client chỉ là lớp mỏng (Canvas/WASM) hiển thị kết quả Go trả về — không phải Go "đóng vai phụ" như nhiều dự án gắn Go gượng ép vào use case UI-heavy.
+PDF processing is a byte-level, CPU-bound problem that doesn't need complex
+asynchronous I/O — squarely in Go's wheelhouse. FluxDocs uses a **"real Go core"**
+architecture: all the heavy lifting (parse PDF structure, render pages to
+raster/SVG, compose the annotation layer, merge/split, redact, trigger OCR,
+digital signing) runs in a Go server or a Go CLI binary. The client-side viewer
+UI is only a thin layer (Canvas/WASM) displaying what Go returns — Go is not a
+"supporting actor" as in many projects that bolt Go onto UI-heavy use cases.
 
-Compile sang WASM cho phép cùng một core Go chạy được cả server (Docker self-hosted) và browser (client-side rendering, không cần gửi PDF nhạy cảm lên server) — đây là đòn bẩy kỹ thuật chính để cạnh tranh với Nutrient (vốn dùng C++ core, không có lựa chọn WASM nhẹ).
+Compiling to WASM lets the same Go core run on both the server (self-hosted
+Docker) and the browser (client-side rendering, no need to send sensitive PDFs to
+a server) — this is the key technical lever to compete with Nutrient (which uses
+a C++ core and has no lightweight WASM option).
 
-**Ba tầng monetization:**
+**Three monetization tiers:**
 
-- **Core (MIT, free):** Render PDF, annotation cơ bản (highlight, note, draw), text extraction, merge/split
-- **Pro (one-time):** Form fill, digital signature, redaction, OCR, compare documents, watermark removal
-- **Cloud (subscription):** AI document Q&A, auto-extraction structured data, hosted processing API, collaboration
+- **Core (MIT, free):** render PDFs, basic annotation (highlight, note, draw),
+  text extraction, merge/split
+- **Pro (one-time):** form fill, digital signature, redaction, OCR, document
+  compare, watermark removal
+- **Cloud (subscription):** AI document Q&A, structured data auto-extraction,
+  hosted processing API, collaboration
 
-Đối tượng chính là **developer** nhúng PDF viewing/annotation vào sản phẩm của họ — SaaS quản lý hợp đồng, công cụ pháp lý, hệ thống quản lý tài liệu nội bộ, nền tảng e-signature tự dựng.
+The primary audience is **developers** embedding PDF viewing/annotation into
+their products — contract-management SaaS, legal tooling, internal document
+management systems, self-built e-signature platforms.
 
 ---
 
@@ -62,17 +84,26 @@ Compile sang WASM cho phép cùng một core Go chạy được cả server (Doc
 
 ## 1. Executive Summary
 
-FluxDocs là SDK xử lý và annotate PDF, core viết bằng Go, license MIT, nhắm vào khoảng trống giữa SDK enterprise đắt đỏ (Nutrient/PSPDFKit, ComPDF, Apryse) và thư viện open-source rời rạc thiếu tính năng (pdf.js, pdf-lib, pdfcpu dùng riêng lẻ).
+FluxDocs is an SDK for processing and annotating PDFs, with a Go core and an MIT
+license, targeting the gap between expensive enterprise SDKs (Nutrient/PSPDFKit,
+ComPDF, Apryse) and scattered, feature-thin open-source libraries (pdf.js,
+pdf-lib, pdfcpu used in isolation).
 
-Sản phẩm thuộc họ Flux, cùng FluxFiles và FluxGantt. Brand chung giảm chi phí marketing, kế thừa uy tín developer experience đã xây từ các sản phẩm trước.
+The product belongs to the Flux family, alongside FluxFiles and FluxGantt. A
+shared brand lowers marketing cost and inherits the developer-experience
+reputation built by the earlier products.
 
-Ba tầng monetization:
+Three monetization tiers:
 
-- **Core (MIT, free):** Render, annotation cơ bản, text extraction, merge/split
-- **Pro (one-time):** Form fill, e-signature, redaction, OCR, document compare
-- **Cloud (subscription):** AI document Q&A, structured data extraction, hosted API, collaboration
+- **Core (MIT, free):** render, basic annotation, text extraction, merge/split
+- **Pro (one-time):** form fill, e-signature, redaction, OCR, document compare
+- **Cloud (subscription):** AI document Q&A, structured data extraction, hosted
+  API, collaboration
 
-Khác biệt kỹ thuật cốt lõi: core Go thật (không phải binding mỏng qua CGO), compile được sang WASM để chạy client-side hoàn toàn — giải quyết bài toán privacy (PDF nhạy cảm như hợp đồng, hồ sơ y tế, tài chính không cần gửi lên server) mà các SDK cloud-first khó làm được.
+The core technical differentiator: a real Go core (not a thin binding over CGO),
+compilable to WASM to run fully client-side — solving the privacy problem
+(sensitive PDFs like contracts, medical records, finance need not be sent to a
+server) that cloud-first SDKs struggle with.
 
 ---
 
@@ -84,61 +115,81 @@ Khác biệt kỹ thuật cốt lõi: core Go thật (không phải binding mỏ
 
 | Product | License | Pricing | Stack | Strengths | Weaknesses |
 |---|---|---|---|---|---|
-| **Nutrient (PSPDFKit)** | Commercial | $25k–40k/năm entry-level self-host; trung bình $76k/năm; lên tới $220k+ enterprise | C++ core, binding nhiều ngôn ngữ | Feature-complete nhất thị trường, hỗ trợ tốt, đủ cả Web/mobile/desktop/server | Rất đắt, sales-gated pricing (phải liên hệ sales để biết giá), overkill cho team nhỏ |
-| **Apryse (trước là PDFTron)** | Commercial | Tương đương Nutrient, sales-gated | C++ core | Mature, độ chính xác rendering cao | Cùng vấn đề giá, learning curve dốc |
-| **ComPDF** | Commercial (có free tier hạn chế) | Rẻ hơn Nutrient nhưng vẫn theo component | C++ core | Giá cạnh tranh hơn Nutrient | Ecosystem nhỏ hơn, ít case study enterprise |
+| **Nutrient (PSPDFKit)** | Commercial | $25k–40k/yr entry-level self-host; avg $76k/yr; up to $220k+ enterprise | C++ core, many-language bindings | Most feature-complete on the market, good support, covers Web/mobile/desktop/server | Very expensive, sales-gated pricing (must contact sales for a quote), overkill for small teams |
+| **Apryse (formerly PDFTron)** | Commercial | Comparable to Nutrient, sales-gated | C++ core | Mature, high rendering accuracy | Same pricing problem, steep learning curve |
+| **ComPDF** | Commercial (limited free tier) | Cheaper than Nutrient but still per-component | C++ core | More competitive pricing than Nutrient | Smaller ecosystem, fewer enterprise case studies |
 
 **Open Source:**
 
 | Product | License | Stack | Status | Weaknesses |
 |---|---|---|---|---|
-| **pdf.js** | Apache 2.0 | JavaScript | Maintained tốt (Mozilla) | Chỉ render/view, không có annotation engine đầy đủ, không xử lý server-side |
-| **pdf-lib** | MIT | JavaScript | Maintained | Tạo/chỉnh sửa PDF cơ bản, không render UI, không OCR, không AI |
-| **pdfcpu** | Apache 2.0 | Go | Maintained, nhưng CLI-focused | Mạnh về merge/split/watermark/encrypt nhưng không có rendering engine hay annotation UI, không hướng tới embed vào product |
-| **MuPDF** | AGPL / Commercial dual | C | Rất mature, performance cao | License AGPL ràng buộc nặng cho closed-source; phải mua commercial license để dùng thương mại — đây chính là khoảng trống FluxDocs lấp vào |
+| **pdf.js** | Apache 2.0 | JavaScript | Well maintained (Mozilla) | Render/view only, no full annotation engine, no server-side processing |
+| **pdf-lib** | MIT | JavaScript | Maintained | Basic PDF create/edit, no render UI, no OCR, no AI |
+| **pdfcpu** | Apache 2.0 | Go | Maintained, but CLI-focused | Strong at merge/split/watermark/encrypt but has no rendering engine or annotation UI, not aimed at embedding into a product |
+| **MuPDF** | AGPL / Commercial dual | C | Very mature, high performance | The AGPL license is heavily restrictive for closed-source; you must buy a commercial license for commercial use — exactly the gap FluxDocs fills |
 
 ### 2.2 Market Gap
 
-Khoảng trống rõ ràng cho một SDK MIT-licensed mang lại:
+A clear gap exists for an MIT-licensed SDK that provides:
 
-- Core Go thật — không phải JS-only (thiếu server processing) hoặc C++ đóng kín (thiếu khả năng tùy biến, audit code)
-- Annotation engine đầy đủ: highlight, note, draw, shape, stamp, measurement — không chỉ render
-- Server-side processing: merge, split, redact, watermark, OCR, form-fill, e-signature trong cùng một SDK
-- WASM build chính thức — chạy 100% client-side khi cần privacy (không gửi file lên server)
-- AI-powered từ đầu: document Q&A, structured extraction, auto-redaction theo pattern (PII, số thẻ, v.v.) — tính năng mà Nutrient phải bán riêng qua add-on XtractFlow
-- Pricing minh bạch, không sales-gated — self-serve license key giống mô hình Stripe Checkout
+- A real Go core — not JS-only (lacking server processing) nor closed C++
+  (lacking customizability and code audit)
+- A complete annotation engine: highlight, note, draw, shape, stamp, measurement
+  — not just rendering
+- Server-side processing: merge, split, redact, watermark, OCR, form-fill,
+  e-signature in a single SDK
+- An official WASM build — running 100% client-side when privacy demands it (no
+  file sent to a server)
+- AI-powered from day one: document Q&A, structured extraction, pattern-based
+  auto-redaction (PII, card numbers, etc.) — features Nutrient sells separately
+  via the XtractFlow add-on
+- Transparent, non-sales-gated pricing — self-serve license keys like the Stripe
+  Checkout model
 
 ### 2.3 Customer Profile
 
 **Primary Customer:**
-- Developer solo/small-team xây SaaS xử lý tài liệu: contract management, e-signature tự dựng, hệ thống hồ sơ pháp lý/y tế/tài chính
-- Pain: Nutrient quá đắt cho giai đoạn early-stage ($25k+/năm chỉ để bắt đầu), pdf.js/pdf-lib không đủ tính năng phải ghép 3-4 lib khác nhau
-- Mức chi: $299–799 one-time/developer cho Pro license
+- Solo/small-team developers building document-processing SaaS: contract
+  management, self-built e-signature, legal/medical/finance records systems
+- Pain: Nutrient is too expensive for early-stage ($25k+/yr just to start),
+  pdf.js/pdf-lib aren't feature-complete and require stitching 3-4 different libs
+- Spend: $299–799 one-time per developer for a Pro license
 
 **Secondary Customer:**
-- Agency dựng tool quản lý tài liệu cho khách hàng (luật, bất động sản, bảo hiểm)
-- Pain: dự án khách không đủ lớn để mua site license Nutrient; ghép nhiều lib OSS tốn 2-3 tháng và vẫn thiếu annotation UI
-- Mức chi: $999–1,999 team license, one-time
+- Agencies building document-management tools for clients (legal, real estate,
+  insurance)
+- Pain: client projects aren't large enough to buy a Nutrient site license;
+  stitching multiple OSS libs takes 2-3 months and still lacks an annotation UI
+- Spend: $999–1,999 team license, one-time
 
 **Tertiary Customer (Cloud tier):**
-- Team nhỏ cần xử lý hàng loạt PDF (extract data, redact PII, OCR) mà không muốn tự host infra
-- Pain: tự build pipeline OCR + AI extraction tốn thời gian, các API cloud hiện có (Google Document AI, AWS Textract) đắt theo page và khó tùy biến UI
-- Mức chi: $49–199/tháng theo volume xử lý
+- Small teams needing to batch-process PDFs (extract data, redact PII, OCR)
+  without self-hosting infra
+- Pain: building an OCR + AI extraction pipeline is time-consuming; existing
+  cloud APIs (Google Document AI, AWS Textract) are expensive per page and hard
+  to customize the UI for
+- Spend: $49–199/month by processing volume
 
 ### 2.4 Total Addressable Market (TAM) Estimate
 
-**Ước tính dựa trên tín hiệu giá của Nutrient/Apryse:**
+**Estimated from Nutrient/Apryse pricing signals:**
 
-- Nutrient có publicly visible customer base trải dài Fortune 500 tới startup, giá trung bình $76k/năm cho customer ký hợp đồng
-- Thị trường document SDK/processing toàn cầu (bao gồm OCR, e-signature embed, viewer SDK): ước tính hàng trăm triệu USD/năm, phân mảnh giữa nhiều vendor
+- Nutrient has a publicly visible customer base spanning Fortune 500 to startups,
+  averaging $76k/yr for signed customers
+- The global document SDK/processing market (including OCR, embedded
+  e-signature, viewer SDKs): estimated at hundreds of millions USD/year,
+  fragmented across many vendors
 
-**Thị phần khả thi cho FluxDocs:**
+**Feasible share for FluxDocs:**
 
-- Năm 1: 30–60 Pro license × $499 trung bình = $15–30k
-- Năm 2: 150–300 Pro + 30 Cloud sub × $99 trung bình = $90–180k ARR
-- Năm 3: 500+ Pro + 150 Cloud + 5-10 Enterprise self-host deal ($5-15k/deal) = $300–600k ARR
+- Year 1: 30–60 Pro licenses × $499 average = $15–30k
+- Year 2: 150–300 Pro + 30 Cloud subs × $99 average = $90–180k ARR
+- Year 3: 500+ Pro + 150 Cloud + 5-10 Enterprise self-host deals ($5-15k/deal) =
+  $300–600k ARR
 
-So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trường đã có (Nutrient chứng minh khách enterprise sẵn sàng trả $25k-200k+/năm cho đúng category sản phẩm này).
+Compared with the Gantt chart product, the price ceiling is clearly higher
+thanks to the established market benchmark (Nutrient proves enterprise customers
+will pay $25k-200k+/year for exactly this product category).
 
 ---
 
@@ -150,46 +201,52 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 |---|---|
 | **Product Name** | FluxDocs |
 | **Brand Family** | Flux (modern web tooling) |
-| **Family Members** | FluxFiles (file manager, đang ship)<br>FluxGantt (Gantt chart)<br>FluxDocs (PDF viewer/annotator SDK, sản phẩm này)<br>FluxBoard (Kanban, tương lai)<br>FluxFlow (workflow editor, tương lai) |
+| **Family Members** | FluxFiles (file manager, shipping)<br>FluxGantt (Gantt chart)<br>FluxDocs (PDF viewer/annotator SDK, this product)<br>FluxBoard (Kanban, future)<br>FluxFlow (workflow editor, future) |
 
 ### 3.2 Tagline & Positioning
 
 > **Tagline:** "View. Annotate. Extract. All in Go, all in MIT."
 
-> **Positioning:** "SDK PDF MIT-licensed đầu tiên với core Go thật và AI document extraction — chạy được cả server và client qua WASM."
+> **Positioning:** "The first MIT-licensed PDF SDK with a real Go core and AI
+> document extraction — running on both server and client via WASM."
 
-> **Elevator Pitch:** "Mọi sản phẩm xử lý tài liệu đều cần PDF viewer và annotation, và mọi developer xây nó đều đối mặt cùng lựa chọn: trả $25,000+/năm cho Nutrient, ghép 4 thư viện JS rời rạc thiếu tính năng, hoặc đụng vào MuPDF rồi vướng AGPL license. FluxDocs là lựa chọn còn thiếu — core Go nhanh, MIT-licensed, compile WASM để xử lý hoàn toàn client-side khi cần privacy, và có AI extraction tích hợp sẵn."
+> **Elevator Pitch:** "Every document product needs a PDF viewer and annotation,
+> and every developer building one faces the same choice: pay $25,000+/year for
+> Nutrient, stitch together 4 incomplete JS libraries, or touch MuPDF and get
+> stuck with the AGPL license. FluxDocs is the missing option — a fast Go core,
+> MIT-licensed, compiled to WASM to process fully client-side when privacy is
+> needed, with AI extraction built in."
 
 ### 3.3 Brand Voice
 
 | | |
 |---|---|
-| **Tone** | Trực tiếp, kỹ thuật, tự tin nhưng không kiêu |
-| **Reference** | Văn phong docs của Caddy (Go project nổi tiếng về docs sạch), Tiptap, Drizzle ORM |
-| **Tránh** | Marketing sáo rỗng: "revolutionary", "enterprise-grade" lặp vô nghĩa |
-| **Ưu tiên** | Benchmark performance cụ thể (ms/page render, MB/s throughput), so sánh giá trực tiếp với Nutrient |
+| **Tone** | Direct, technical, confident but not arrogant |
+| **Reference** | The docs voice of Caddy (a Go project famous for clean docs), Tiptap, Drizzle ORM |
+| **Avoid** | Hollow marketing: "revolutionary", "enterprise-grade" repeated meaninglessly |
+| **Prefer** | Concrete performance benchmarks (ms/page render, MB/s throughput), direct price comparison with Nutrient |
 
 ### 3.4 Visual Identity
 
 | | |
 |---|---|
-| **Primary Color** | Indigo `#6366f1` — kế thừa từ FluxGantt, nhất quán brand family |
-| **Annotation Color** | Amber `#f59e0b` — màu mặc định cho highlight/note, khác biệt với indigo hệ thống |
+| **Primary Color** | Indigo `#6366f1` — inherited from FluxGantt, consistent brand family |
+| **Annotation Color** | Amber `#f59e0b` — default for highlight/note, distinct from the system indigo |
 | **Background** | Near-black `#0a0a0a` (dark mode), off-white `#fafafa` (light mode) |
 | **Typography** | Inter (UI), JetBrains Mono (code samples) |
-| **Logo Concept** | Trang giấy cách điệu với góc bo, đường annotation chạy ngang như highlight |
+| **Logo Concept** | A stylized sheet of paper with rounded corners and an annotation line running across like a highlight |
 
 ### 3.5 Domain & Online Presence
 
 | | |
 |---|---|
 | **Primary domain** | fluxdocs.dev |
-| **Secondary** | fluxdocs.com (redirect về .dev) |
-| **NPM scope** | `@fluxdocs` (cho wrapper JS/WASM) |
+| **Secondary** | fluxdocs.com (redirects to .dev) |
+| **NPM scope** | `@fluxdocs` (for JS/WASM wrappers) |
 | **Go module** | `github.com/fluxtoolkit/fluxdocs` |
 | **GitHub** | github.com/fluxtoolkit/fluxdocs |
 | **Twitter/X** | @fluxdocs |
-| **Discord** | Flux Toolkit community server (chung với FluxFiles, FluxGantt) |
+| **Discord** | Flux Toolkit community server (shared with FluxFiles, FluxGantt) |
 
 ---
 
@@ -200,43 +257,46 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 | Layer | Choice |
 |---|---|
 | **Language** | Go 1.23+ |
-| **Module format** | Go module chuẩn; build target thêm WASM (`GOOS=js GOARCH=wasm`) |
-| **Architecture** | Headless core (parse + compute + render-to-buffer) tách biệt với mọi UI |
-| **PDF parsing** | Tự viết parser theo PDF 32000-1:2008 spec cho phần core (object model, xref, stream), có thể gọi CGO tới MuPDF cho rendering chất lượng cao ở chế độ "high-fidelity" tùy chọn (build tag riêng, không bắt buộc) |
-| **Rendering** | Raster (PNG/JPEG buffer) cho server-side thumbnail/preview; SVG cho client-side vector-accurate; WASM build dùng Canvas API của browser để paint |
-| **Concurrency** | Goroutine pool xử lý multi-page rendering song song — lợi thế tự nhiên của Go so với JS single-thread (trừ Worker) |
-| **OCR** | Binding Tesseract qua CGO (Pro tier), có thể thay bằng OCR cloud API (Cloud tier) |
-| **AI integration** | Gọi LLM API (Claude, qua HTTP client Go chuẩn) cho document Q&A, structured extraction — không cần SDK ngôn ngữ khác |
-| **Testing** | `go test` + table-driven test cho parser; golden-file test cho rendering (so sánh output PNG với reference) |
-| **Monorepo** | Go workspace (`go.work`) cho multi-module, kết hợp pnpm workspace cho phần JS wrapper/demo |
+| **Module format** | Standard Go module; plus a WASM build target (`GOOS=js GOARCH=wasm`) |
+| **Architecture** | Headless core (parse + compute + render-to-buffer) decoupled from any UI |
+| **PDF parsing** | A hand-written parser following the PDF 32000-1:2008 spec for the core (object model, xref, stream); may call CGO into MuPDF for high-quality rendering in an optional "high-fidelity" mode (separate build tag, not required) |
+| **Rendering** | Raster (PNG/JPEG buffer) for server-side thumbnail/preview; SVG for vector-accurate client-side; the WASM build uses the browser Canvas API to paint |
+| **Concurrency** | A goroutine pool processing multi-page rendering in parallel — a natural Go advantage over single-threaded JS (except Workers) |
+| **OCR** | Tesseract binding via CGO (Pro tier); may be swapped for a cloud OCR API (Cloud tier) |
+| **AI integration** | Call an LLM API (Claude, via a standard Go HTTP client) for document Q&A and structured extraction — no other-language SDK needed |
+| **Testing** | `go test` + table-driven tests for the parser; golden-file tests for rendering (compare PNG output with a reference) |
+| **Monorepo** | Go workspace (`go.work`) for multi-module, combined with a pnpm workspace for the JS wrappers/demos |
 
 ### 4.2 Client Wrappers
 
 **Wave 1:**
-- `@fluxdocs/react` — React 18+, component `<FluxDocsViewer />` load WASM core
-- `@fluxdocs/vue` — Vue 3+, Composition API tương đương
+- `@fluxdocs/react` — React 18+, a `<FluxDocsViewer />` component that loads the
+  WASM core
+- `@fluxdocs/vue` — Vue 3+, an equivalent Composition API
 
 **Wave 2:**
-- `@fluxdocs/web-components` — Custom element thuần, dùng được trong mọi framework hoặc vanilla HTML
-- Go native package dùng trực tiếp trong backend Go (không cần wrapper — đây là lợi thế so với FluxGantt vì core đã là Go)
+- `@fluxdocs/web-components` — pure custom elements, usable in any framework or
+  vanilla HTML
+- A native Go package used directly in a Go backend (no wrapper needed — an
+  advantage over FluxGantt since the core is already Go)
 
 **Community-driven:**
 - `@fluxdocs/svelte`
-- Binding Python qua cgo-export (cho team data/ML muốn xử lý batch PDF)
+- A Python binding via cgo-export (for data/ML teams batch-processing PDFs)
 
 ### 4.3 Cloud Backend (Wave 3)
 
 | | |
 |---|---|
-| **Runtime** | Go binary chạy trực tiếp (không cần Node.js runtime riêng cho backend) |
-| **Framework** | Chi (router HTTP nhẹ, idiomatic Go) hoặc Echo |
+| **Runtime** | A Go binary running directly (no separate Node.js runtime for the backend) |
+| **Framework** | Chi (a lightweight idiomatic Go HTTP router) or Echo |
 | **Database** | PostgreSQL 16 |
-| **ORM** | sqlc (generate type-safe Go code từ SQL, giữ đúng triết lý "ít magic" của Go) hoặc Drizzle nếu cần Node service phụ trợ |
-| **Object storage** | Cloudflare R2 (lưu file PDF gốc + annotation layer JSON) |
-| **Queue xử lý batch** | Go channel + worker pool nội bộ cho job nhỏ; River (Postgres-backed queue, Go-native) cho job lớn cần persistence |
-| **Auth** | Better-Auth hoặc tự viết bằng Go (JWT + OAuth, ít dependency) |
+| **ORM** | sqlc (generate type-safe Go code from SQL, keeping Go's "little magic" philosophy) or Drizzle if an auxiliary Node service is needed |
+| **Object storage** | Cloudflare R2 (stores the original PDF + the annotation-layer JSON) |
+| **Batch queue** | Go channels + an internal worker pool for small jobs; River (a Postgres-backed, Go-native queue) for large jobs needing persistence |
+| **Auth** | Better-Auth or hand-written in Go (JWT + OAuth, few dependencies) |
 | **CDN** | Cloudflare (free tier) |
-| **Hosting** | Fly.io — đặc biệt hợp với Go vì binary nhẹ, cold-start nhanh |
+| **Hosting** | Fly.io — especially good for Go thanks to light binaries and fast cold starts |
 | **Email** | Resend (transactional) |
 | **Payments** | Stripe (Pro one-time + Cloud subscription) |
 | **Analytics** | Plausible (privacy-first) |
@@ -245,9 +305,9 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 
 | | |
 |---|---|
-| **Framework** | Vocs (kế thừa từ FluxGantt) hoặc Hugo (Go-native static site, hợp branding "all Go") |
+| **Framework** | Vocs (inherited from FluxGantt) or Hugo (a Go-native static site, fitting the "all Go" branding) |
 | **Hosting** | Cloudflare Pages |
-| **Code examples** | Go Playground embed cho server-side snippet; StackBlitz cho client wrapper |
+| **Code examples** | Go Playground embeds for server-side snippets; StackBlitz for client wrappers |
 
 ---
 
@@ -258,7 +318,7 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 ```
 ┌───────────────────────────────────────────────────────────┐
 │  User Application Layer                                   │
-│  (React, Vue, vanilla JS, hoặc Go backend trực tiếp)      │
+│  (React, Vue, vanilla JS, or a Go backend directly)       │
 └───────────────────────────────────────────────────────────┘
                               │
                 ┌─────────────┴─────────────┐
@@ -266,16 +326,16 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 ┌───────────────────────────┐   ┌───────────────────────────┐
 │  Client Wrapper Layer     │   │  Go Native Usage          │
 │  @fluxdocs/react/vue      │   │  import "fluxdocs/core"   │
-│  - Load WASM core         │   │  - Dùng trực tiếp trong   │
-│  - Canvas paint binding   │   │    backend Go, không cần  │
-│  - Event binding cho      │   │    wrapper hay network    │
-│    annotation tools       │   │    hop                    │
+│  - Load WASM core         │   │  - Used directly in a Go  │
+│  - Canvas paint binding   │   │    backend, no wrapper or │
+│  - Event binding for      │   │    network hop needed     │
+│    annotation tools       │   │                           │
 └───────────────────────────┘   └───────────────────────────┘
                 │                           │
                 └─────────────┬─────────────┘
                               ▼
 ┌───────────────────────────────────────────────────────────┐
-│  Core Engine (fluxdocs/core) — viết 100% bằng Go          │
+│  Core Engine (fluxdocs/core) — written 100% in Go         │
 │                                                             │
 │  ┌───────────────────────────────────────────────────────┐│
 │  │  Public API: OpenDocument(), Render(), Annotate()      ││
@@ -291,53 +351,73 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 │  │  Render Layer                                         ││
 │  │  - Raster renderer (PNG/JPEG buffer)                   ││
 │  │  - SVG renderer (vector, client-side accurate)         ││
-│  │  - Goroutine pool cho multi-page parallel render        ││
+│  │  - Goroutine pool for multi-page parallel render        ││
 │  └───────────────────────────────────────────────────────┘│
 │  ┌───────────────────────────────────────────────────────┐│
 │  │  Annotation Layer                                     ││
-│  │  - AnnotationStore (reactive, theo task store FluxGantt)││
+│  │  - AnnotationStore (reactive, like FluxGantt's store)  ││
 │  │  - Highlight, note, draw, shape, stamp                 ││
-│  │  - Serialize annotation độc lập với PDF gốc (JSON layer)││
+│  │  - Serialize annotations independent of the source PDF ││
+│  │    (JSON layer)                                        ││
 │  └───────────────────────────────────────────────────────┘│
 │  ┌───────────────────────────────────────────────────────┐│
 │  │  Document Ops Layer                                   ││
-│  │  - Merge / split / rotate / reorder page                ││
-│  │  - Redact (xóa vĩnh viễn nội dung, không chỉ che)        ││
+│  │  - Merge / split / rotate / reorder pages               ││
+│  │  - Redact (permanently remove content, not just cover)  ││
 │  │  - Watermark                                            ││
-│  │  - Form fill (AcroForm + XFA cơ bản)                     ││
+│  │  - Form fill (AcroForm + basic XFA)                     ││
 │  │  - Digital signature (PKCS#7)                           ││
 │  └───────────────────────────────────────────────────────┘│
 │  ┌───────────────────────────────────────────────────────┐│
 │  │  Extraction Layer                                     ││
-│  │  - Text extraction theo layout (giữ thứ tự đọc)         ││
+│  │  - Layout-aware text extraction (reading order)         ││
 │  │  - Table detection                                     ││
-│  │  - OCR adapter (Tesseract CGO hoặc cloud)               ││
-│  │  - AI structured extraction (Cloud, gọi LLM)            ││
+│  │  - OCR adapter (Tesseract CGO or cloud)                 ││
+│  │  - AI structured extraction (Cloud, calls an LLM)       ││
 │  └───────────────────────────────────────────────────────┘│
 │  ┌───────────────────────────────────────────────────────┐│
-│  │  Sync Layer (chỉ Cloud)                                ││
-│  │  - Annotation sync nhiều người dùng (CRDT-lite)          ││
+│  │  Sync Layer (Cloud only)                               ││
+│  │  - Multi-user annotation sync (CRDT-lite)               ││
 │  │  - Comment thread per annotation                        ││
-│  │  - Version history document                             ││
+│  │  - Document version history                             ││
 │  └───────────────────────────────────────────────────────┘│
 └───────────────────────────────────────────────────────────┘
 ```
 
 ### 5.2 Design Principles
 
-1. **Core Go thật, không phải Go giả** — Khác với nhiều dự án gắn Go vào use case UI-heavy (nơi Go chỉ làm relay/orchestration), ở đây phần nặng nhất — parse + render PDF — chạy hoàn toàn trong Go. Đây là điểm khác biệt kỹ thuật cốt lõi so với việc "viết Go cho có".
+1. **A real Go core, not fake Go** — Unlike many projects that bolt Go onto a
+   UI-heavy use case (where Go only does relay/orchestration), here the heaviest
+   work — parse + render PDF — runs entirely in Go. This is the core technical
+   differentiator versus "writing Go for show".
 
-2. **Một core, hai target build** — Cùng codebase Go compile ra native binary (server, CLI) và WASM (browser). Không cần maintain hai implementation riêng như nhiều SDK khác (JS cho client, ngôn ngữ khác cho server).
+2. **One core, two build targets** — The same Go codebase compiles to a native
+   binary (server, CLI) and to WASM (browser). No need to maintain two separate
+   implementations as many other SDKs do (JS for client, another language for
+   server).
 
-3. **Annotation tách biệt khỏi PDF gốc** — Annotation lưu dưới dạng JSON layer riêng, áp lên PDF khi render hoặc khi export "flatten". Cho phép multi-user annotate không sửa file gốc, dễ undo, dễ đồng bộ.
+3. **Annotations separate from the original PDF** — Annotations are stored as a
+   separate JSON layer, applied onto the PDF at render time or on "flatten"
+   export. This lets multiple users annotate without modifying the source file,
+   eases undo, and eases syncing.
 
-4. **Goroutine-native cho batch xử lý** — Render nhiều trang, OCR nhiều file, extract nhiều document — tất cả dùng worker pool Go, không cần thread pool ngoài hay async runtime phức tạp.
+4. **Goroutine-native for batch processing** — Rendering many pages, OCR-ing many
+   files, extracting many documents — all use a Go worker pool, no external
+   thread pool or complex async runtime.
 
-5. **Privacy-first qua WASM** — Với tài liệu nhạy cảm (hợp đồng, hồ sơ y tế), toàn bộ pipeline có thể chạy trong browser, không gửi byte nào lên server. Đây là use case mà SDK cloud-first (Nutrient Cloud) không đáp ứng tốt.
+5. **Privacy-first via WASM** — For sensitive documents (contracts, medical
+   records), the whole pipeline can run in the browser, sending not a single byte
+   to a server. This is a use case cloud-first SDKs (Nutrient Cloud) don't serve
+   well.
 
-6. **Type safety qua Go struct, không cần TypeScript riêng** — Vì core là Go, server-side consumer (backend Go khác) dùng trực tiếp type Go, không cần lớp transform JSON ↔ type như khi core viết bằng ngôn ngữ khác.
+6. **Type safety via Go structs, no separate TypeScript needed** — Because the
+   core is Go, server-side consumers (other Go backends) use Go types directly,
+   without a JSON ↔ type transform layer as when the core is in another language.
 
-7. **License rõ ràng, tách core/CGO** — Phần core Go thuần (parse, render cơ bản, annotation, document ops) giữ MIT 100%. Phần tùy chọn dùng CGO (OCR Tesseract, high-fidelity render qua MuPDF) đóng gói build tag riêng để người dùng tự quyết có chấp nhận license phụ thuộc đó hay không.
+7. **Clear license, separating core/CGO** — The pure-Go core (parse, basic
+   render, annotation, document ops) stays 100% MIT. Optional CGO-using parts
+   (Tesseract OCR, high-fidelity render via MuPDF) are packaged behind their own
+   build tags so users decide whether to accept that dependent license.
 
 ---
 
@@ -346,14 +426,14 @@ So với Gantt chart, ceiling giá cao hơn rõ rệt nhờ benchmark thị trư
 ### 6.1 Core Types (Go)
 
 ```go
-// Package core là engine chính; thư mục core/, import path
-// github.com/fluxtoolkit/fluxdocs/core, dùng dưới dạng core.OpenDocument (§7.1).
+// Package core is the main engine; directory core/, import path
+// github.com/fluxtoolkit/fluxdocs/core, used as core.OpenDocument (§7.1).
 package core
 
 import "time"
 
-// DocumentID, PageID, AnnotationID dùng type alias có kiểm soát
-// để tránh nhầm lẫn giữa các loại ID (tương đương branded type trong TS)
+// DocumentID, PageID, AnnotationID use controlled type aliases to avoid mixing
+// up ID kinds (the equivalent of branded types in TS)
 type DocumentID string
 type PageID string
 type AnnotationID string
@@ -403,10 +483,10 @@ type Annotation struct {
 	PageID    PageID
 	Type      AnnotationType
 	Rect      Rect
-	Color     string  // hex, ví dụ "#f59e0b"
+	Color     string  // hex, e.g. "#f59e0b"
 	Opacity   float64 // 0..1
-	Content   string  // text nếu là note/stamp
-	Points    []Point // dùng cho draw (freehand)
+	Content   string  // text if it is a note/stamp
+	Points    []Point // used for draw (freehand)
 	AuthorID  string
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -425,7 +505,7 @@ type FormField struct {
 	Name     string
 	Type     FormFieldType
 	Value    string
-	Options  []string // cho dropdown/radio
+	Options  []string // for dropdown/radio
 	Required bool
 	ReadOnly bool
 }
@@ -441,26 +521,26 @@ const (
 )
 
 type RenderOptions struct {
-	DPI         int    // mặc định 150
+	DPI         int    // default 150
 	Format      string // "png" | "jpeg" | "svg"
-	PageRange   []int  // rỗng = toàn bộ
-	Quality     int    // 1-100, áp dụng cho jpeg
+	PageRange   []int  // empty = all pages
+	Quality     int    // 1-100, applies to jpeg
 }
 
 type ExtractOptions struct {
 	PreserveLayout bool
 	IncludeTables  bool
-	OCRFallback    bool // nếu trang là ảnh scan, fallback sang OCR
+	OCRFallback    bool // if the page is a scanned image, fall back to OCR
 }
 ```
 
-### 6.2 Annotation Layer (lưu độc lập với PDF)
+### 6.2 Annotation Layer (stored independently of the PDF)
 
 ```go
 type AnnotationLayer struct {
 	ID         LayerID
 	DocumentID DocumentID
-	Name       string // ví dụ "Bản review của Long"
+	Name       string // e.g. "Long's review"
 	Annotations []Annotation
 	Visible    bool
 	CreatedAt  time.Time
@@ -488,7 +568,7 @@ type ViewerConfig struct {
 
 ## 7. Public API Specification
 
-### 7.1 Mở document (Go native)
+### 7.1 Opening a document (Go native)
 
 ```go
 package main
@@ -502,7 +582,7 @@ func main() {
 	}
 	defer doc.Close()
 
-	// Render trang đầu ra PNG, 150 DPI
+	// Render the first page to PNG at 150 DPI
 	img, err := doc.RenderPage(0, core.RenderOptions{
 		DPI:    150,
 		Format: "png",
@@ -533,7 +613,7 @@ doc.AddAnnotation(a Annotation) (Annotation, error)
 doc.UpdateAnnotation(id AnnotationID, patch AnnotationPatch) (Annotation, error)
 doc.RemoveAnnotation(id AnnotationID) error
 doc.GetAnnotations(pageID PageID) ([]Annotation, error)
-doc.FlattenAnnotations() (*Document, error) // bake annotation vào PDF, không sửa được nữa
+doc.FlattenAnnotations() (*Document, error) // bake annotations into the PDF, no longer editable
 doc.ExportAnnotationLayer() (*AnnotationLayer, error)
 doc.ImportAnnotationLayer(layer AnnotationLayer) error
 ```
@@ -541,9 +621,9 @@ doc.ImportAnnotationLayer(layer AnnotationLayer) error
 ### 7.4 Redaction (Pro)
 
 ```go
-doc.RedactText(pageIndex int, pattern string) ([]Rect, error)       // theo regex, ví dụ số CMND
-doc.RedactArea(pageIndex int, rect Rect) error                       // theo vùng chỉ định
-doc.RedactAndFlatten() (*Document, error)                            // xóa vĩnh viễn, không phục hồi được
+doc.RedactText(pageIndex int, pattern string) ([]Rect, error)       // by regex, e.g. an ID number
+doc.RedactArea(pageIndex int, rect Rect) error                       // by a specified region
+doc.RedactAndFlatten() (*Document, error)                            // permanently removed, not recoverable
 ```
 
 ### 7.5 Forms (Pro)
@@ -561,12 +641,12 @@ doc.SignDocument(opts SignatureOptions) (*Document, error)
 doc.ExtractText(opts ExtractOptions) (string, error)
 doc.ExtractTextByPage(pageIndex int, opts ExtractOptions) (string, error)
 doc.ExtractTables(pageIndex int) ([]Table, error)
-doc.OCRPage(pageIndex int) (string, error)                          // Pro, cần Tesseract build tag
-doc.ExtractStructured(schema any) (map[string]any, error)            // Cloud, gọi LLM
+doc.OCRPage(pageIndex int) (string, error)                          // Pro, needs the Tesseract build tag
+doc.ExtractStructured(schema any) (map[string]any, error)            // Cloud, calls an LLM
 doc.AskDocument(question string) (string, error)                     // Cloud, document Q&A
 ```
 
-### 7.7 Events (qua callback, không có event loop native trong Go)
+### 7.7 Events (via callbacks, since Go has no native event loop)
 
 ```go
 doc.OnAnnotationChange(func(a Annotation))
@@ -574,7 +654,7 @@ doc.OnPageRendered(func(pageIndex int, img []byte))
 doc.OnFormFieldChange(func(f FormField))
 ```
 
-### 7.8 React Wrapper Example (WASM core qua client)
+### 7.8 React Wrapper Example (WASM core via the client)
 
 ```tsx
 import { FluxDocsViewer, useFluxDocs } from '@fluxdocs/react';
@@ -596,16 +676,16 @@ function ContractReview() {
 }
 ```
 
-### 7.9 HTTP API (Cloud tier, dùng cho integration không cần Go)
+### 7.9 HTTP API (Cloud tier, for non-Go integrations)
 
 ```
-POST   /v1/documents                  upload PDF, trả về documentId
-GET    /v1/documents/:id/pages/:n     render trang dạng PNG/SVG
-POST   /v1/documents/:id/annotations  thêm annotation
-GET    /v1/documents/:id/annotations  lấy toàn bộ annotation layer
-POST   /v1/documents/:id/extract      trích xuất text/table
+POST   /v1/documents                  upload a PDF, returns documentId
+GET    /v1/documents/:id/pages/:n     render a page as PNG/SVG
+POST   /v1/documents/:id/annotations  add an annotation
+GET    /v1/documents/:id/annotations  get the full annotation layer
+POST   /v1/documents/:id/extract      extract text/tables
 POST   /v1/documents/:id/ask          AI document Q&A
-POST   /v1/documents/:id/redact       redact theo pattern/area
+POST   /v1/documents/:id/redact       redact by pattern/area
 ```
 
 ---
@@ -614,17 +694,20 @@ POST   /v1/documents/:id/redact       redact theo pattern/area
 
 ### 8.1 Visual Philosophy
 
-FluxDocs là công cụ business chuyên nghiệp, đối tượng dùng thường ở môi trường nhạy cảm (pháp lý, y tế, tài chính). Aesthetic phải truyền tải "đáng tin cậy, chính xác" hơn là "sáng tạo". Chủ động tránh:
+FluxDocs is a professional business tool whose users typically work in sensitive
+environments (legal, medical, finance). The aesthetic must convey "trustworthy,
+precise" rather than "creative". Actively avoid:
 
-- Màu sắc annotation quá sặc sỡ gây mất tập trung khỏi nội dung tài liệu
-- Animation rườm rà khi chuyển trang
-- Icon trừu tượng khó hiểu cho tool annotation (luôn dùng icon rõ nghĩa: bút highlight, ghi chú, hình chữ nhật)
+- Overly garish annotation colors that distract from the document content
+- Fussy page-transition animations
+- Abstract, hard-to-read icons for annotation tools (always use clear icons:
+  highlighter pen, note, rectangle)
 
-Ưu tiên:
+Prefer:
 
-- Document canvas là trung tâm, toolbar thu nhỏ tối đa khi không cần
-- Density cao cho sidebar (danh sách annotation, outline, thumbnail trang)
-- Trạng thái rõ ràng: đang ở chế độ xem hay chế độ annotate, có lưu chưa
+- The document canvas as the center; minimize the toolbar when not needed
+- High density for the sidebar (annotation list, outline, page thumbnails)
+- Clear state: viewing vs annotating mode, saved or not
 
 ### 8.2 Design Tokens
 
@@ -639,7 +722,7 @@ FluxDocs là công cụ business chuyên nghiệp, đối tượng dùng thườ
 
   /* Light theme */
   --fd-bg:               #fafafa;
-  --fd-bg-canvas:        #e5e7eb;   /* nền quanh trang PDF, tạo độ tương phản */
+  --fd-bg-canvas:        #e5e7eb;   /* the area around the PDF page, for contrast */
   --fd-fg:               #18181b;
   --fd-fg-muted:         #71717a;
   --fd-border:           #e5e7eb;
@@ -656,7 +739,7 @@ FluxDocs là công cụ business chuyên nghiệp, đối tượng dùng thườ
   --fd-highlight-pink:   #f9a8d4;
   --fd-note-bg:          #f59e0b;
   --fd-draw-default:     #ef4444;
-  --fd-redact-fill:      #18181b;   /* đen đặc, không trong suốt */
+  --fd-redact-fill:      #18181b;   /* solid black, non-transparent */
 
   /* Page chrome */
   --fd-page-shadow:      0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.08);
@@ -681,11 +764,11 @@ FluxDocs là công cụ business chuyên nghiệp, đối tượng dùng thườ
 │           │                                        │             │
 │ ┌───────┐ │   ┌──────────────────────────────┐     │ ┌─────────┐ │
 │ │ Pg 1  │ │   │                              │     │ │ Highlight│ │
-│ ├───────┤ │   │      (nội dung trang PDF)     │     │ │ "Điều 3" │ │
+│ ├───────┤ │   │      (PDF page content)       │     │ │ "Clause3"│ │
 │ │ Pg 2  │ │   │                              │     │ ├─────────┤ │
 │ │ Pg 3  │ │   │  ▓▓▓▓ highlight               │     │ │ Note     │ │
-│ └───────┘ │   │                              │     │ │ "Cần xác │ │
-│           │   └──────────────────────────────┘     │ │  nhận"   │ │
+│ └───────┘ │   │                              │     │ │ "Needs   │ │
+│           │   └──────────────────────────────┘     │ │  review" │ │
 │           │                                        │ └─────────┘ │
 └───────────┴────────────────────────────────────────┴─────────────┘
 ```
@@ -694,140 +777,155 @@ FluxDocs là công cụ business chuyên nghiệp, đối tượng dùng thườ
 
 **Annotation tools:**
 
-| Hành động | Kết quả |
+| Action | Result |
 |---|---|
-| Chọn tool Highlight, kéo qua text | Tạo highlight bám theo dòng text được chọn |
-| Chọn tool Note, click vào trang | Tạo note pin, mở popup nhập nội dung |
-| Chọn tool Draw, kéo chuột | Vẽ freehand, lưu thành chuỗi Point |
-| Chọn tool Redact, kéo vùng | Đánh dấu vùng redact (chưa xóa, chỉ preview tới khi flatten) |
-| Double click annotation | Mở popup edit nội dung/màu |
-| Right click annotation | Context menu: Delete, Change color, Reply |
+| Pick the Highlight tool, drag over text | Create a highlight following the selected text lines |
+| Pick the Note tool, click on the page | Create a note pin, open a popup to enter content |
+| Pick the Draw tool, drag the mouse | Draw freehand, stored as a sequence of Points |
+| Pick the Redact tool, drag a region | Mark a redact region (not yet removed, preview only until flatten) |
+| Double-click an annotation | Open the edit popup for content/color |
+| Right-click an annotation | Context menu: Delete, Change color, Reply |
 
 **Keyboard:**
 
-| Phím | Hành động |
+| Key | Action |
 |---|---|
-| Arrow Up/Down | Chuyển trang |
-| Cmd/Ctrl + F | Mở search trong document |
+| Arrow Up/Down | Change page |
+| Cmd/Ctrl + F | Open search within the document |
 | Cmd/Ctrl + +/- | Zoom in/out |
-| Cmd/Ctrl + S | Save (flatten annotation nếu cần) |
-| Escape | Thoát chế độ annotate, về chế độ xem |
-| Delete | Xóa annotation đang chọn |
+| Cmd/Ctrl + S | Save (flatten annotations if needed) |
+| Escape | Exit annotate mode, back to view mode |
+| Delete | Delete the selected annotation |
 
 ### 8.5 Accessibility
 
-- WCAG 2.1 AA tối thiểu cho toolbar và sidebar (canvas PDF chính nó kế thừa accessibility từ structure PDF gốc, FluxDocs không thể cải thiện PDF không có tag accessibility)
-- Toàn bộ annotation tool điều khiển được bằng keyboard
-- Hỗ trợ PDF/UA (Tagged PDF) khi document gốc có, đọc được qua screen reader
-- Focus indicator rõ trên mọi annotation và toolbar button
-- Tôn trọng `prefers-reduced-motion` cho transition chuyển trang/zoom
+- WCAG 2.1 AA minimum for the toolbar and sidebar (the PDF canvas itself inherits
+  accessibility from the original PDF structure; FluxDocs cannot improve a PDF
+  with no accessibility tags)
+- All annotation tools controllable by keyboard
+- Support PDF/UA (Tagged PDF) when the source document has it, readable via a
+  screen reader
+- Clear focus indicators on every annotation and toolbar button
+- Respect `prefers-reduced-motion` for page-change/zoom transitions
 
 ---
 
 ## 9. Feature Roadmap (3 Waves)
 
-### 9.1 Wave 1 — Free MVP (Tier: Core MIT, Tuần 1–8)
+### 9.1 Wave 1 — Free MVP (Tier: Core MIT, Weeks 1–8)
 
-**Mục tiêu:** Ship một PDF viewer + annotation engine Go hoạt động đầy đủ, đủ tốt để thay thế việc ghép pdf.js + pdf-lib, đủ để thu hút GitHub star và npm download ban đầu.
+**Goal:** Ship a fully working Go PDF viewer + annotation engine, good enough to
+replace stitching pdf.js + pdf-lib, good enough to attract initial GitHub stars
+and npm downloads.
 
-**Tuần 1–2: Foundation**
-- Setup Go module + workspace, CI (GitHub Actions) build cả native và WASM target
+**Weeks 1–2: Foundation**
+- Set up the Go module + workspace, CI (GitHub Actions) building both native and
+  WASM targets
 - PDF parser: object model, xref table, page tree resolver
-- Decode content stream cơ bản (text, path đơn giản)
-- Render trang ra raster PNG (DPI tùy chỉnh)
-- CLI tool `fluxdocs` cơ bản: render, info, extract-text
+- Decode basic content streams (text, simple paths)
+- Render a page to raster PNG (configurable DPI)
+- Basic `fluxdocs` CLI tool: render, info, extract-text
 
-**Tuần 3–4: Rendering nâng cao + WASM**
-- Font decoder (TrueType, Type1 cơ bản — đủ cho 90% PDF thực tế)
-- Render path vector phức tạp (Bezier curve, clipping)
-- Build WASM target, test chạy trong browser qua Canvas
-- Goroutine pool cho render multi-page song song
+**Weeks 3–4: Advanced rendering + WASM**
+- Font decoder (TrueType, basic Type1 — enough for 90% of real PDFs)
+- Render complex vector paths (Bezier curves, clipping)
+- Build the WASM target, test it running in a browser via Canvas
+- Goroutine pool for parallel multi-page rendering
 
-**Tuần 5: Annotation Engine**
-- AnnotationStore (reactive layer, JSON-serializable)
-- Highlight, note, draw, shape — đủ 4 loại cơ bản
-- Render annotation layer chồng lên canvas (cả native và WASM)
-- Export/import annotation layer riêng biệt với PDF gốc
+**Week 5: Annotation Engine**
+- AnnotationStore (a reactive, JSON-serializable layer)
+- Highlight, note, draw, shape — the 4 basic types
+- Render the annotation layer over the canvas (both native and WASM)
+- Export/import the annotation layer separately from the source PDF
 
-**Tuần 6: Client Wrappers**
-- `@fluxdocs/react` load WASM, component `<FluxDocsViewer />`
-- `@fluxdocs/vue` tương đương
-- Sample app cho mỗi framework
+**Week 6: Client Wrappers**
+- `@fluxdocs/react` loads WASM, a `<FluxDocsViewer />` component
+- `@fluxdocs/vue` equivalent
+- A sample app per framework
 
-**Tuần 7: Polish & Document Ops**
-- Merge / split / rotate / reorder page
-- Text extraction theo layout (giữ thứ tự đọc đúng, không chỉ dump theo object order)
-- Export annotation đã flatten ra PDF mới
-- Mobile responsive cho viewer UI
+**Week 7: Polish & Document Ops**
+- Merge / split / rotate / reorder pages
+- Layout-aware text extraction (correct reading order, not just object-order dump)
+- Export flattened annotations to a new PDF
+- Mobile-responsive viewer UI
 
-**Tuần 8: Documentation & Launch Prep**
-- Documentation site (Hugo hoặc Vocs)
-- 10+ example: Go server-side, React client-side, CLI batch processing
-- Landing page với demo "redact PII trực tiếp trong browser, không gửi server"
+**Week 8: Documentation & Launch Prep**
+- Documentation site (Hugo or Vocs)
+- 10+ examples: Go server-side, React client-side, CLI batch processing
+- Landing page with a "redact PII directly in the browser, nothing sent to a
+  server" demo
 - README quick start
-- Trang so sánh (vs Nutrient, vs ghép pdf.js+pdf-lib)
-- Draft Show HN, asset Product Hunt
+- Comparison pages (vs Nutrient, vs stitching pdf.js+pdf-lib)
+- Draft Show HN, Product Hunt assets
 
-### 9.2 Wave 2 — Pro Tier (Tuần 11–18)
+### 9.2 Wave 2 — Pro Tier (Weeks 11–18)
 
-**Mục tiêu:** Thêm tính năng developer chịu trả $299–799 one-time — đúng nhóm tính năng Nutrient tính phí riêng.
+**Goal:** Add features developers will pay $299–799 one-time for — exactly the
+feature set Nutrient charges separately for.
 
-**Tuần 11–12: Forms & Signature**
-- Parse AcroForm field (text, checkbox, radio, dropdown)
-- Fill form qua API, flatten form thành static content
-- Digital signature (PKCS#7), verify signature có sẵn trong PDF
-- Signature pad UI component cho client wrapper
+**Weeks 11–12: Forms & Signature**
+- Parse AcroForm fields (text, checkbox, radio, dropdown)
+- Fill forms via the API, flatten the form into static content
+- Digital signature (PKCS#7), verify an existing signature in a PDF
+- A signature-pad UI component for the client wrapper
 
-**Tuần 13–14: Redaction**
-- Redact theo regex pattern (số CMND, thẻ tín dụng, email)
-- Redact theo vùng chỉ định bằng tay
-- Flatten redaction — đảm bảo nội dung bị xóa vĩnh viễn ở object stream, không chỉ vẽ đè (đây là lỗi bảo mật phổ biến ở nhiều tool redact kém)
-- Test suite xác minh nội dung đã redact không thể recover qua text extraction hoặc copy-paste
+**Weeks 13–14: Redaction**
+- Redact by regex pattern (ID numbers, credit cards, emails)
+- Redact by a manually specified region
+- Flatten redaction — ensure content is permanently removed from the object
+  stream, not just painted over (a common security flaw in poor redaction tools)
+- A test suite verifying redacted content cannot be recovered via text extraction
+  or copy-paste
 
-**Tuần 15–16: OCR & Compare**
-- Tích hợp Tesseract qua CGO (build tag `ocr`)
-- OCR fallback tự động khi `ExtractText` trả về rỗng (trang là ảnh scan)
-- Document compare: diff hai version PDF, highlight phần thay đổi
-- Watermark (text/image, áp lên toàn bộ hoặc trang chỉ định)
+**Weeks 15–16: OCR & Compare**
+- Integrate Tesseract via CGO (build tag `ocr`)
+- OCR fallback automatically when `ExtractText` returns empty (the page is a
+  scanned image)
+- Document compare: diff two PDF versions, highlight the changes
+- Watermark (text/image, over all or specified pages)
 
-**Tuần 17: Advanced Export & Polish**
-- Export PDF/A (chuẩn lưu trữ dài hạn)
-- Batch processing CLI (xử lý hàng loạt file theo glob pattern)
-- Performance benchmark suite, publish số liệu so với Nutrient/MuPDF
+**Week 17: Advanced Export & Polish**
+- Export PDF/A (the long-term archival standard)
+- Batch-processing CLI (process many files by glob pattern)
+- A performance benchmark suite, publish numbers vs Nutrient/MuPDF
 
-**Tuần 18: Pro Launch**
+**Week 18: Pro Launch**
 - License key validation
 - Stripe Checkout integration
-- Pro documentation, migration guide từ pdf.js/pdf-lib
+- Pro documentation, migration guide from pdf.js/pdf-lib
 - Public Pro launch
 
-### 9.3 Wave 3 — Cloud + AI Tier (Tháng 6+)
+### 9.3 Wave 3 — Cloud + AI Tier (Month 6+)
 
-**Mục tiêu:** Recurring revenue qua AI document processing — đúng category Nutrient bán riêng (XtractFlow) với giá cao.
+**Goal:** Recurring revenue via AI document processing — exactly the category
+Nutrient sells separately (XtractFlow) at a high price.
 
-**Tháng 6–7: Cloud Foundation**
+**Months 6–7: Cloud Foundation**
 - Backend API (Go + Chi/Echo + Postgres)
-- Upload document, lưu vào R2, queue xử lý qua River
+- Upload a document, store in R2, queue processing via River
 - Auth + organization model
-- Stripe subscription theo volume xử lý
+- Stripe subscription by processing volume
 
-**Tháng 8–9: AI Extraction**
-- `ExtractStructured()` — đưa schema (ví dụ "tên, ngày, số tiền hợp đồng"), LLM trả về structured JSON
-- `AskDocument()` — document Q&A qua LLM, có citation về trang/vị trí trong PDF
-- Auto-redact PII bằng AI detection (không cần viết regex tay)
-- Table extraction nâng cao bằng vision model cho bảng phức tạp
+**Months 8–9: AI Extraction**
+- `ExtractStructured()` — give a schema (e.g. "name, date, contract value"), the
+  LLM returns structured JSON
+- `AskDocument()` — document Q&A via an LLM, with citations to page/position in
+  the PDF
+- Auto-redact PII via AI detection (no hand-written regex)
+- Advanced table extraction via a vision model for complex tables
 
-**Tháng 10–11: Collaboration**
-- Multi-user annotation sync (CRDT-lite, không cần full Yjs vì annotation ít conflict hơn text editing)
-- Comment thread theo từng annotation
-- Share link với permission (view/comment/edit)
-- Version history document
+**Months 10–11: Collaboration**
+- Multi-user annotation sync (CRDT-lite, no need for full Yjs since annotations
+  conflict less than text editing)
+- Comment thread per annotation
+- Share links with permissions (view/comment/edit)
+- Document version history
 
-**Tháng 12: Integrations**
-- Webhook (document processed, annotation added)
+**Month 12: Integrations**
+- Webhooks (document processed, annotation added)
 - Zapier connector
-- Tích hợp DocuSign-style flow (request signature qua email)
-- Export tới Google Drive/Dropbox sau khi xử lý
+- DocuSign-style flow integration (request a signature via email)
+- Export to Google Drive/Dropbox after processing
 
 ---
 
@@ -835,9 +933,10 @@ FluxDocs là công cụ business chuyên nghiệp, đối tượng dùng thườ
 
 ### 10.1 Method Naming (Go idiomatic)
 
-PascalCase cho exported method, verb đứng trước, tuân theo Go convention chuẩn (không dùng "Get" prefix khi trả về field đơn giản, theo Effective Go).
+PascalCase for exported methods, verb first, following standard Go convention
+(no "Get" prefix when returning a simple field, per Effective Go).
 
-**Nên dùng:**
+**Use:**
 ```go
 doc.RenderPage(0, opts)
 doc.AddAnnotation(a)
@@ -846,25 +945,26 @@ doc.RedactArea(pageIndex, rect)
 doc.Merge(other)
 ```
 
-**Tránh:**
+**Avoid:**
 ```go
-doc.render_page(0, opts)        // snake_case không phải Go convention
-doc.GetRenderedPageAsImage(0)   // dài dòng, "Get" dư thừa
-doc.DoOperation("render", 0)    // generic action, mất type safety
+doc.render_page(0, opts)        // snake_case is not Go convention
+doc.GetRenderedPageAsImage(0)   // verbose, redundant "Get"
+doc.DoOperation("render", 0)    // a generic action, loses type safety
 ```
 
 ### 10.2 Error Handling
 
-Theo chuẩn Go: trả `error` là giá trị thứ hai, không dùng panic cho lỗi runtime thông thường (chỉ panic cho lỗi không thể phục hồi, ví dụ bug logic nội bộ).
+Per Go standard: return `error` as the second value, no panic for ordinary
+runtime errors (only panic for unrecoverable errors, e.g. an internal logic bug).
 
 ```go
 img, err := doc.RenderPage(0, opts)
 if err != nil {
-    // xử lý lỗi cụ thể, ví dụ kiểm tra errors.Is(err, core.ErrPageNotFound)
+    // handle the specific error, e.g. check errors.Is(err, core.ErrPageNotFound)
 }
 ```
 
-Định nghĩa sentinel error cho case phổ biến:
+Define sentinel errors for common cases:
 
 ```go
 var (
@@ -874,9 +974,9 @@ var (
 )
 ```
 
-### 10.3 CSS Class Naming (BEM, cho client UI)
+### 10.3 CSS Class Naming (BEM, for the client UI)
 
-Prefix `fd-` để tránh xung đột với host application.
+Prefix `fd-` to avoid collisions with the host application.
 
 ```css
 .fd-viewer { }
@@ -894,26 +994,27 @@ CSS custom property prefix: `--fd-*`
 
 ### 10.4 Package Naming (Go)
 
-Theo convention Go: tên package ngắn, lowercase, không underscore, mô tả đúng chức năng.
+Per Go convention: short, lowercase package names, no underscores, describing the
+function accurately.
 
 ```
-fluxdocs/core           # engine chính
+fluxdocs/core           # the main engine
 fluxdocs/render         # render logic (raster + svg)
-fluxdocs/annotation      # annotation engine
+fluxdocs/annotation      # the annotation engine
 fluxdocs/extract        # text/table extraction
-fluxdocs/ocr            # OCR adapter (build tag riêng)
+fluxdocs/ocr            # OCR adapter (separate build tag)
 fluxdocs/sign           # digital signature
-fluxdocs/cloud          # HTTP client gọi Cloud API
+fluxdocs/cloud          # HTTP client calling the Cloud API
 ```
 
-### 10.5 NPM Package Names (cho client wrapper)
+### 10.5 NPM Package Names (for client wrappers)
 
-| Package | Mô tả |
+| Package | Description |
 |---|---|
 | `@fluxdocs/core` | WASM build + JS loader |
 | `@fluxdocs/react` | React wrapper (Wave 1) |
 | `@fluxdocs/vue` | Vue wrapper (Wave 1) |
-| `@fluxdocs/web-components` | Custom element thuần (Wave 2) |
+| `@fluxdocs/web-components` | Pure custom elements (Wave 2) |
 | `@fluxdocs/cloud-sdk` | Cloud API client (Wave 3) |
 
 ---
@@ -924,25 +1025,25 @@ fluxdocs/cloud          # HTTP client gọi Cloud API
 
 ```
 fluxdocs/
-├── core/                            # module Go chính
+├── core/                            # the main Go module
 │   ├── document.go                  # Document type + OpenDocument()
 │   ├── parse/
-│   │   ├── object.go                # object model PDF
+│   │   ├── object.go                # PDF object model
 │   │   ├── xref.go                   # cross-reference table
-│   │   ├── pagetree.go               # resolve page tree
-│   │   ├── contentstream.go          # tokenize content stream
+│   │   ├── pagetree.go               # resolve the page tree
+│   │   ├── contentstream.go          # tokenize the content stream
 │   │   └── font.go                   # font decoder
 │   ├── render/
 │   │   ├── raster.go                 # render PNG/JPEG
 │   │   ├── svg.go                    # render SVG
-│   │   ├── pool.go                   # goroutine pool multi-page
-│   │   └── canvas_wasm.go            # binding Canvas API (build tag wasm)
+│   │   ├── pool.go                   # multi-page goroutine pool
+│   │   └── canvas_wasm.go            # Canvas API binding (build tag wasm)
 │   ├── annotation/
 │   │   ├── store.go                  # AnnotationStore
 │   │   ├── highlight.go
 │   │   ├── note.go
 │   │   ├── draw.go
-│   │   └── layer.go                  # serialize/deserialize layer
+│   │   └── layer.go                  # serialize/deserialize the layer
 │   ├── docops/
 │   │   ├── merge.go
 │   │   ├── split.go
@@ -968,7 +1069,7 @@ fluxdocs/
 │   └── fluxdocs/
 │       └── main.go                   # CLI tool
 │
-├── cloud/                            # backend Go cho Cloud tier
+├── cloud/                            # Go backend for the Cloud tier
 │   ├── api/
 │   │   ├── handlers/
 │   │   ├── middleware/
@@ -977,13 +1078,13 @@ fluxdocs/
 │   │   └── worker.go
 │   ├── db/
 │   │   ├── schema.sql
-│   │   └── queries.sql               # cho sqlc generate
+│   │   └── queries.sql               # for sqlc generate
 │   └── main.go
 │
 ├── wasm/
-│   └── main.go                       # entry point build WASM, export func qua syscall/js
+│   └── main.go                       # WASM build entry, exporting funcs via syscall/js
 │
-├── packages/                         # phần JS/TS wrapper
+├── packages/                         # the JS/TS wrappers
 │   ├── core/                         # @fluxdocs/core — load + wrap WASM
 │   ├── react/                        # @fluxdocs/react
 │   ├── vue/                          # @fluxdocs/vue
@@ -1002,7 +1103,7 @@ fluxdocs/
 │
 ├── go.work                           # Go workspace, multi-module
 ├── go.mod
-├── pnpm-workspace.yaml               # cho phần packages/ JS
+├── pnpm-workspace.yaml               # for the packages/ JS side
 ├── README.md
 ├── LICENSE                           # MIT (core)
 └── CONTRIBUTING.md
@@ -1012,7 +1113,7 @@ fluxdocs/
 
 ## 12. Database Schema (Cloud Tier)
 
-PostgreSQL schema cho bản Cloud hosted.
+PostgreSQL schema for the hosted Cloud edition.
 
 ```sql
 -- Organizations
@@ -1050,7 +1151,7 @@ CREATE TABLE documents (
   org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   title           VARCHAR(500) NOT NULL,
   page_count      INT NOT NULL,
-  storage_key     TEXT NOT NULL,          -- key trong R2
+  storage_key     TEXT NOT NULL,          -- key in R2
   file_size_bytes BIGINT,
   sha256          VARCHAR(64),             -- dedupe + integrity check
   status          VARCHAR(50) DEFAULT 'ready', -- processing/ready/failed
@@ -1083,7 +1184,7 @@ CREATE TABLE annotations (
   color       VARCHAR(20),
   opacity     NUMERIC(3,2) DEFAULT 1.0,
   content     TEXT,
-  points      JSONB,                       -- cho draw freehand
+  points      JSONB,                       -- for freehand draw
   author_id   UUID REFERENCES users(id),
   meta        JSONB,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1093,7 +1194,7 @@ CREATE TABLE annotations (
 CREATE INDEX idx_annotations_layer ON annotations(layer_id);
 CREATE INDEX idx_annotations_page ON annotations(layer_id, page_index);
 
--- Comments (theo annotation, cho collaboration Wave 3)
+-- Comments (per annotation, for Wave 3 collaboration)
 CREATE TABLE annotation_comments (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   annotation_id UUID NOT NULL REFERENCES annotations(id) ON DELETE CASCADE,
@@ -1108,7 +1209,7 @@ CREATE TABLE processing_jobs (
   document_id   UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   job_type      VARCHAR(50) NOT NULL,      -- ocr/extract/ai_extract/ask
   status        VARCHAR(50) DEFAULT 'queued', -- queued/running/done/failed
-  input         JSONB,                      -- ví dụ schema cho ai_extract, câu hỏi cho ask
+  input         JSONB,                      -- e.g. schema for ai_extract, question for ask
   result        JSONB,
   error_message TEXT,
   started_at    TIMESTAMPTZ,
@@ -1153,35 +1254,42 @@ CREATE TABLE api_keys (
 
 ### 13.1 PDF Object Resolution
 
-PDF dùng cross-reference table (xref) để map object number → vị trí byte trong file. Việc resolve đúng object — đặc biệt với incremental update (PDF bị edit nhiều lần, có nhiều xref table) — là nền tảng để render đúng.
+PDF uses a cross-reference table (xref) to map object number → byte position in
+the file. Resolving objects correctly — especially with incremental updates (a
+PDF edited many times, having multiple xref tables) — is the foundation for
+correct rendering.
 
 **Pseudocode:**
 
 ```
 function resolveObject(file, objectNumber, generation):
-    xrefTable = parseXrefChain(file)  // theo chuỗi /Prev nếu có incremental update
+    xrefTable = parseXrefChain(file)  // follow the /Prev chain on incremental updates
     entry = xrefTable.lookup(objectNumber, generation)
 
     if entry.type == 'free':
-        return nil  // object đã bị xóa
+        return nil  // object has been deleted
 
     if entry.type == 'in-use':
         return parseObjectAt(file, entry.offset)
 
     if entry.type == 'compressed':
-        // object nằm trong Object Stream (PDF 1.5+)
+        // object lives inside an Object Stream (PDF 1.5+)
         objStream = resolveObject(file, entry.streamObjectNumber, 0)
         return objStream.extractObject(entry.indexInStream)
 ```
 
-**Edge case cần xử lý:**
-- File bị corrupt/truncated — fallback brute-force scan toàn file tìm `obj`/`endobj` marker
-- Nhiều xref table do incremental update — phải theo đúng thứ tự `/Prev` để lấy version mới nhất
-- Object stream lồng nhau (compressed object trong compressed object — hiếm nhưng spec cho phép)
+**Edge cases to handle:**
+- Corrupt/truncated file — fall back to a brute-force scan of the whole file for
+  `obj`/`endobj` markers
+- Multiple xref tables from incremental updates — must follow the `/Prev` order
+  correctly to get the newest version
+- Nested object streams (a compressed object inside a compressed object — rare,
+  but allowed by the spec)
 
 ### 13.2 Content Stream Rendering Pipeline
 
-Content stream PDF là chuỗi operator (giống stack-based language nhỏ) mô tả cách vẽ trang — text, path, image, clipping.
+A PDF content stream is a sequence of operators (like a small stack-based
+language) describing how to draw a page — text, paths, images, clipping.
 
 ```
 function renderPage(page, canvas):
@@ -1199,15 +1307,18 @@ function renderPage(page, canvas):
             case 'Tj': drawText(canvas, token.text, graphicsState)
             case 'm', 'l', 'c': graphicsState.path.addSegment(token)
             case 'f', 'S':      canvas.paintPath(graphicsState.path, graphicsState)
-            case 'Do':          drawXObject(canvas, token.name, graphicsState)  // image hoặc form
-            // ... ~40 operator khác theo spec PDF 32000-1
+            case 'Do':          drawXObject(canvas, token.name, graphicsState)  // image or form
+            // ... ~40 other operators per the PDF 32000-1 spec
 
     return canvas
 ```
 
-**Lưu ý thiết kế Go:** Vì content stream là tuyến tính và stateful (graphics state thay đổi theo thứ tự operator), việc render từng trang không parallel hóa được nội bộ — nhưng **giữa các trang** thì hoàn toàn độc lập, đây là chỗ goroutine pool phát huy tác dụng (xem 13.3).
+**Go design note:** Because the content stream is linear and stateful (graphics
+state changes with operator order), rendering a single page cannot be
+parallelized internally — but **across pages** it is fully independent, which is
+where the goroutine pool shines (see 13.3).
 
-### 13.3 Parallel Multi-Page Rendering (lợi thế Go)
+### 13.3 Parallel Multi-Page Rendering (a Go advantage)
 
 ```go
 func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
@@ -1215,7 +1326,7 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 	errs := make([]error, d.PageCount)
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, runtime.NumCPU()) // giới hạn concurrency theo số CPU
+	sem := make(chan struct{}, runtime.NumCPU()) // bound concurrency by CPU count
 
 	for i := 0; i < d.PageCount; i++ {
 		wg.Add(1)
@@ -1241,11 +1352,15 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 }
 ```
 
-Đây là chỗ Go có lợi thế tự nhiên so với Node.js (cần Worker Threads phức tạp hơn) hoặc Python (GIL hạn chế CPU-bound parallelism thật).
+This is where Go has a natural advantage over Node.js (which needs the more
+complex Worker Threads) or Python (whose GIL limits true CPU-bound parallelism).
 
-### 13.4 Redaction — Xóa Nội Dung Vĩnh Viễn (không chỉ vẽ đè)
+### 13.4 Redaction — Permanently Removing Content (not just painting over)
 
-Lỗi bảo mật phổ biến nhất ở tool redact kém: chỉ vẽ hình chữ nhật đen đè lên nội dung, nhưng text gốc vẫn còn trong content stream và có thể extract/copy được. FluxDocs xử lý đúng bằng cách sửa object stream thật.
+The most common security flaw in poor redaction tools: only drawing a black
+rectangle over the content, while the original text remains in the content stream
+and can be extracted/copied. FluxDocs does it correctly by modifying the actual
+object stream.
 
 ```
 function redactAndFlatten(page, redactRects):
@@ -1257,22 +1372,23 @@ function redactAndFlatten(page, redactRects):
         if token.operator == 'Tj' or token.operator == 'TJ':
             textBounds = computeTextBounds(token, currentGraphicsState)
             if intersectsAny(textBounds, redactRects):
-                continue  // loại bỏ hoàn toàn operator vẽ text này, không giữ lại
+                continue  // drop this text-drawing operator entirely, keep nothing
         newTokens.append(token)
 
     page.Contents = encodeStream(reconstructStream(newTokens))
 
-    // Vẽ vùng đen che lại (chỉ để hiển thị, không phải cơ chế bảo mật chính)
+    // Draw a black cover (display only, NOT the primary security mechanism)
     for rect in redactRects:
         page.Contents.append(drawFilledRect(rect, color='black'))
 
-    // Xóa luôn metadata/annotation có thể chứa nội dung tương tự
+    // Also remove metadata/annotations that may hold the same content
     removeMatchingAnnotations(page, redactRects)
 
     return page
 ```
 
-**Test bắt buộc:** sau redact, chạy `ExtractText()` lại trên vùng đã redact — phải trả về rỗng hoặc không khớp nội dung gốc.
+**Mandatory test:** after redaction, re-run `ExtractText()` over the redacted
+region — it must return empty or not match the original content.
 
 ---
 
@@ -1280,19 +1396,19 @@ function redactAndFlatten(page, redactRects):
 
 ### 14.1 Tier Structure
 
-| Tier | Giá | Đối tượng |
+| Tier | Price | Audience |
 |---|---|---|
-| **Core (MIT)** | $0 | Dự án OSS, evaluation, hobby, học thuật |
-| **Pro Self-host** | $499 one-time | Indie dev, agency (per developer license) |
-| **Pro Team** | $1,499 one-time | Team dev nhỏ (tới 10 developer) |
-| **Cloud Starter** | $49/tháng | 500 trang xử lý/tháng (OCR/AI extract) |
-| **Cloud Team** | $199/tháng | 5,000 trang/tháng |
-| **Cloud Business** | $599/tháng | 25,000 trang/tháng, priority support |
-| **Enterprise Self-host** | $8k–40k/năm | On-prem, SLA, tùy biến — định giá thấp hơn Nutrient 40-60% |
+| **Core (MIT)** | $0 | OSS projects, evaluation, hobby, academic |
+| **Pro Self-host** | $499 one-time | Indie devs, agencies (per-developer license) |
+| **Pro Team** | $1,499 one-time | Small dev teams (up to 10 developers) |
+| **Cloud Starter** | $49/month | 500 processed pages/month (OCR/AI extract) |
+| **Cloud Team** | $199/month | 5,000 pages/month |
+| **Cloud Business** | $599/month | 25,000 pages/month, priority support |
+| **Enterprise Self-host** | $8k–40k/year | On-prem, SLA, customization — priced 40-60% below Nutrient |
 
 ### 14.2 Feature Matrix
 
-| Tính năng | Core | Pro | Cloud | Ent |
+| Feature | Core | Pro | Cloud | Ent |
 |---|---|---|---|---|
 | Render/view PDF | ✓ | ✓ | ✓ | ✓ |
 | Annotation (highlight/note/draw/shape) | ✓ | ✓ | ✓ | ✓ |
@@ -1302,14 +1418,14 @@ function redactAndFlatten(page, redactRects):
 | React/Vue wrapper | ✓ | ✓ | ✓ | ✓ |
 | Form fill | – | ✓ | ✓ | ✓ |
 | Digital signature | – | ✓ | ✓ | ✓ |
-| Redaction (an toàn, flatten thật) | – | ✓ | ✓ | ✓ |
+| Redaction (safe, true flatten) | – | ✓ | ✓ | ✓ |
 | OCR (Tesseract) | – | ✓ | ✓ | ✓ |
 | Document compare | – | ✓ | ✓ | ✓ |
 | Watermark | – | ✓ | ✓ | ✓ |
 | Export PDF/A | – | ✓ | ✓ | ✓ |
 | AI structured extraction | – | – | ✓ | ✓ |
 | AI document Q&A | – | – | ✓ | ✓ |
-| Auto-redact PII bằng AI | – | – | ✓ | ✓ |
+| Auto-redact PII via AI | – | – | ✓ | ✓ |
 | Multi-user collaboration | – | – | ✓ | ✓ |
 | Webhook/Zapier | – | – | ✓ | ✓ |
 | SSO (SAML, OIDC) | – | – | – | ✓ |
@@ -1317,77 +1433,94 @@ function redactAndFlatten(page, redactRects):
 | DPA, SOC2, HIPAA BAA | – | – | – | ✓ |
 | SLA 99.9% uptime | – | – | – | ✓ |
 
-### 14.3 Vì Sao Pricing Có Thể Cao Hơn FluxGantt
+### 14.3 Why Pricing Can Be Higher Than FluxGantt
 
-Khác với thư viện Gantt (đối thủ dhtmlx chỉ $599-1,599/năm), category PDF SDK đã có benchmark giá rất cao từ Nutrient ($25k-220k+/năm). Điều này cho phép FluxDocs định giá Pro/Enterprise cao hơn nhiều so với FluxGantt mà vẫn là "rẻ hơn đối thủ 40-90%" — biên lợi nhuận trên mỗi khách hàng cao hơn đáng kể.
+Unlike a Gantt library (where the competitor dhtmlx is only $599-1,599/year), the
+PDF SDK category has a very high price benchmark from Nutrient ($25k-220k+/year).
+This lets FluxDocs price Pro/Enterprise much higher than FluxGantt while still
+being "40-90% cheaper than the competition" — a significantly higher margin per
+customer.
 
-### 14.4 Vì Sao Cloud Tính Theo Volume Trang
+### 14.4 Why Cloud Is Priced by Page Volume
 
-Khác với FluxGantt Cloud (tính theo seat/user), FluxDocs Cloud tính theo **số trang xử lý/tháng** vì:
+Unlike FluxGantt Cloud (priced per seat/user), FluxDocs Cloud is priced by
+**pages processed per month** because:
 
-- Chi phí thật (OCR, AI extraction qua LLM) tỷ lệ trực tiếp với số trang, không phải số người dùng
-- Khách hàng dễ ước tính chi phí dựa trên volume tài liệu thực tế của họ
-- Tránh tình trạng 1 user xử lý hàng chục nghìn trang nhưng chỉ trả tiền "1 seat"
+- Real cost (OCR, AI extraction via LLM) scales directly with page count, not
+  user count
+- Customers can easily estimate cost from their actual document volume
+- Avoids the case of one user processing tens of thousands of pages but paying
+  for just "1 seat"
 
 ---
 
 ## 15. Distribution & Launch Strategy
 
-### 15.1 Pre-Launch (Tuần 7–8)
+### 15.1 Pre-Launch (Weeks 7–8)
 
-- Landing page tại fluxdocs.dev với demo tương tác: "Upload PDF, redact PII ngay trong browser — không gửi server"
-- Benchmark page: so sánh tốc độ render/MB binary với pdf.js, MuPDF, Nutrient (nếu có thể test)
-- 3 demo GIF: annotation trực tiếp / redact an toàn / AI document Q&A
-- GitHub repo public, README có badge "100% Go core, MIT license"
+- A landing page at fluxdocs.dev with an interactive demo: "Upload a PDF, redact
+  PII right in the browser — nothing sent to a server"
+- A benchmark page: compare render speed/binary size with pdf.js, MuPDF, Nutrient
+  (where testable)
+- 3 demo GIFs: live annotation / safe redaction / AI document Q&A
+- A public GitHub repo, README with a "100% Go core, MIT license" badge
 
-### 15.2 Launch Day (Tuần 8)
+### 15.2 Launch Day (Week 8)
 
-- **Show HN:** *"Show HN: FluxDocs — MIT-licensed PDF SDK in Go, with WASM build for client-side processing"* — góc nhìn "core Go thật" đặc biệt hấp dẫn với audience HN quan tâm performance/Go
-- **Product Hunt:** demo trực quan annotation + redact
+- **Show HN:** *"Show HN: FluxDocs — MIT-licensed PDF SDK in Go, with a WASM build
+  for client-side processing"* — the "real Go core" angle is especially appealing
+  to an HN audience that cares about performance/Go
+- **Product Hunt:** a visual annotation + redact demo
 - **Reddit:**
-  - r/golang (rất quan trọng — đây là audience chính cho góc "Go PDF SDK")
+  - r/golang (very important — the main audience for the "Go PDF SDK" angle)
   - r/webdev
   - r/programming
-  - r/privacy (góc "xử lý PDF nhạy cảm hoàn toàn client-side")
-- **Dev.to / Hashnode:** *"Why we wrote a PDF engine in Go (and compiled it to WASM)"* — bài kỹ thuật sâu về parser, content stream, lý do chọn Go
-- **Email outreach** tới startup làm contract management, e-signature, legal tech: "MIT alternative tới Nutrient, core Go, self-host được"
+  - r/privacy (the "process sensitive PDFs fully client-side" angle)
+- **Dev.to / Hashnode:** *"Why we wrote a PDF engine in Go (and compiled it to
+  WASM)"* — a deep technical post on the parser, content stream, and the reasons
+  for choosing Go
+- **Email outreach** to startups in contract management, e-signature, legal tech:
+  "an MIT alternative to Nutrient, a Go core, self-hostable"
 
 ### 15.3 Post-Launch (Ongoing)
 
 **SEO content:**
-- "FluxDocs vs Nutrient (PSPDFKit)" — nhắm trực tiếp pain point giá
-- "FluxDocs vs pdf.js + pdf-lib" — nhắm người đang ghép nhiều lib
-- "How to redact PDF safely in Go" — tutorial kỹ thuật, rank tốt vì ít content chất lượng về chủ đề này
-- "PDF rendering in WASM: lessons from building FluxDocs" — content kỹ thuật sâu, thu hút Go/Rust audience
+- "FluxDocs vs Nutrient (PSPDFKit)" — targeting the price pain point directly
+- "FluxDocs vs pdf.js + pdf-lib" — targeting people stitching multiple libs
+- "How to redact a PDF safely in Go" — a technical tutorial that ranks well since
+  there is little quality content on the topic
+- "PDF rendering in WASM: lessons from building FluxDocs" — deep technical
+  content, attracting a Go/Rust audience
 
-**Conference talks:** GopherCon, FOSDEM (track Go hoặc track document processing)
+**Conference talks:** GopherCon, FOSDEM (Go track or document-processing track)
 
-**Open source goodwill:** Đóng góp ngược cho pdfcpu/MuPDF community nếu phát hiện bug khi build, tăng uy tín kỹ thuật.
+**Open-source goodwill:** contribute back to the pdfcpu/MuPDF communities if bugs
+are found while building, raising technical credibility.
 
 ---
 
 ## 16. 18-Week Execution Plan
 
-| Tuần | Phase | Deliverable | Metric chính |
+| Week | Phase | Deliverable | Key metric |
 |---|---|---|---|
-| 1 | Build | Go module setup, parser cơ bản, xref resolver | Repo public, CI green cả native + WASM |
-| 2 | Build | Render raster PNG, CLI tool cơ bản | Render đúng 95% test PDF mẫu |
-| 3 | Build | Font decoder, render path vector, WASM build | WASM chạy được trong browser demo |
-| 4 | Build | Goroutine pool multi-page, benchmark performance | Benchmark công bố được (ms/page) |
-| 5 | Build | Annotation engine (4 loại cơ bản) | Annotation render đúng trên cả native/WASM |
+| 1 | Build | Go module setup, basic parser, xref resolver | Public repo, CI green for both native + WASM |
+| 2 | Build | Render raster PNG, basic CLI tool | Render correctly for 95% of sample PDFs |
+| 3 | Build | Font decoder, vector path render, WASM build | WASM runs in a browser demo |
+| 4 | Build | Multi-page goroutine pool, performance benchmark | Publishable benchmark (ms/page) |
+| 5 | Build | Annotation engine (4 basic types) | Annotations render correctly on both native/WASM |
 | 6 | Build | React + Vue wrapper, sample app | npm publish alpha |
 | 7 | Polish | Document ops (merge/split/rotate), text extraction | Docs site live |
-| 8 | **LAUNCH** | Show HN + Product Hunt + Reddit r/golang | 500+ GH stars, 1k+ npm/go get download |
-| 9 | Listen | Bug fix, review PR, engagement community | Triage 80% issue |
-| 10 | Listen | Iterate theo feedback | DX polish, mở rộng example |
-| 11 | Pre-order | Email blast Pro early bird $349 | 30–50 pre-order |
-| 12 | Build Pro | Form fill + AcroForm parser | Fill đúng 20 file form mẫu |
-| 13 | Build Pro | Digital signature (PKCS#7) | Sign + verify thành công |
-| 14 | Build Pro | Redaction engine an toàn (flatten thật) | Test extract-after-redact pass 100% |
-| 15 | Build Pro | OCR integration (Tesseract CGO) | OCR accuracy benchmark công bố |
-| 16 | Build Pro | Document compare, watermark, PDF/A export | Export pass validator chuẩn PDF/A |
-| 17 | Polish | Pro docs, license key system | Hệ thống license hoạt động |
-| 18 | **LAUNCH Pro** | Pro tier live | 50+ Pro license = $15k+ revenue |
+| 8 | **LAUNCH** | Show HN + Product Hunt + Reddit r/golang | 500+ GH stars, 1k+ npm/go get downloads |
+| 9 | Listen | Bug fixes, review PRs, community engagement | Triage 80% of issues |
+| 10 | Listen | Iterate on feedback | DX polish, expand examples |
+| 11 | Pre-order | Email blast Pro early bird $349 | 30–50 pre-orders |
+| 12 | Build Pro | Form fill + AcroForm parser | Fill 20 sample form files correctly |
+| 13 | Build Pro | Digital signature (PKCS#7) | Sign + verify successfully |
+| 14 | Build Pro | Safe redaction engine (true flatten) | Extract-after-redact tests pass 100% |
+| 15 | Build Pro | OCR integration (Tesseract CGO) | Publish OCR accuracy benchmark |
+| 16 | Build Pro | Document compare, watermark, PDF/A export | Export passes a standard PDF/A validator |
+| 17 | Polish | Pro docs, license key system | License system working |
+| 18 | **LAUNCH Pro** | Pro tier live | 50+ Pro licenses = $15k+ revenue |
 
 ---
 
@@ -1395,31 +1528,33 @@ Khác với FluxGantt Cloud (tính theo seat/user), FluxDocs Cloud tính theo **
 
 ### 17.1 Hard Gates (Go/No-Go Decisions)
 
-**Sau Tuần 8 (Free MVP Launch):**
+**After Week 8 (Free MVP Launch):**
 
-| Metric | Target | Nếu dưới target |
+| Metric | Target | If below target |
 |---|---|---|
-| GitHub stars (30 ngày) | 500+ | Audit lại distribution, đặc biệt r/golang |
-| go get + npm download | 1,000+ | DX cần cải thiện, kiểm tra docs onboard |
-| Email waitlist signup | 200+ | Bỏ qua Pro launch |
-| Benchmark được share lại bởi bên thứ 3 | 5+ lần | Performance claim chưa đủ thuyết phục |
+| GitHub stars (30 days) | 500+ | Audit distribution, especially r/golang |
+| go get + npm downloads | 1,000+ | DX needs work, check onboarding docs |
+| Email waitlist signups | 200+ | Skip the Pro launch |
+| Benchmark re-shared by a third party | 5+ times | The performance claim isn't convincing enough |
 
-**Action matrix:** giữ nguyên cấu trúc như FluxGantt — 4/4 pass thì tiếp tục Wave 2; thấp hơn thì giảm scope hoặc trì hoãn theo bước tương tự.
+**Action matrix:** keep the same structure as FluxGantt — 4/4 pass → continue to
+Wave 2; below that → reduce scope or delay following the same steps.
 
-**Sau Tuần 18 (Pro Tier Launch):**
+**After Week 18 (Pro Tier Launch):**
 
-| Metric | Target | Nếu dưới target |
+| Metric | Target | If below target |
 |---|---|---|
-| Pro license bán được | 50+ | Reposition, nhấn mạnh hơn benchmark giá so với Nutrient |
-| Redaction test pass rate (an toàn) | 100% | Không launch Pro nếu chưa đạt — đây là tính năng có rủi ro pháp lý nếu sai |
-| Tỷ lệ refund | <5% | Audit chất lượng rendering edge case |
+| Pro licenses sold | 50+ | Reposition, emphasize the price benchmark vs Nutrient more |
+| Redaction test pass rate (safe) | 100% | Do not launch Pro until met — this feature carries legal risk if wrong |
+| Refund rate | <5% | Audit rendering edge-case quality |
 
-**Sau Tháng 6 (Quyết định Cloud Tier):**
+**After Month 6 (Cloud Tier Decision):**
 
-Tín hiệu để tiến hành Cloud:
-- 100+ Pro customer
-- 15+ inquiry về AI extraction/OCR hosted (cao hơn threshold FluxGantt vì đây là tính năng có giá trị rõ ràng hơn với category PDF)
-- Ít nhất 2 inquiry Enterprise self-host
+Signals to proceed with Cloud:
+- 100+ Pro customers
+- 15+ inquiries about hosted AI extraction/OCR (a higher threshold than FluxGantt
+  since this feature has clearer value for the PDF category)
+- At least 2 Enterprise self-host inquiries
 
 ---
 
@@ -1427,47 +1562,83 @@ Tín hiệu để tiến hành Cloud:
 
 ### 18.1 Technical Risks
 
-**Risk:** PDF parser tự viết không đủ robust với file PDF "lỗi" (rất phổ biến trong thực tế — nhiều PDF generator vi phạm spec)
-**Mitigation:** Xây test corpus lớn từ PDF thực tế (không chỉ PDF "sạch"). Áp dụng chiến lược "lenient parsing" giống pdf.js — cố gắng render được nhiều nhất có thể dù file không hoàn toàn đúng spec, kèm fallback brute-force scan.
+**Risk:** The hand-written PDF parser isn't robust enough for "broken" PDF files
+(very common in practice — many PDF generators violate the spec)
+**Mitigation:** Build a large test corpus from real PDFs (not just "clean" ones).
+Apply a "lenient parsing" strategy like pdf.js — try to render as much as
+possible even if the file isn't fully spec-compliant, with a brute-force scan
+fallback.
 
-**Risk:** Font rendering không chính xác (đặc biệt font nhúng, CJK, ligature phức tạp)
-**Mitigation:** Ưu tiên hỗ trợ tốt TrueType/OpenType (phổ biến nhất). Với case khó, cho phép build tag dùng MuPDF qua CGO như fallback "high-fidelity mode" — chấp nhận trade-off license cho ai cần độ chính xác tối đa.
+**Risk:** Inaccurate font rendering (especially embedded fonts, CJK, complex
+ligatures)
+**Mitigation:** Prioritize good TrueType/OpenType support (most common). For hard
+cases, allow a build tag using MuPDF via CGO as a "high-fidelity mode" fallback —
+accepting the license trade-off for those who need maximum accuracy.
 
-**Risk:** WASM bundle size lớn ảnh hưởng tốc độ load trang web
-**Mitigation:** Tối ưu build (TinyGo cho phần không cần full Go runtime nếu khả thi), lazy-load WASM chỉ khi viewer thực sự mount, benchmark bundle size là KPI theo dõi liên tục.
+**Risk:** A large WASM bundle size hurts web page load speed
+**Mitigation:** Optimize the build (TinyGo for parts not needing the full Go
+runtime where feasible), lazy-load the WASM only when the viewer actually mounts,
+and track bundle size as a continuous KPI.
 
-**Risk:** Redaction có lỗi an toàn (nội dung vẫn extract được sau khi redact)
-**Mitigation:** Test suite bắt buộc chạy `ExtractText` sau mọi redact test case trước khi merge code. Đây là risk nghiêm trọng nhất về reputation — một lần lỗi redact bị phát hiện công khai (như nhiều case thực tế đã xảy ra với chính phủ/tổ chức) sẽ phá hủy uy tín sản phẩm.
+**Risk:** Redaction has a safety flaw (content still extractable after redaction)
+**Mitigation:** A mandatory test suite runs `ExtractText` after every redaction
+test case before merging code. This is the most serious reputation risk — a
+single publicly discovered redaction flaw (as has happened to governments/orgs)
+would destroy the product's credibility.
 
 ### 18.2 Market Risks
 
-**Risk:** Nutrient/Apryse hạ giá hoặc ra gói entry-level rẻ hơn để chặn cạnh tranh
-**Mitigation:** Giữ lợi thế MIT + Go + WASM — đây là khác biệt kiến trúc, không chỉ giá, khó copy nhanh.
+**Risk:** Nutrient/Apryse cut prices or release a cheaper entry-level tier to
+block competition
+**Mitigation:** Keep the MIT + Go + WASM advantage — these are architectural
+differences, not just price, and hard to copy quickly.
 
-**Risk:** Google Document AI / AWS Textract đè bẹp phần AI extraction bằng economies of scale
-**Mitigation:** Định vị FluxDocs không cạnh tranh trực tiếp về AI extraction thuần, mà bán trải nghiệm tích hợp (viewer + annotation + extraction trong 1 SDK, không cần ghép nhiều dịch vụ).
+**Risk:** Google Document AI / AWS Textract crush the AI extraction part via
+economies of scale
+**Mitigation:** Position FluxDocs not to compete head-on on pure AI extraction,
+but to sell the integrated experience (viewer + annotation + extraction in one
+SDK, no need to stitch multiple services).
 
-**Risk:** Đối thủ OSS khác (ví dụ fork pdfcpu thêm UI) xuất hiện
-**Mitigation:** Tốc độ ship Wave 2/3, đặc biệt AI features mà OSS thuần khó duy trì do chi phí LLM API.
+**Risk:** Another OSS competitor appears (e.g. a pdfcpu fork with a UI added)
+**Mitigation:** Ship speed for Wave 2/3, especially AI features that pure OSS
+struggles to sustain due to LLM API cost.
 
 ### 18.3 Execution Risks
 
-**Risk:** Viết PDF parser từ đầu tốn thời gian hơn ước tính nhiều (đây là rủi ro lớn nhất của roadmap — PDF spec rất phức tạp, dày hơn 750 trang)
-**Mitigation:** Scope Wave 1 chỉ cần hỗ trợ tốt subset phổ biến nhất (90% PDF thực tế sinh ra từ ~10 tool: Word, LaTeX, Chrome print-to-PDF, Adobe). Không cần hỗ trợ 100% spec ngày đầu — tăng dần coverage theo feedback thực tế, tương tự cách pdf.js đã làm.
+**Risk:** Writing the PDF parser from scratch takes much longer than estimated
+(the biggest roadmap risk — the PDF spec is very complex, over 750 pages)
+**Mitigation:** Scope Wave 1 to only support the most common subset well (90% of
+real PDFs generated by ~10 tools: Word, LaTeX, Chrome print-to-PDF, Adobe). No
+need to support 100% of the spec on day one — increase coverage gradually per
+real feedback, the way pdf.js did.
 
-**Risk:** Solo developer burnout — core PDF parser đòi hỏi độ tập trung kỹ thuật cao hơn FluxGantt
-**Mitigation:** Cân nhắc dùng MuPDF qua CGO cho phần render khó nhất ngay từ Wave 1 nếu tốc độ Wave 1 chậm hơn dự kiến, rồi thay dần bằng pure-Go sau — tránh rủi ro trễ launch vì cố pure-Go 100% ngay từ đầu.
+**Risk:** Solo-developer burnout — the core PDF parser demands higher technical
+focus than FluxGantt
+**Mitigation:** Consider using MuPDF via CGO for the hardest rendering parts as
+early as Wave 1 if Wave 1 is slower than expected, then gradually replace with
+pure Go — avoiding the risk of a late launch from insisting on 100% pure Go from
+the start.
 
 ### 18.4 Legal Risks
 
-**Risk:** Vô tình implement thuật toán/kỹ thuật có patent (ít khả năng với PDF vì spec đã chuẩn hóa lâu, nhưng OCR/AI có thể có vùng xám)
-**Mitigation:** Clean-room implementation dựa trên spec công khai ISO 32000, không tham khảo source code của Nutrient/Apryse.
+**Risk:** Accidentally implementing a patented algorithm/technique (unlikely for
+PDF since the spec has been standardized for a long time, but OCR/AI may have
+gray areas)
+**Mitigation:** Clean-room implementation based on the public ISO 32000 spec, not
+referencing Nutrient/Apryse source code.
 
-**Risk:** Dùng MuPDF (AGPL) như fallback CGO có thể buộc toàn bộ binary phải AGPL nếu không tách đúng
-**Mitigation:** Tách phần dùng MuPDF thành build tag riêng, document rõ ràng trong README rằng build với tag `mupdf` chịu license AGPL, build mặc định (pure Go) giữ MIT. Tư vấn luật sở hữu trí tuệ trước khi ship tính năng này.
+**Risk:** Using MuPDF (AGPL) as a CGO fallback could force the entire binary to
+be AGPL if not separated correctly
+**Mitigation:** Separate the MuPDF-using part into its own build tag, document
+clearly in the README that building with the `mupdf` tag is subject to AGPL while
+the default build (pure Go) stays MIT. Consult IP counsel before shipping this
+feature.
 
-**Risk:** Redaction lỗi gây hậu quả pháp lý cho khách hàng dùng FluxDocs (lộ thông tin nhạy cảm)
-**Mitigation:** Disclaimer rõ trong docs Pro tier, kèm test suite công khai chứng minh độ an toàn. Cân nhắc audit bảo mật độc lập trước khi quảng bá tính năng redaction mạnh.
+**Risk:** A redaction flaw causes legal consequences for a customer using
+FluxDocs (leaking sensitive information)
+**Mitigation:** A clear disclaimer in the Pro docs, plus a public test suite
+proving safety. Consider an independent security audit before heavily marketing
+the redaction feature.
 
 ---
 
@@ -1481,7 +1652,7 @@ Tín hiệu để tiến hành Cloud:
   },
   "document": {
     "id": "doc-01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    "title": "Hợp đồng dịch vụ - Công ty ABC",
+    "title": "Service Agreement - Company ABC",
     "pageCount": 12,
     "metadata": {
       "author": "Legal Team",
@@ -1494,7 +1665,7 @@ Tín hiệu để tiến hành Cloud:
   },
   "annotationLayer": {
     "id": "layer-01ARZ3NDEKTSV4RRFFQ69G5FAW",
-    "name": "Review của phòng pháp lý",
+    "name": "Legal team's review",
     "annotations": [
       {
         "id": "ann-01ARZ3NDEKTSV4RRFFQ69G5FAX",
@@ -1503,7 +1674,7 @@ Tín hiệu để tiến hành Cloud:
         "rect": { "x": 72, "y": 480, "width": 320, "height": 14 },
         "color": "#fde047",
         "opacity": 0.4,
-        "content": "Điều khoản cần xác nhận lại với khách hàng",
+        "content": "Clause to re-confirm with the client",
         "authorId": "user-long",
         "createdAt": "2026-06-10T09:15:00Z"
       },
@@ -1512,7 +1683,7 @@ Tín hiệu để tiến hành Cloud:
         "pageId": "page-5",
         "type": "redact",
         "rect": { "x": 120, "y": 200, "width": 180, "height": 20 },
-        "content": "Số tài khoản ngân hàng",
+        "content": "Bank account number",
         "authorId": "user-long",
         "createdAt": "2026-06-10T09:20:00Z"
       }
@@ -1521,7 +1692,7 @@ Tín hiệu để tiến hành Cloud:
 }
 ```
 
-**Ví dụ processing job (Cloud tier):**
+**Example processing job (Cloud tier):**
 
 ```json
 {
@@ -1538,7 +1709,7 @@ Tín hiệu để tiến hành Cloud:
     }
   },
   "result": {
-    "contractParty": "Công ty TNHH ABC",
+    "contractParty": "ABC Co., Ltd",
     "effectiveDate": "2026-07-01",
     "totalValue": 450000000,
     "currency": "VND"
@@ -1552,49 +1723,50 @@ Tín hiệu để tiến hành Cloud:
 
 ## 20. Appendix B: PDF Rendering Pipeline Pseudocode
 
-Outline đầy đủ cho reference implementation của pipeline render, từ mở file tới ra raster image.
+A complete outline for a reference implementation of the render pipeline, from
+opening the file to producing a raster image.
 
 ```
 function openAndRenderPage(filePath string, pageIndex int, opts RenderOptions) []byte {
 
-    // Step 1: Đọc file, parse header + tìm xref table
+    // Step 1: Read the file, parse the header + find the xref table
     file = readFile(filePath)
     if not file.startsWith("%PDF-"):
         throw InvalidPDFError
 
-    xrefOffset = findStartXref(file)  // đọc từ cuối file, tìm "startxref"
+    xrefOffset = findStartXref(file)  // read from the end of the file for "startxref"
     xrefTable = parseXrefChain(file, xrefOffset)
 
-    // Step 2: Resolve trailer, tìm root object (Catalog)
+    // Step 2: Resolve the trailer, find the root object (Catalog)
     trailer = parseTrailer(file, xrefTable)
     catalog = resolveObject(file, xrefTable, trailer.Root)
 
-    // Step 3: Resolve page tree, lấy đúng trang cần
+    // Step 3: Resolve the page tree, get the requested page
     pageTree = resolveObject(file, xrefTable, catalog.Pages)
-    page = walkPageTree(pageTree, pageIndex)  // page tree là cấu trúc cây, có thể lồng nhiều cấp
+    page = walkPageTree(pageTree, pageIndex)  // the page tree is a tree, possibly deeply nested
 
-    // Step 4: Decode content stream của trang (có thể nén Flate/LZW)
+    // Step 4: Decode the page's content stream (may be Flate/LZW compressed)
     rawContent = resolveObject(file, xrefTable, page.Contents)
-    contentStream = decodeStream(rawContent)  // giải nén theo /Filter
+    contentStream = decodeStream(rawContent)  // decompress per /Filter
 
-    // Step 5: Setup canvas theo kích thước trang + DPI yêu cầu
+    // Step 5: Set up the canvas per page size + requested DPI
     width = page.MediaBox.width * (opts.DPI / 72.0)
     height = page.MediaBox.height * (opts.DPI / 72.0)
     canvas = newCanvas(width, height)
 
-    // Step 6: Resolve resource dictionary (font, image, color space dùng trong trang)
+    // Step 6: Resolve the resource dictionary (fonts, images, color spaces used on the page)
     resources = resolveObject(file, xrefTable, page.Resources)
 
-    // Step 7: Tokenize và thực thi content stream operator
+    // Step 7: Tokenize and execute the content stream operators
     tokens = tokenize(contentStream)
     graphicsState = GraphicsState.default(scale = opts.DPI / 72.0)
     executeOperators(tokens, graphicsState, resources, canvas)
 
-    // Step 8: Encode canvas ra format yêu cầu
+    // Step 8: Encode the canvas to the requested format
     switch opts.Format:
         case "png":  return encodePNG(canvas)
         case "jpeg": return encodeJPEG(canvas, opts.Quality)
-        case "svg":  return encodeSVG(canvas)  // dùng pipeline vector riêng, không rasterize
+        case "svg":  return encodeSVG(canvas)  // uses a separate vector pipeline, no rasterize
 }
 
 function walkPageTree(node, targetIndex, currentIndex = {value: 0}) Page {
@@ -1604,7 +1776,7 @@ function walkPageTree(node, targetIndex, currentIndex = {value: 0}) Page {
         currentIndex.value += 1
         return null
 
-    // node.Type == "Pages" (intermediate node), có Kids là array con
+    // node.Type == "Pages" (intermediate node), with Kids as a child array
     for child in node.Kids:
         resolvedChild = resolveObject(child)
         result = walkPageTree(resolvedChild, targetIndex, currentIndex)
@@ -1615,41 +1787,50 @@ function walkPageTree(node, targetIndex, currentIndex = {value: 0}) Page {
 }
 ```
 
-**Lưu ý hiệu năng:** `walkPageTree` chạy O(n) theo số trang nếu duyệt tuần tự mỗi lần gọi `RenderPage`. Với document nhiều trang, FluxDocs cache flat page array sau lần resolve đầu tiên (`Document.pages []Page` đã resolve sẵn khi `OpenDocument()`), tránh duyệt lại cây mỗi lần render.
+**Performance note:** `walkPageTree` runs O(n) in the number of pages if it walks
+sequentially on each `RenderPage` call. For a many-page document, FluxDocs caches
+the flat page array after the first resolution (`Document.pages []Page` resolved
+at `OpenDocument()` time), avoiding re-walking the tree on every render.
 
 ---
 
 ## 21. Appendix C: Competitor Comparison Matrix
 
-| Tính năng | FluxDocs | Nutrient (PSPDFKit) | Apryse | ComPDF | pdf.js + pdf-lib |
+| Feature | FluxDocs | Nutrient (PSPDFKit) | Apryse | ComPDF | pdf.js + pdf-lib |
 |---|---|---|---|---|---|
-| License | MIT | Comm. | Comm. | Comm. (free tier hạn chế) | Apache/MIT |
-| Giá entry-level | $0 (Core) / $499 (Pro) | $25k+/năm | Tương đương Nutrient | Rẻ hơn Nutrient, vẫn đắt hơn FluxDocs | $0 |
+| License | MIT | Comm. | Comm. | Comm. (limited free tier) | Apache/MIT |
+| Entry-level price | $0 (Core) / $499 (Pro) | $25k+/yr | Comparable to Nutrient | Cheaper than Nutrient, still pricier than FluxDocs | $0 |
 | Core language | Go | C++ | C++ | C++ | JavaScript |
-| Server-side processing | ✓ | ✓ | ✓ | ✓ | ✗ (pdf-lib hạn chế) |
-| WASM client-side build chính thức | ✓ | ~ (có nhưng nặng) | ~ | ✗ | ✓ (pdf.js vốn là JS) |
-| Annotation engine đầy đủ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| Form fill | ✓** | ✓ | ✓ | ✓ | ~ (pdf-lib cơ bản) |
+| Server-side processing | ✓ | ✓ | ✓ | ✓ | ✗ (pdf-lib limited) |
+| Official WASM client-side build | ✓ | ~ (exists but heavy) | ~ | ✗ | ✓ (pdf.js is JS natively) |
+| Full annotation engine | ✓ | ✓ | ✓ | ✓ | ✗ |
+| Form fill | ✓** | ✓ | ✓ | ✓ | ~ (pdf-lib basic) |
 | Digital signature | ✓** | ✓ | ✓ | ✓ | ✗ |
-| Redaction an toàn (flatten thật) | ✓** | ✓ | ✓ | ~ | ✗ |
-| OCR tích hợp | ✓** | ✓ | ✓ | ✓ | ✗ |
-| AI document Q&A | ✓*** | ✓ (add-on riêng, đắt) | ~ | ✗ | ✗ |
-| AI structured extraction | ✓*** | ✓ (XtractFlow, đắt) | ~ | ✗ | ✗ |
-| Pricing minh bạch (không sales-gated) | ✓ | ✗ | ✗ | ~ | ✓ |
-| Self-host được core miễn phí | ✓ | ✗ | ✗ | ~ | ✓ |
+| Safe redaction (true flatten) | ✓** | ✓ | ✓ | ~ | ✗ |
+| Integrated OCR | ✓** | ✓ | ✓ | ✓ | ✗ |
+| AI document Q&A | ✓*** | ✓ (separate add-on, expensive) | ~ | ✗ | ✗ |
+| AI structured extraction | ✓*** | ✓ (XtractFlow, expensive) | ~ | ✗ | ✗ |
+| Transparent pricing (not sales-gated) | ✓ | ✗ | ✗ | ~ | ✓ |
+| Free self-hostable core | ✓ | ✗ | ✗ | ~ | ✓ |
 | Goroutine-native parallel render | ✓ | N/A (C++ threads) | N/A | N/A | ✗ (JS single-thread) |
-| Maintained tích cực | ✓ | ✓ | ✓ | ✓ | ✓ (pdf.js rất tốt) |
+| Actively maintained | ✓ | ✓ | ✓ | ✓ | ✓ (pdf.js very good) |
 
-**Chú thích:**
-`✓` = Có · `✓**` = Có, tầng Pro · `✓***` = Có, tầng Cloud · `✗` = Không · `~` = Một phần / hạn chế
+**Legend:**
+`✓` = Yes · `✓**` = Yes, Pro tier · `✓***` = Yes, Cloud tier · `✗` = No · `~` =
+Partial / limited
 
 ---
 
-## Kết
+## Closing
 
-Đây là bản spec living document. So với FluxGantt, FluxDocs có ceiling giá cao hơn rõ rệt nhờ benchmark thị trường đã được Nutrient/Apryse xác lập, và Go đóng vai trò kiến trúc cốt lõi thật — không phải lựa chọn ngôn ngữ mang tính hình thức. Rủi ro lớn nhất nằm ở độ phức tạp của việc tự viết PDF parser; cần theo dõi sát tiến độ Wave 1 và sẵn sàng fallback CGO/MuPDF nếu cần để không trễ launch.
+This is a living-document spec. Compared with FluxGantt, FluxDocs has a clearly
+higher price ceiling thanks to the market benchmark established by
+Nutrient/Apryse, and Go plays a genuinely core architectural role — not a
+cosmetic language choice. The biggest risk lies in the complexity of writing a
+PDF parser from scratch; track Wave 1 progress closely and be ready to fall back
+to CGO/MuPDF if needed to avoid a late launch.
 
-**Liên hệ:**
+**Contact:**
 
 | | |
 |---|---|
