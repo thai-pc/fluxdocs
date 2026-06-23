@@ -5,11 +5,14 @@ import "fmt"
 const maxRefChain = 32 // bound a reference->reference loop (SECURITY.md §2)
 
 // Resolver pairs the file bytes with the cross-reference table to resolve a
-// Reference into a concrete object. Parsed objects are cached by object number.
+// Reference into a concrete object. Parsed objects are cached by object number,
+// and decoded compressed object streams (ObjStm) are cached by their object
+// number.
 type Resolver struct {
-	data  []byte
-	xref  *Xref
-	cache map[int]Object
+	data    []byte
+	xref    *Xref
+	cache   map[int]Object
+	objstms map[int]*objStm // decoded /ObjStm, keyed by stream object number
 }
 
 // NewResolver builds the xref table from data and returns a Resolver ready to
@@ -21,7 +24,12 @@ func NewResolver(data []byte) (*Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Resolver{data: data, xref: x, cache: make(map[int]Object)}, nil
+	return &Resolver{
+		data:    data,
+		xref:    x,
+		cache:   make(map[int]Object),
+		objstms: make(map[int]*objStm),
+	}, nil
 }
 
 // Trailer returns the most recent trailer dictionary.
@@ -40,6 +48,17 @@ func (r *Resolver) object(num int) (Object, error) {
 	if !ok || e.Free {
 		return Null{}, nil
 	}
+
+	// Compressed object: it lives inside an object stream (ObjStm).
+	if e.InObjStm {
+		obj, err := r.objectFromStream(e.StreamNum, e.StreamIdx, num)
+		if err != nil {
+			return nil, err
+		}
+		r.cache[num] = obj
+		return obj, nil
+	}
+
 	// Reject an out-of-range offset from a malformed/hostile xref before using
 	// it as an index (SECURITY.md §2).
 	if e.Offset < 0 || e.Offset >= int64(len(r.data)) {
