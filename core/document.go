@@ -13,24 +13,9 @@ import (
 // sentinel.
 var errNotImplemented = errors.New("fluxdocs: not implemented")
 
-// OpenDocument opens the PDF file at path and resolves the page tree into a
-// flat array (Document.Pages) so RenderPage need not re-walk the tree — see
-// Appendix B.
-//
-// Planned pipeline (not yet implemented):
-//  1. Read the file, verify the "%PDF-" header; otherwise -> ErrInvalidPDF.
-//  2. findStartXref + parseXrefChain, following /Prev on incremental updates.
-//  3. Resolve trailer -> Catalog -> page tree, flattened into []Page.
-//  4. Detect encryption -> ErrEncryptedDocument.
-//
-// A damaged file is recovered where possible via a brute-force obj/endobj scan;
-// if the object model still cannot be built it returns ErrInvalidPDF.
-//
-// Returns the opened *Document, or one of the sentinel errors above.
-func OpenDocument(path string) (*Document, error) {
-	_ = path
-	return nil, errNotImplemented
-}
+// (OpenDocument and OpenBytes live in open.go, where the parse layer is wired
+// in. The errNotImplemented sentinel above is still used by the unimplemented
+// methods below.)
 
 // --- §7.2 Document Operations ---
 

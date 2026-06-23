@@ -171,16 +171,3 @@ func TestEventCallbacks_Register(t *testing.T) {
 		t.Error("OnFormFieldChange did not store the callback")
 	}
 }
-
-// TestOpenDocument_Unimplemented records the current (pre-build) state:
-// OpenDocument cannot parse yet and returns errNotImplemented. Update this test
-// once the parser layer is wired in.
-func TestOpenDocument_Unimplemented(t *testing.T) {
-	doc, err := OpenDocument("testdata/nonexistent.pdf")
-	if !errors.Is(err, errNotImplemented) {
-		t.Fatalf("OpenDocument() err = %v, want errNotImplemented (not yet implemented)", err)
-	}
-	if doc != nil {
-		t.Errorf("OpenDocument() returned a non-nil doc alongside an error: %+v", doc)
-	}
-}
