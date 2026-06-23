@@ -64,6 +64,13 @@ func isRegular(c byte) bool { return !isWhitespace(c) && !isDelimiter(c) }
 func nextToken(data []byte, i int) (token, int, error) {
 	n := len(data)
 
+	// Defensive: a negative offset (e.g. from a malformed xref entry) must not
+	// index into data. Treat it as end of input rather than panicking
+	// (SECURITY.md §2 — the parser must never crash on hostile input).
+	if i < 0 {
+		return token{kind: tokEOF}, i, nil
+	}
+
 	// Skip whitespace and comments.
 	for i < n {
 		c := data[i]

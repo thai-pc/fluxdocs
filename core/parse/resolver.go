@@ -40,6 +40,11 @@ func (r *Resolver) object(num int) (Object, error) {
 	if !ok || e.Free {
 		return Null{}, nil
 	}
+	// Reject an out-of-range offset from a malformed/hostile xref before using
+	// it as an index (SECURITY.md §2).
+	if e.Offset < 0 || e.Offset >= int64(len(r.data)) {
+		return nil, fmt.Errorf("%w: object %d offset %d out of range", errLex, num, e.Offset)
+	}
 	_, _, obj, _, err := ParseIndirectObjectAt(r.data, int(e.Offset))
 	if err != nil {
 		return nil, fmt.Errorf("loading object %d: %w", num, err)

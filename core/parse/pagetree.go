@@ -205,8 +205,8 @@ func normalizeRotate(d int) int {
 	if d < 0 {
 		d += 360
 	}
-	// Snap to the nearest valid quarter turn (lenient on odd values).
-	return (d / 90) * 90 % 360
+	// Floor to a quarter turn so odd values stay valid (lenient).
+	return (d / 90) * 90
 }
 
 func absf(x float64) float64 {
