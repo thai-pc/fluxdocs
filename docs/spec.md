@@ -4,11 +4,18 @@
 
 | | |
 |---|---|
-| **Version** | 0.1.0 (Pre-launch Draft) |
+| **Version** | 0.2.0 (Pre-launch Draft) |
 | **Status** | Planning / Pre-build |
 | **Author** | Flux Toolkit Team |
 | **License** | Core MIT · Pro Commercial · Cloud SaaS |
 | **Date** | 2026 |
+
+> **Revision 0.2.0 (2026-06):** Added an **agent-native MCP server** as a
+> first-class surface and pulled it forward from Wave 3 into Wave 2, in response
+> to Nutrient shipping an MCP server + "AI Document Assistant" in early 2026. The
+> defensible angle is an MIT, pure-Go, **self-hostable** MCP server (the document
+> never leaves the user's infrastructure). Affected sections: Overview, §2.1,
+> §2.2, §4.1, §5.1–5.2, §7.10 (new), §9, §11, §14.2, §16, §18.2, Appendix C.
 
 ---
 
@@ -49,6 +56,18 @@ a C++ core and has no lightweight WASM option).
   compare, watermark removal
 - **Cloud (subscription):** AI document Q&A, structured data auto-extraction,
   hosted processing API, collaboration
+
+**Agent-native via MCP (new for v0.2 planning):** Beyond calling an LLM *from*
+FluxDocs (Cloud extraction/Q&A), FluxDocs ships a **Model Context Protocol (MCP)
+server** that exposes the core as a set of tools an AI agent can drive directly —
+"open this PDF, highlight clause 3, fill these form fields, redact every SSN,
+then flatten and save." The protocol layer is pure-Go and MIT, self-hostable
+(stdio for local agents, streamable HTTP for remote), so a Claude/Claude Code (or
+any MCP client) gets a PDF tool that runs entirely on infrastructure the user
+controls — no document leaves the box. This mirrors the move Nutrient made in
+early 2026 (an MCP server + "AI Document Assistant"), but with an MIT,
+self-hostable core instead of a sales-gated commercial one. See §2.1, §7.10, and
+the roadmap (§9) — this work is pulled forward from Wave 3 into Wave 2.
 
 The primary audience is **developers** embedding PDF viewing/annotation into
 their products — contract-management SaaS, legal tooling, internal document
@@ -119,6 +138,19 @@ server) that cloud-first SDKs struggle with.
 | **Apryse (formerly PDFTron)** | Commercial | Comparable to Nutrient, sales-gated | C++ core | Mature, high rendering accuracy | Same pricing problem, steep learning curve |
 | **ComPDF** | Commercial (limited free tier) | Cheaper than Nutrient but still per-component | C++ core | More competitive pricing than Nutrient | Smaller ecosystem, fewer enterprise case studies |
 
+> **2026 signal — Nutrient goes agent-native (faster than this spec originally
+> assumed).** Nutrient now ships an **MCP server** and an **"AI Document
+> Assistant"**, repositioning the SDK from "a library you call" to "a tool an AI
+> agent calls." An agent (e.g. Claude) can open a document and mark it up, fill
+> forms, and redact *directly* through the SDK — not merely run one-shot "AI
+> extraction." This is the same category move pdf-tooling is converging on, and
+> it lands earlier than the Wave-3 timeline this spec first drafted. **Implication
+> for FluxDocs:** treat an MCP server as a first-class surface, not a Cloud
+> afterthought, and pull it forward to Wave 2. The defensible angle is unchanged —
+> Nutrient's assistant is sales-gated and cloud-leaning; FluxDocs' MCP server is
+> MIT, pure-Go, and self-hostable, so sensitive documents are processed on the
+> user's own infrastructure (the same privacy lever as the WASM build, §5.2).
+
 **Open Source:**
 
 | Product | License | Stack | Status | Weaknesses |
@@ -143,6 +175,11 @@ A clear gap exists for an MIT-licensed SDK that provides:
 - AI-powered from day one: document Q&A, structured extraction, pattern-based
   auto-redaction (PII, card numbers, etc.) — features Nutrient sells separately
   via the XtractFlow add-on
+- **Agent-native via a self-hostable MCP server** — exposes render, annotate,
+  fill, redact, extract as tools an AI agent (Claude, Claude Code, any MCP
+  client) can call directly. Nutrient's equivalent (MCP server + AI Document
+  Assistant) is sales-gated and cloud-leaning; an MIT, pure-Go, self-hostable MCP
+  server that keeps documents on the user's own infrastructure is an open gap
 - Transparent, non-sales-gated pricing — self-serve license keys like the Stripe
   Checkout model
 
@@ -263,8 +300,9 @@ will pay $25k-200k+/year for exactly this product category).
 | **Rendering** | Raster (PNG/JPEG buffer) for server-side thumbnail/preview; SVG for vector-accurate client-side; the WASM build uses the browser Canvas API to paint |
 | **Concurrency** | A goroutine pool processing multi-page rendering in parallel — a natural Go advantage over single-threaded JS (except Workers) |
 | **OCR** | Tesseract binding via CGO (Pro tier); may be swapped for a cloud OCR API (Cloud tier) |
-| **AI integration** | Call an LLM API (Claude, via a standard Go HTTP client) for document Q&A and structured extraction — no other-language SDK needed |
-| **Testing** | `go test` + table-driven tests for the parser; golden-file tests for rendering (compare PNG output with a reference) |
+| **AI integration (outbound)** | Call an LLM API (Claude, via a standard Go HTTP client) for document Q&A and structured extraction — no other-language SDK needed |
+| **AI integration (inbound / agent-native)** | A **Model Context Protocol (MCP) server** that exposes the core as tools an AI agent drives directly. Pure-Go, MIT, no CGO. Transports: stdio (local agents) and streamable HTTP (remote). Built as a separate binary `cmd/fluxdocs-mcp`; tools are gated by the tiers compiled in (Core tools always; Pro tools — fill/redact/sign — only when built with the Pro tags). Shipped Wave 2 (see §9.2) |
+| **Testing** | `go test` + table-driven tests for the parser; golden-file tests for rendering (compare PNG output with a reference); MCP tools tested via an in-process JSON-RPC client harness |
 | **Monorepo** | Go workspace (`go.work`) for multi-module, combined with a pnpm workspace for the JS wrappers/demos |
 
 ### 4.2 Client Wrappers
@@ -318,27 +356,29 @@ will pay $25k-200k+/year for exactly this product category).
 ```
 ┌───────────────────────────────────────────────────────────┐
 │  User Application Layer                                   │
-│  (React, Vue, vanilla JS, or a Go backend directly)       │
+│  (React, Vue, vanilla JS, a Go backend directly, or an    │
+│   AI agent — Claude / Claude Code / any MCP client)       │
 └───────────────────────────────────────────────────────────┘
                               │
-                ┌─────────────┴─────────────┐
-                ▼                           ▼
-┌───────────────────────────┐   ┌───────────────────────────┐
-│  Client Wrapper Layer     │   │  Go Native Usage          │
-│  @fluxdocs/react/vue      │   │  import "fluxdocs/core"   │
-│  - Load WASM core         │   │  - Used directly in a Go  │
-│  - Canvas paint binding   │   │    backend, no wrapper or │
-│  - Event binding for      │   │    network hop needed     │
-│    annotation tools       │   │                           │
-└───────────────────────────┘   └───────────────────────────┘
-                │                           │
-                └─────────────┬─────────────┘
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+┌──────────────────┐ ┌─────────────────┐ ┌──────────────────────┐
+│ Client Wrapper   │ │ Go Native Usage │ │ MCP Server Layer     │
+│ @fluxdocs/react  │ │ import core     │ │ cmd/fluxdocs-mcp     │
+│ - Load WASM core │ │ - Direct calls, │ │ - Exposes core as    │
+│ - Canvas binding │ │   no net hop    │ │   agent tools (§7.10)│
+│ - Annotation evt │ │                 │ │ - stdio + HTTP, MIT  │
+└──────────────────┘ └─────────────────┘ └──────────────────────┘
+          │                   │                   │
+          └───────────────────┼───────────────────┘
                               ▼
 ┌───────────────────────────────────────────────────────────┐
 │  Core Engine (fluxdocs/core) — written 100% in Go         │
 │                                                             │
 │  ┌───────────────────────────────────────────────────────┐│
 │  │  Public API: OpenDocument(), Render(), Annotate()      ││
+│  │  + MCP adapter: the same calls re-exposed as agent      ││
+│  │    tools (open/render/annotate/fill/redact/extract)     ││
 │  └───────────────────────────────────────────────────────┘│
 │  ┌───────────────────────────────────────────────────────┐│
 │  │  Parse Layer                                          ││
@@ -418,6 +458,15 @@ will pay $25k-200k+/year for exactly this product category).
    render, annotation, document ops) stays 100% MIT. Optional CGO-using parts
    (Tesseract OCR, high-fidelity render via MuPDF) are packaged behind their own
    build tags so users decide whether to accept that dependent license.
+
+8. **Agent-native, but as a thin adapter** — The MCP server is a transport over
+   the *existing* public API, not a parallel code path: each tool maps 1:1 to a
+   `Document` method, so an agent can never reach behavior the Go/WASM API can't.
+   It inherits the same tier gating (Pro tools only when Pro is compiled in) and
+   the same safety guarantees — in particular, a `redact` tool **must** call the
+   true-flatten path (§13.4), never a paint-over, and the post-redaction extract
+   test (§7 SECURITY) applies identically. Self-hostable stdio/HTTP keeps the
+   privacy promise of principle 5 intact for agent workflows.
 
 ---
 
@@ -688,6 +737,64 @@ POST   /v1/documents/:id/ask          AI document Q&A
 POST   /v1/documents/:id/redact       redact by pattern/area
 ```
 
+### 7.10 MCP Server (agent-native, Wave 2)
+
+FluxDocs ships an **MCP server** (`cmd/fluxdocs-mcp`) so an AI agent — Claude
+Desktop, Claude Code, or any Model Context Protocol client — can operate on PDFs
+through tool calls instead of code. It is a thin adapter over the §7.2–7.6 public
+API (see §5.2 principle 8): pure-Go, MIT, no CGO, runnable over **stdio** (local
+agent on the user's machine) or **streamable HTTP** (a self-hosted remote
+endpoint). Because it self-hosts, the document never leaves infrastructure the
+user controls — the same privacy lever as the WASM build, applied to agents.
+
+**Tools exposed** (each maps 1:1 to a `Document` method; the tier column marks
+what must be compiled in for the tool to register):
+
+| MCP tool | Maps to | Tier |
+|---|---|---|
+| `open_document` | `OpenDocument` | Core |
+| `get_page_count` / `get_page` | `GetPageCount` / `GetPage` | Core |
+| `render_page` | `RenderPage` (returns PNG as an MCP image content block) | Core |
+| `extract_text` | `ExtractText` / `ExtractTextByPage` | Core |
+| `add_annotation` | `AddAnnotation` (highlight / note / draw / shape) | Core |
+| `export_annotation_layer` | `ExportAnnotationLayer` | Core |
+| `merge` / `split` / `rotate` | `Merge` / `Split` / `Rotate` | Core |
+| `get_form_fields` / `set_form_field` | `GetFormFields` / `SetFormFieldValue` | Pro |
+| `redact` | `RedactText` / `RedactArea` → **always** `RedactAndFlatten` (§13.4) | Pro |
+| `sign` | `SignDocument` | Pro |
+| `save` | `Save` / `SaveTo` | Core |
+
+**Safety / boundary rules (non-negotiable):**
+
+- **Redaction stays safe.** The `redact` tool never exposes a "paint a black box"
+  mode; it routes through the true-flatten path and the post-redaction extract
+  test (§13.4, SECURITY §1) runs as a tool-level assertion. An agent cannot
+  produce a fake redaction.
+- **Tier gating is enforced at registration**, not by prompt. A default
+  (MIT-only) build does not register `redact` / `sign` / form tools at all, so an
+  agent literally cannot call Pro behavior that isn't licensed/compiled in.
+- **No silent network egress.** The MCP server makes no outbound call with
+  document bytes; the only AI traffic is the host agent ↔ FluxDocs tool channel,
+  which the user runs and observes. (Cloud-tier `ask` / `extract_structured`
+  remain opt-in tools that *do* call an LLM, clearly labeled as such.)
+- **Mutations are explicit.** Tools that change the document return a new handle /
+  require an explicit `save`; the agent never overwrites the source by side
+  effect.
+
+**Example agent session (conceptual):**
+
+```
+agent → open_document   { "path": "nda.pdf" }            → { "documentId": "doc-…", "pageCount": 6 }
+agent → extract_text    { "documentId": "doc-…" }         → "…Social Security Number: 123-45-6789…"
+agent → redact          { "documentId": "doc-…",
+                          "pattern": "\\d{3}-\\d{2}-\\d{4}" } → { "redactedRects": 3, "flattened": true }
+agent → save            { "documentId": "doc-…",
+                          "path": "nda.redacted.pdf" }     → { "ok": true }
+```
+
+This is the same "mark up, fill in, redact directly" workflow Nutrient's AI
+Document Assistant offers (§2.1) — delivered through an MIT, self-hostable core.
+
 ---
 
 ## 8. UI/UX Design System
@@ -858,10 +965,21 @@ and npm downloads.
 - Comparison pages (vs Nutrient, vs stitching pdf.js+pdf-lib)
 - Draft Show HN, Product Hunt assets
 
+**Stretch (if Week 7–8 has slack):** ship a *read-only* MCP server exposing the
+Core-tier tools only — `open_document`, `render_page`, `extract_text`,
+`add_annotation`, `export_annotation_layer` (§7.10). This plants the
+"agent-native, MIT, self-hostable" flag at launch and is a strong r/golang / Show
+HN angle ("point Claude Code at your PDFs, locally"). The write-heavy Pro tools
+(fill / redact / sign) land in Wave 2.
+
 ### 9.2 Wave 2 — Pro Tier (Weeks 11–18)
 
 **Goal:** Add features developers will pay $299–799 one-time for — exactly the
-feature set Nutrient charges separately for.
+feature set Nutrient charges separately for. **New for this revision:** the
+**MCP server is pulled forward from Wave 3 into Wave 2** (Nutrient shipped an MCP
+server + AI Document Assistant in early 2026, §2.1 — being a year late here would
+forfeit the "agent-native PDF tool" category). Wave 2 promotes the read-only
+launch server (§9.1 stretch) to the full write-capable tool surface.
 
 **Weeks 11–12: Forms & Signature**
 - Parse AcroForm fields (text, checkbox, radio, dropdown)
@@ -877,12 +995,24 @@ feature set Nutrient charges separately for.
 - A test suite verifying redacted content cannot be recovered via text extraction
   or copy-paste
 
-**Weeks 15–16: OCR & Compare**
+**Week 15: OCR & Compare**
 - Integrate Tesseract via CGO (build tag `ocr`)
 - OCR fallback automatically when `ExtractText` returns empty (the page is a
   scanned image)
 - Document compare: diff two PDF versions, highlight the changes
 - Watermark (text/image, over all or specified pages)
+
+**Week 16: MCP Server — agent-native (pulled forward from Wave 3)**
+- `cmd/fluxdocs-mcp`: a pure-Go, MIT MCP server over the §7.2–7.6 API (§7.10)
+- Promote the Wave 1 read-only tools to the full write surface: `set_form_field`,
+  `redact` (→ true-flatten only, §13.4), `sign`, `merge`/`split`/`rotate`, `save`
+- Transports: stdio (local Claude Desktop / Claude Code) + streamable HTTP
+  (self-hosted remote)
+- Tier gating enforced at tool registration (Pro tools absent from MIT builds)
+- Tool-level safety assertions: the post-redaction extract test (§13.4) runs
+  inside the `redact` tool; no paint-over path is reachable
+- Ship an `examples/mcp-agent-demo/` (a Claude Code session redacting a folder of
+  PDFs locally) + an MCP setup page in the docs
 
 **Week 17: Advanced Export & Polish**
 - Export PDF/A (the long-term archival standard)
@@ -893,12 +1023,18 @@ feature set Nutrient charges separately for.
 - License key validation
 - Stripe Checkout integration
 - Pro documentation, migration guide from pdf.js/pdf-lib
-- Public Pro launch
+- Public Pro launch — lead the announcement with the self-hostable MCP server
+  ("an MIT, local-first alternative to Nutrient's AI Document Assistant")
 
 ### 9.3 Wave 3 — Cloud + AI Tier (Month 6+)
 
 **Goal:** Recurring revenue via AI document processing — exactly the category
-Nutrient sells separately (XtractFlow) at a high price.
+Nutrient sells separately (XtractFlow) at a high price. **Scope shift:** the
+agent-native surface (MCP server) is no longer introduced here — it shipped in
+Wave 2 (§9.2). Wave 3 instead *builds on* it: hosting the MCP server as a
+managed remote endpoint, adding the Cloud-only tools (`ask`, `extract_structured`,
+AI auto-redact) to the same tool list, and orchestrating multi-step agent
+workflows server-side.
 
 **Months 6–7: Cloud Foundation**
 - Backend API (Go + Chi/Echo + Postgres)
@@ -913,6 +1049,9 @@ Nutrient sells separately (XtractFlow) at a high price.
   the PDF
 - Auto-redact PII via AI detection (no hand-written regex)
 - Advanced table extraction via a vision model for complex tables
+- Register these as Cloud-tier MCP tools (`ask`, `extract_structured`,
+  `auto_redact_pii`) on the hosted MCP endpoint — opt-in, clearly labeled as
+  making an LLM call, so agents reach AI features through the same tool channel
 
 **Months 10–11: Collaboration**
 - Multi-user annotation sync (CRDT-lite, no need for full Yjs since annotations
@@ -1066,8 +1205,16 @@ fluxdocs/
 │   └── fluxdocs.go                   # public API entry
 │
 ├── cmd/
-│   └── fluxdocs/
-│       └── main.go                   # CLI tool
+│   ├── fluxdocs/
+│   │   └── main.go                   # CLI tool
+│   └── fluxdocs-mcp/
+│       └── main.go                   # MCP server (agent-native, §7.10); stdio + HTTP
+│
+├── mcp/                              # MCP adapter: tool defs over core, MIT, no CGO
+│   ├── server.go                     # JSON-RPC plumbing, stdio + streamable HTTP
+│   ├── tools_core.go                 # open/render/extract/annotate/merge/split (Core)
+│   ├── tools_pro.go                  # fill/redact/sign — build tag, registered only if Pro
+│   └── tools_test.go                 # in-process JSON-RPC client harness
 │
 ├── cloud/                            # Go backend for the Cloud tier
 │   ├── api/
@@ -1416,6 +1563,7 @@ region — it must return empty or not match the original content.
 | Text extraction | ✓ | ✓ | ✓ | ✓ |
 | WASM client-side build | ✓ | ✓ | ✓ | ✓ |
 | React/Vue wrapper | ✓ | ✓ | ✓ | ✓ |
+| MCP server, read-only (render/extract/annotate), self-host | ✓ | ✓ | ✓ | ✓ |
 | Form fill | – | ✓ | ✓ | ✓ |
 | Digital signature | – | ✓ | ✓ | ✓ |
 | Redaction (safe, true flatten) | – | ✓ | ✓ | ✓ |
@@ -1423,9 +1571,11 @@ region — it must return empty or not match the original content.
 | Document compare | – | ✓ | ✓ | ✓ |
 | Watermark | – | ✓ | ✓ | ✓ |
 | Export PDF/A | – | ✓ | ✓ | ✓ |
+| MCP server, write tools (fill/redact/sign), self-host | – | ✓ | ✓ | ✓ |
 | AI structured extraction | – | – | ✓ | ✓ |
 | AI document Q&A | – | – | ✓ | ✓ |
 | Auto-redact PII via AI | – | – | ✓ | ✓ |
+| Hosted/managed MCP endpoint + AI tools | – | – | ✓ | ✓ |
 | Multi-user collaboration | – | – | ✓ | ✓ |
 | Webhook/Zapier | – | – | ✓ | ✓ |
 | SSO (SAML, OIDC) | – | – | – | ✓ |
@@ -1510,16 +1660,16 @@ are found while building, raising technical credibility.
 | 5 | Build | Annotation engine (4 basic types) | Annotations render correctly on both native/WASM |
 | 6 | Build | React + Vue wrapper, sample app | npm publish alpha |
 | 7 | Polish | Document ops (merge/split/rotate), text extraction | Docs site live |
-| 8 | **LAUNCH** | Show HN + Product Hunt + Reddit r/golang | 500+ GH stars, 1k+ npm/go get downloads |
+| 8 | **LAUNCH** | Show HN + Product Hunt + Reddit r/golang (+ read-only MCP server, stretch) | 500+ GH stars, 1k+ npm/go get downloads |
 | 9 | Listen | Bug fixes, review PRs, community engagement | Triage 80% of issues |
 | 10 | Listen | Iterate on feedback | DX polish, expand examples |
 | 11 | Pre-order | Email blast Pro early bird $349 | 30–50 pre-orders |
 | 12 | Build Pro | Form fill + AcroForm parser | Fill 20 sample form files correctly |
 | 13 | Build Pro | Digital signature (PKCS#7) | Sign + verify successfully |
 | 14 | Build Pro | Safe redaction engine (true flatten) | Extract-after-redact tests pass 100% |
-| 15 | Build Pro | OCR integration (Tesseract CGO) | Publish OCR accuracy benchmark |
-| 16 | Build Pro | Document compare, watermark, PDF/A export | Export passes a standard PDF/A validator |
-| 17 | Polish | Pro docs, license key system | License system working |
+| 15 | Build Pro | OCR integration (Tesseract CGO), document compare | Publish OCR accuracy benchmark |
+| 16 | Build Pro | **MCP server (agent-native): fill/redact/sign write tools** + watermark | Agent redacts a PDF locally via MCP; redact tool passes extract-after-redact 100% |
+| 17 | Polish | PDF/A export, Pro docs, license key system | Export passes a PDF/A validator; license system working |
 | 18 | **LAUNCH Pro** | Pro tier live | 50+ Pro licenses = $15k+ revenue |
 
 ---
@@ -1592,6 +1742,18 @@ would destroy the product's credibility.
 block competition
 **Mitigation:** Keep the MIT + Go + WASM advantage — these are architectural
 differences, not just price, and hard to copy quickly.
+
+**Risk (new, 2026):** Nutrient (and likely Apryse next) reframe the category as
+"the PDF tool your AI agent calls" via their MCP server + AI Document Assistant,
+and define the agent-native PDF experience before FluxDocs ships one — making
+FluxDocs look like a generation-behind viewer SDK.
+**Mitigation:** Pull the MCP server forward to Wave 2 (§9.2) and plant the flag at
+Wave 1 launch with a read-only server (§9.1 stretch). Compete on what their
+offering can't match: an **MIT, pure-Go, self-hostable** MCP server where the
+document never leaves the user's machine/infra. For privacy-sensitive buyers
+(legal/medical/finance — exactly our audience), "the agent operates on the PDF
+locally, nothing uploaded" beats a cloud-leaning, sales-gated assistant. Do not
+try to out-feature their AI breadth; win on license, self-hosting, and privacy.
 
 **Risk:** Google Document AI / AWS Textract crush the AI extraction part via
 economies of scale
@@ -1810,6 +1972,8 @@ at `OpenDocument()` time), avoiding re-walking the tree on every render.
 | Integrated OCR | ✓** | ✓ | ✓ | ✓ | ✗ |
 | AI document Q&A | ✓*** | ✓ (separate add-on, expensive) | ~ | ✗ | ✗ |
 | AI structured extraction | ✓*** | ✓ (XtractFlow, expensive) | ~ | ✗ | ✗ |
+| Agent-native MCP server | ✓** | ✓ (cloud-leaning, sales-gated) | ✗ | ✗ | ✗ |
+| Self-hostable MCP (doc never leaves your infra) | ✓** | ✗ | ✗ | ✗ | ✗ |
 | Transparent pricing (not sales-gated) | ✓ | ✗ | ✗ | ~ | ✓ |
 | Free self-hostable core | ✓ | ✗ | ✗ | ~ | ✓ |
 | Goroutine-native parallel render | ✓ | N/A (C++ threads) | N/A | N/A | ✗ (JS single-thread) |
