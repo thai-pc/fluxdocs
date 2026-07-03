@@ -26,6 +26,18 @@ system prompt that steers that agent.
 3. **Manage them.** Run the `/agents` slash command to list, create, edit, or
    inspect available subagents (project + personal).
 
+## One-shot: the `/feature` slash command
+
+Instead of chaining by hand, run the whole pipeline with one command:
+
+```
+/feature render Form XObjects
+```
+
+It orchestrates spec → implement → review → test → review for the given feature
+(defined in `.claude/commands/feature.md`), re-runs the gates, and summarizes.
+It does not commit unless you ask.
+
 ## Recommended pipeline for a feature
 
 Mirrors the repo's code → review → test → review rule:
