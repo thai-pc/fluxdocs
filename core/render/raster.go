@@ -32,6 +32,26 @@ func (m matrix) apply(x, y float64) (float64, float64) {
 	return m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]
 }
 
+// invert returns the inverse of the affine transform m. ok is false when the
+// determinant is near zero (a degenerate/singular transform, e.g. a zero-area
+// image placement), so callers can skip rather than divide by ~0.
+func (m matrix) invert() (matrix, bool) {
+	det := m[0]*m[3] - m[1]*m[2]
+	if math.Abs(det) < 1e-12 {
+		return matrix{}, false
+	}
+	ia := m[3] / det
+	ib := -m[1] / det
+	ic := -m[2] / det
+	id := m[0] / det
+	return matrix{
+		ia, ib,
+		ic, id,
+		-(m[4]*ia + m[5]*ic),
+		-(m[4]*ib + m[5]*id),
+	}, true
+}
+
 // scaleFactor is the average axis scale of m, used to turn a user-space line
 // width into a device pixel width.
 func (m matrix) scaleFactor() float64 {

@@ -30,12 +30,20 @@ type gstate struct {
 
 // interp interprets a page's content operators onto a raster surface. It builds
 // paths in device space (applying the CTM as points are added) and paints them
-// on fill/stroke operators, and rasterizes text glyphs via the page's fonts.
-// Image XObjects (Do) and shadings are ignored in Wave 1.
+// on fill/stroke operators, rasterizes text glyphs via the page's fonts, and
+// draws a common subset of image XObjects (Do). Form XObjects and shadings are
+// ignored in Wave 1.
 type interp struct {
 	rs    *raster
 	gs    gstate
 	stack []gstate
+
+	// res and resources give the Do operator access to the object model and the
+	// page's /Resources so it can resolve XObject streams (§8.8). Wave 1 models
+	// only the page-level resource scope; nested Form XObject resources are not
+	// tracked yet.
+	res       *parse.Resolver
+	resources parse.Dict
 
 	fonts map[parse.Name]*glyphFont
 	tm    matrix // text matrix (set by Tm/Td/…, reset by BT)
@@ -53,8 +61,10 @@ type interp struct {
 }
 
 // run interprets ops against the raster, using base as the initial CTM (PDF
-// user space to device pixels) and fonts for text.
-func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*glyphFont) {
+// user space to device pixels) and fonts for text. res and resources let the Do
+// operator resolve image XObjects from the page's /Resources; both may be nil,
+// in which case Do is a no-op.
+func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*glyphFont, res *parse.Resolver, resources parse.Dict) {
 	in := &interp{
 		rs: rs,
 		gs: gstate{
@@ -64,9 +74,11 @@ func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*g
 			lineWidth: 1,
 			hScale:    1,
 		},
-		fonts: fonts,
-		tm:    identity(),
-		tlm:   identity(),
+		res:       res,
+		resources: resources,
+		fonts:     fonts,
+		tm:        identity(),
+		tlm:       identity(),
 	}
 	for _, op := range ops {
 		in.apply(op)
@@ -230,6 +242,14 @@ func (in *interp) apply(op parse.ContentOp) {
 		in.drawText(lastStr(o))
 	case "TJ":
 		in.drawTextArray(o)
+
+	// --- XObjects ---
+	case "Do":
+		if len(o) >= 1 {
+			if name, ok := o[len(o)-1].(parse.Name); ok {
+				in.doXObject(name)
+			}
+		}
 	}
 }
 

@@ -1,10 +1,11 @@
 // Package render rasterizes a parsed PDF page to an image. Wave 1 supports PNG
 // and JPEG output of vector graphics (path fills/strokes in RGB/gray/CMYK) and
 // text glyphs from embedded TrueType (/FontFile2) and OpenType-CFF (/FontFile3)
-// fonts, parsed via golang.org/x/image/font/sfnt. Type1 (/FontFile) and
-// non-embedded standard-14 fonts, image XObjects, shadings, and clipping are not
-// yet rendered; the interpreter ignores those operators rather than failing, so
-// a page still rasterizes (minus those elements) instead of erroring.
+// fonts, parsed via golang.org/x/image/font/sfnt, plus a common subset of image
+// XObjects (see image.go). Type1 (/FontFile) and non-embedded standard-14 fonts,
+// Form XObjects, shadings, and clipping are not yet rendered; the interpreter
+// ignores those operators rather than failing, so a page still rasterizes (minus
+// those elements) instead of erroring.
 //
 // Two build targets share this code: the native binary and GOOS=js/GOARCH=wasm.
 package render
@@ -67,7 +68,7 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 	}
 	if len(content) > 0 {
 		fonts := loadFonts(r, pi.Resources)
-		run(rs, base, parse.ScanContent(content), fonts)
+		run(rs, base, parse.ScanContent(content), fonts, r, pi.Resources)
 	}
 	return encode(rs, format, opts.Quality)
 }
