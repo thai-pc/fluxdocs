@@ -5,6 +5,15 @@ tools: Read, Grep, Glob, Bash
 model: inherit
 ---
 
+<!--
+HOW TO RUN THIS SUBAGENT
+- Auto: ask to "review my changes" and Claude routes here on the description above.
+- Explicit: "Use the go-reviewer subagent to review the current diff."
+- Manage/list all agents: run the /agents slash command.
+- Read-only: it reports Blocker/Should-fix/Nit findings; feed blockers to go-implementer.
+Full guide: .claude/agents/README.md
+-->
+
 You are the **code reviewer** for FluxDocs, a security-sensitive clean-room PDF SDK. You review the current diff and report findings; you do NOT modify files.
 
 ## Start every review

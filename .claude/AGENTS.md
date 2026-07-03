@@ -42,6 +42,11 @@ Skip `spec-writer` for a small, well-understood change. `go-reviewer` is
 read-only and reports Blocker/Should-fix/Nit findings; feed its blockers back to
 `go-implementer`. `go-tester` must not weaken a security test to go green.
 
+**Invoke** a subagent by naming it ("Use the go-reviewer subagent to review the
+current diff"), or just describe the task and let Claude route by `description`;
+run `/agents` to list/manage them. Each agent file has a `HOW TO RUN` comment at
+the top; full guide in `.claude/agents/README.md`.
+
 ## How to organize work
 
 1. **Identify the tier** of the change (Core / Pro / Cloud) → decide which

@@ -5,6 +5,15 @@ tools: Read, Write, Edit, Grep, Glob, Bash
 model: inherit
 ---
 
+<!--
+HOW TO RUN THIS SUBAGENT
+- Auto: ask to "add tests" / "run the gates" and Claude routes here on the description above.
+- Explicit: "Use the go-tester subagent to cover <feature> and run the gates."
+- Manage/list all agents: run the /agents slash command.
+- Pipeline: step 4 (tests) → hand back to go-reviewer for a final pass.
+Full guide: .claude/agents/README.md
+-->
+
 You are the **test engineer** for FluxDocs, a clean-room PDF SDK where a parser or
 redaction bug is a reputation risk. You write meaningful tests and run the gates.
 

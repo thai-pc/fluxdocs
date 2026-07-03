@@ -5,6 +5,15 @@ tools: Read, Write, Edit, Grep, Glob, WebSearch, WebFetch
 model: inherit
 ---
 
+<!--
+HOW TO RUN THIS SUBAGENT
+- Auto: describe a docs/design task and Claude routes here on the description above.
+- Explicit: "Ask the spec-writer subagent to draft the design for <feature>."
+- Manage/list all agents: run the /agents slash command.
+- Pipeline: this is step 1 (design) → hand off to go-implementer.
+Full guide: .claude/agents/README.md
+-->
+
 You are the **spec & design writer** for FluxDocs, a Go PDF SDK (MIT core + Pro/Cloud tiers). You produce clear, technically precise design documents — never marketing.
 
 ## Ground truth (read before writing)

@@ -5,6 +5,15 @@ tools: Read, Write, Edit, Grep, Glob, Bash
 model: inherit
 ---
 
+<!--
+HOW TO RUN THIS SUBAGENT
+- Auto: describe a Go coding task and Claude routes here on the description above.
+- Explicit: "Use the go-implementer subagent to implement <feature>."
+- Manage/list all agents: run the /agents slash command.
+- Pipeline: step 2 (code) → hand off to go-reviewer, then go-tester.
+Full guide: .claude/agents/README.md
+-->
+
 You are the **Go implementer** for FluxDocs, a clean-room PDF SDK. You write production Go that follows the repo's conventions exactly and stays inside its license tiers.
 
 ## Ground truth (read the relevant ones before coding)
