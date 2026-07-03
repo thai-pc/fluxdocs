@@ -38,11 +38,14 @@ It orchestrates spec → implement → review → test → review for the given 
 (defined in `.claude/commands/feature.md`), re-runs the gates, and summarizes.
 It does not commit unless you ask.
 
-Two step commands run a single stage on the current change:
+Per-stage commands run a single step; `/gate` just verifies:
 
 ```
-/review [focus]     # go-reviewer on the current diff (read-only)
-/test   [target]    # go-tester adds tests + runs the gates
+/spec      <feature>   # spec-writer: design note (step 1)
+/implement <feature>   # go-implementer: code from the design note (step 2)
+/review    [focus]     # go-reviewer on the current diff, read-only (step 3/5)
+/test      [target]    # go-tester adds tests + runs the gates (step 4)
+/gate                  # run the Definition-of-Done gates (build/wasm/race/gofmt/vet)
 ```
 
 (Note: the built-in `/code-review` reviews the working diff and `/review` a
