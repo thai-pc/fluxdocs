@@ -78,6 +78,8 @@ func OpenBytes(data []byte) (*Document, error) {
 		PageCount: len(pages),
 		Pages:     pages,
 		Metadata:  md,
+		resolver:  resolver,
+		pageInfos: pageInfos,
 	}, nil
 }
 

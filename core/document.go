@@ -4,7 +4,10 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"strings"
 	"sync"
+
+	"github.com/thai-pc/fluxdocs/core/extract"
 )
 
 // errNotImplemented marks a method that exists in the public API but is not yet
@@ -251,22 +254,38 @@ func (d *Document) SignDocument(opts SignatureOptions) (*Document, error) {
 
 // --- §7.6 Extraction ---
 
-// ExtractText extracts all text in reading order (preserving layout if opts
-// requests it).
+// ExtractText extracts all text in reading order, one page after another
+// separated by a form feed (U+000C, the conventional page break). Layout
+// preservation (opts.PreserveLayout) is not yet implemented; text is always
+// returned in reading order.
 func (d *Document) ExtractText(opts ExtractOptions) (string, error) {
-	_ = opts
-	return "", errNotImplemented
+	var b strings.Builder
+	for i := range d.Pages {
+		text, err := d.ExtractTextByPage(i, opts)
+		if err != nil {
+			return "", err
+		}
+		if i > 0 {
+			b.WriteByte('\f') // page separator
+		}
+		b.WriteString(text)
+	}
+	return b.String(), nil
 }
 
-// ExtractTextByPage extracts the text of a single page.
+// ExtractTextByPage extracts the text of a single page in reading order.
 //
 // Returns ErrPageNotFound if pageIndex is out of range.
 func (d *Document) ExtractTextByPage(pageIndex int, opts ExtractOptions) (string, error) {
 	if pageIndex < 0 || pageIndex >= len(d.Pages) {
 		return "", ErrPageNotFound
 	}
-	_ = opts
-	return "", errNotImplemented
+	if d.resolver == nil || pageIndex >= len(d.pageInfos) {
+		return "", errNotImplemented
+	}
+	return extract.PageText(d.resolver, d.pageInfos[pageIndex], extract.Options{
+		PreserveLayout: opts.PreserveLayout,
+	})
 }
 
 // ExtractTables detects and extracts tables on a single page.

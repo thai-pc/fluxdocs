@@ -3,6 +3,8 @@ package core
 import (
 	"sync"
 	"time"
+
+	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
 // IDs use controlled type aliases (the equivalent of branded types in TS) to
@@ -36,6 +38,14 @@ type Document struct {
 	onAnnotationChange func(a Annotation)
 	onPageRendered     func(pageIndex int, img []byte)
 	onFormFieldChange  func(f FormField)
+
+	// Parse-layer handles kept alive for lazy operations (text extraction,
+	// rendering). resolver resolves indirect objects against the file bytes;
+	// pageInfos[i] carries page i's unresolved /Contents and /Resources,
+	// parallel to Pages[i]. Both are nil for a Document not built from parse
+	// (e.g. constructed in a test).
+	resolver  *parse.Resolver
+	pageInfos []parse.PageInfo
 }
 
 type DocumentMetadata struct {
