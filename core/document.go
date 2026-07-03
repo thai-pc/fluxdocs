@@ -40,8 +40,9 @@ func (d *Document) GetPage(index int) (*Page, error) {
 // RenderPage renders one page to a buffer in opts.Format ("png"|"jpeg"; "svg"
 // is not yet supported and returns render.ErrUnsupportedFormat).
 //
-// Wave 1 rasterizes vector graphics only; text glyphs and images are not yet
-// drawn (see the render package).
+// Wave 1 rasterizes vector graphics and text glyphs from embedded TrueType/CFF
+// fonts; image XObjects, Type1 fonts, and non-embedded fonts are not yet drawn
+// (see the render package).
 //
 // Returns the encoded image bytes, ErrPageNotFound if index is out of range, or
 // a render error.

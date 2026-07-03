@@ -7,22 +7,39 @@ import (
 )
 
 // gstate is the subset of the PDF graphics state the Wave 1 rasterizer tracks:
-// the current transform and the fill/stroke colors and line width. Clipping,
-// dash patterns, blend modes, and text state are not yet modeled.
+// the current transform, the fill/stroke colors and line width, plus text state
+// (font and the spacing parameters). Clipping, dash patterns, and blend modes
+// are not yet modeled. The text matrix is NOT here — it lives on interp because
+// BT resets it and q/Q do not save it.
 type gstate struct {
 	ctm       matrix
 	fill      color.RGBA
 	stroke    color.RGBA
 	lineWidth float64 // user-space units
+
+	// Text state (§9.3).
+	font       *glyphFont
+	fontSize   float64
+	charSpace  float64 // Tc
+	wordSpace  float64 // Tw
+	hScale     float64 // Tz/100; 1.0 = normal
+	leading    float64 // TL
+	rise       float64 // Ts
+	renderMode int     // Tr; 3 and 7 are invisible
 }
 
 // interp interprets a page's content operators onto a raster surface. It builds
 // paths in device space (applying the CTM as points are added) and paints them
-// on fill/stroke operators. Text and image operators are ignored in Wave 1.
+// on fill/stroke operators, and rasterizes text glyphs via the page's fonts.
+// Image XObjects (Do) and shadings are ignored in Wave 1.
 type interp struct {
 	rs    *raster
 	gs    gstate
 	stack []gstate
+
+	fonts map[parse.Name]*glyphFont
+	tm    matrix // text matrix (set by Tm/Td/…, reset by BT)
+	tlm   matrix // text line matrix
 
 	// Current path, in device space. Each subpath is a polyline; closed marks
 	// subpaths finished with h/re (relevant only to stroking).
@@ -36,11 +53,20 @@ type interp struct {
 }
 
 // run interprets ops against the raster, using base as the initial CTM (PDF
-// user space to device pixels).
-func run(rs *raster, base matrix, ops []parse.ContentOp) {
+// user space to device pixels) and fonts for text.
+func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*glyphFont) {
 	in := &interp{
 		rs: rs,
-		gs: gstate{ctm: base, fill: color.RGBA{0, 0, 0, 0xff}, stroke: color.RGBA{0, 0, 0, 0xff}, lineWidth: 1},
+		gs: gstate{
+			ctm:       base,
+			fill:      color.RGBA{0, 0, 0, 0xff},
+			stroke:    color.RGBA{0, 0, 0, 0xff},
+			lineWidth: 1,
+			hScale:    1,
+		},
+		fonts: fonts,
+		tm:    identity(),
+		tlm:   identity(),
 	}
 	for _, op := range ops {
 		in.apply(op)
@@ -144,7 +170,91 @@ func (in *interp) apply(op parse.ContentOp) {
 		if c, ok := colorByComponents(o); ok {
 			in.gs.stroke = c
 		}
+
+	// --- text state ---
+	case "BT":
+		in.tm = identity()
+		in.tlm = identity()
+	case "ET":
+		// no-op; glyphs are drawn eagerly
+	case "Tf":
+		if len(o) >= 2 {
+			if name, ok := o[len(o)-2].(parse.Name); ok {
+				in.gs.font = in.fonts[name]
+			}
+			in.gs.fontSize = num(o[len(o)-1])
+		}
+	case "Tc":
+		in.gs.charSpace = lastNum(o)
+	case "Tw":
+		in.gs.wordSpace = lastNum(o)
+	case "Tz":
+		in.gs.hScale = lastNum(o) / 100
+	case "TL":
+		in.gs.leading = lastNum(o)
+	case "Ts":
+		in.gs.rise = lastNum(o)
+	case "Tr":
+		in.gs.renderMode = int(lastNum(o))
+
+	// --- text positioning ---
+	case "Td":
+		if len(o) >= 2 {
+			in.textMove(num(o[0]), num(o[1]))
+		}
+	case "TD":
+		if len(o) >= 2 {
+			in.gs.leading = -num(o[1])
+			in.textMove(num(o[0]), num(o[1]))
+		}
+	case "Tm":
+		if len(o) >= 6 {
+			in.tlm = matrix{num(o[0]), num(o[1]), num(o[2]), num(o[3]), num(o[4]), num(o[5])}
+			in.tm = in.tlm
+		}
+	case "T*":
+		in.textMove(0, -in.gs.leading)
+
+	// --- text showing ---
+	case "Tj":
+		in.drawText(lastStr(o))
+	case "'":
+		in.textMove(0, -in.gs.leading)
+		in.drawText(lastStr(o))
+	case "\"":
+		if len(o) >= 3 {
+			in.gs.wordSpace = num(o[len(o)-3])
+			in.gs.charSpace = num(o[len(o)-2])
+		}
+		in.textMove(0, -in.gs.leading)
+		in.drawText(lastStr(o))
+	case "TJ":
+		in.drawTextArray(o)
 	}
+}
+
+// textMove applies a Td-style relative move to the text line matrix.
+func (in *interp) textMove(tx, ty float64) {
+	in.tlm = translate(tx, ty).mul(in.tlm)
+	in.tm = in.tlm
+}
+
+// lastNum returns the last numeric operand, or 0.
+func lastNum(o []parse.Object) float64 {
+	if len(o) == 0 {
+		return 0
+	}
+	return num(o[len(o)-1])
+}
+
+// lastStr returns the bytes of the last String operand, or nil.
+func lastStr(o []parse.Object) []byte {
+	for i := len(o) - 1; i >= 0; i-- {
+		if s, ok := o[i].(parse.String); ok {
+			return s.Value
+		}
+	}
+	return nil
 }
 
 // --- path helpers ---

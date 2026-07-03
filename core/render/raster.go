@@ -13,6 +13,8 @@ type matrix [6]float64
 
 func identity() matrix { return matrix{1, 0, 0, 1, 0, 0} }
 
+func translate(tx, ty float64) matrix { return matrix{1, 0, 0, 1, tx, ty} }
+
 // mul returns m * n (apply m first, then n).
 func (m matrix) mul(n matrix) matrix {
 	return matrix{
