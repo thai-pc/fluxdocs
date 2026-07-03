@@ -38,6 +38,17 @@ It orchestrates spec → implement → review → test → review for the given 
 (defined in `.claude/commands/feature.md`), re-runs the gates, and summarizes.
 It does not commit unless you ask.
 
+Two step commands run a single stage on the current change:
+
+```
+/review [focus]     # go-reviewer on the current diff (read-only)
+/test   [target]    # go-tester adds tests + runs the gates
+```
+
+(Note: the built-in `/code-review` reviews the working diff and `/review` a
+GitHub PR; these project commands drive the FluxDocs subagents with the
+project's security/tier checklist.)
+
 ## Recommended pipeline for a feature
 
 Mirrors the repo's code → review → test → review rule:
