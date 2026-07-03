@@ -1,6 +1,9 @@
 package parse
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 const maxRefChain = 32 // bound a reference->reference loop (SECURITY.md §2)
 
@@ -8,9 +11,14 @@ const maxRefChain = 32 // bound a reference->reference loop (SECURITY.md §2)
 // Reference into a concrete object. Parsed objects are cached by object number,
 // and decoded compressed object streams (ObjStm) are cached by their object
 // number.
+//
+// A Resolver is safe for concurrent use: RenderAllPages resolves objects from
+// several goroutines at once (one per page). The mutex serializes the caches;
+// the file bytes and xref table are immutable after NewResolver.
 type Resolver struct {
 	data    []byte
 	xref    *Xref
+	mu      sync.Mutex // guards cache and objstms
 	cache   map[int]Object
 	objstms map[int]*objStm // decoded /ObjStm, keyed by stream object number
 }
@@ -41,6 +49,12 @@ func (r *Resolver) Trailer() Dict { return r.xref.Trailer }
 //
 // Returns the object, or a wrapped error if parsing at the offset fails.
 func (r *Resolver) object(num int) (Object, error) {
+	// Serialize cache access and parsing. object() never re-enters itself
+	// (objectFromStream/loadObjStm read r.data directly), so a single mutex is
+	// deadlock-free.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if o, ok := r.cache[num]; ok {
 		return o, nil
 	}
