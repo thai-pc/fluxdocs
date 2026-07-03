@@ -19,6 +19,29 @@
   them in unless `Flatten*`.
 - **All committed text is English.** Vietnamese only in maintainer chat.
 
+## Subagents (`.claude/agents/`)
+
+Four specialized subagents split the work; the main agent delegates and chains
+them. Each reads the same ground-truth docs and enforces the tier/security rules.
+
+| Agent | Role | Writes code? |
+|---|---|---|
+| `spec-writer` | Design & spec docs (`docs/spec.md`, security/design notes) — produce the design *before* coding | No |
+| `go-implementer` | Implement the feature in Go, get it building on native + WASM | Yes (production) |
+| `go-reviewer` | Review the diff: security, correctness, tier boundaries, conventions | No (read-only) |
+| `go-tester` | Table-driven / golden / redaction-gate tests; run the full gate suite | Yes (tests) |
+
+**Standard pipeline for a feature** (mirrors the code → review → test → review rule):
+
+```
+spec-writer  →  go-implementer  →  go-reviewer  →  go-tester  →  go-reviewer
+ (design)        (code)            (review)        (tests)       (final review)
+```
+
+Skip `spec-writer` for a small, well-understood change. `go-reviewer` is
+read-only and reports Blocker/Should-fix/Nit findings; feed its blockers back to
+`go-implementer`. `go-tester` must not weaken a security test to go green.
+
 ## How to organize work
 
 1. **Identify the tier** of the change (Core / Pro / Cloud) → decide which
