@@ -1,0 +1,254 @@
+package parse
+
+// copy.go deep-copies a page and its transitive object closure from a source
+// Resolver into a Writer's fresh object-number space, remapping every reference,
+// then builds a minimal catalog/page tree. See
+// docs/design/pdf-writer-merge-split.md §4–§5.
+//
+// The source is untrusted input, so every walk is bounded (object count, output
+// size, recursion depth) and any failure returns a wrapped errLex — never a
+// panic (SECURITY.md §2–3).
+
+import (
+	"fmt"
+	"math"
+)
+
+// Copy guards (mirror the page-tree caps in pagetree.go).
+const (
+	maxCopyObjects = 1 << 20 // hard cap on indirect objects copied per build
+	maxCopyDepth   = 256     // bound recursion into nested arrays/dicts
+	maxOutputBytes = 4 << 30 // bound total stream bytes queued for emit (4 GiB)
+)
+
+// PageSource pairs a source Resolver with one resolved page from it. Merge and
+// Split differ only in the ordered list of PageSources they hand to
+// BuildDocument.
+type PageSource struct {
+	Resolver *Resolver
+	Page     PageInfo
+}
+
+// Copier copies indirect objects from one source Resolver into a Writer,
+// remapping source object numbers to freshly allocated writer numbers. The
+// visited map both deduplicates shared objects (a font used by two pages is
+// copied once) and breaks reference cycles.
+//
+// A Copier is bound to a single source Resolver; use one Copier per source. All
+// copiers in a build share the same Writer, so the object and output-size caps
+// are enforced globally through it.
+type Copier struct {
+	w       *Writer
+	src     *Resolver
+	visited map[int]Reference // source object number -> new Reference in w
+}
+
+// NewCopier returns a Copier that copies from src into w.
+func NewCopier(w *Writer, src *Resolver) *Copier {
+	return &Copier{w: w, src: src, visited: make(map[int]Reference)}
+}
+
+// CopyPage materializes a self-contained copy of one page into the Writer and
+// returns its Reference, with /Parent left unset (the caller patches it when
+// the /Pages node exists). Inherited /MediaBox, /Resources, and /Rotate are made
+// explicit; back-pointers (/Parent, tagged-PDF /StructParent(s), article /B)
+// are dropped so the copy drags in no foreign structure.
+//
+// Returns a wrapped errLex if the closure violates a copy guard or a source
+// object fails to resolve.
+func (c *Copier) CopyPage(pi PageInfo) (Reference, error) {
+	// Clone the page's own dictionary minus back-pointers, then copy its closure.
+	stripped := make(Dict, len(pi.Dict))
+	for k, v := range pi.Dict {
+		switch k {
+		case "Parent", "StructParents", "StructParent", "B":
+			continue
+		}
+		stripped[k] = v
+	}
+
+	copied, err := c.copyValue(stripped, 0)
+	if err != nil {
+		return Reference{}, err
+	}
+	page, ok := copied.(Dict)
+	if !ok {
+		page = Dict{} // defensive: a page must serialize as a dictionary
+	}
+	page["Type"] = Name("Page")
+
+	// Materialize inherited attributes so the page stands alone once /Parent is
+	// gone. Present-in-own-dict values were already copied above; only fill gaps.
+	if _, has := page["MediaBox"]; !has {
+		page["MediaBox"] = rectArray(pi.MediaBox)
+	}
+	if _, has := page["Resources"]; !has {
+		if pi.Resources != nil {
+			res, err := c.copyValue(pi.Resources, 0)
+			if err != nil {
+				return Reference{}, err
+			}
+			page["Resources"] = res
+		} else {
+			page["Resources"] = Dict{}
+		}
+	}
+	if _, has := page["Rotate"]; !has && pi.Rotate != 0 {
+		page["Rotate"] = Integer(int64(pi.Rotate))
+	}
+
+	return c.w.Add(page), nil
+}
+
+// copyValue returns a direct copy of obj with every inner reference remapped
+// into the Writer's number space. Depth is bounded to defeat deeply nested
+// hostile input.
+func (c *Copier) copyValue(obj Object, depth int) (Object, error) {
+	if depth > maxCopyDepth {
+		return nil, fmt.Errorf("%w: copy recursion too deep (suspected loop)", errLex)
+	}
+
+	switch v := obj.(type) {
+	case nil:
+		return Null{}, nil
+	case Null, Boolean, Integer, Real, String, Name:
+		return v, nil // scalars hold no references
+	case Array:
+		out := make(Array, len(v))
+		for i, e := range v {
+			ce, err := c.copyValue(e, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = ce
+		}
+		return out, nil
+	case Dict:
+		out := make(Dict, len(v))
+		for k, val := range v {
+			cv, err := c.copyValue(val, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = cv
+		}
+		return out, nil
+	case *Stream:
+		d, err := c.copyValue(v.Dict, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		dict, _ := d.(Dict)
+		c.w.outBytes += int64(len(v.Raw))
+		if c.w.outBytes > maxOutputBytes {
+			return nil, fmt.Errorf("%w: copied output exceeds size limit", errLex)
+		}
+		raw := make([]byte, len(v.Raw)) // fresh slice: never alias source bytes
+		copy(raw, v.Raw)
+		return &Stream{Dict: dict, Raw: raw}, nil
+	case Reference:
+		return c.copyRef(v, depth)
+	default:
+		return nil, fmt.Errorf("%w: unknown object type in copy", errLex)
+	}
+}
+
+// copyRef copies one indirect object (memoized). It RESERVES the new number
+// before recursing so a cycle that points back at this object finds the reserved
+// reference instead of recursing forever.
+func (c *Copier) copyRef(ref Reference, depth int) (Reference, error) {
+	if nr, ok := c.visited[ref.Number]; ok {
+		return nr, nil // already copied (dedup) or in-progress (cycle break)
+	}
+	if c.w.count() >= maxCopyObjects {
+		return Reference{}, fmt.Errorf("%w: copied object count exceeds limit", errLex)
+	}
+
+	newRef := c.w.Reserve()
+	c.visited[ref.Number] = newRef
+
+	resolved, err := c.src.Resolve(ref)
+	if err != nil {
+		return Reference{}, err // do not emit a half object
+	}
+	body, err := c.copyValue(resolved, depth+1)
+	if err != nil {
+		return Reference{}, err
+	}
+	c.w.Fill(newRef, body)
+	return newRef, nil
+}
+
+// BuildDocument copies the ordered pages into a fresh PDF and returns the
+// serialized bytes. It runs the full pipeline: copy each page's closure (one
+// Copier per distinct source Resolver, so shared objects within a source are
+// deduplicated), synthesize a /Catalog -> /Pages -> pages tree, attach an
+// optional /Info, and serialize.
+//
+// info, if non-empty, becomes the trailer /Info (its values must already be
+// direct PDF objects). Returns a wrapped errLex on a guard violation, an
+// unresolved object, or a nil source resolver.
+func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
+	w := NewWriter()
+
+	// Reserve the /Pages node first: pages need it as their /Parent.
+	pagesRef := w.Reserve()
+
+	// One Copier per source Resolver, so pages from the same document share
+	// (dedup) their common objects; pages from different documents never conflate
+	// object numbers.
+	copiers := make(map[*Resolver]*Copier)
+
+	kids := make(Array, 0, len(sources))
+	for _, s := range sources {
+		if s.Resolver == nil {
+			return nil, fmt.Errorf("%w: page source has no resolver", errLex)
+		}
+		cp := copiers[s.Resolver]
+		if cp == nil {
+			cp = NewCopier(w, s.Resolver)
+			copiers[s.Resolver] = cp
+		}
+		pageRef, err := cp.CopyPage(s.Page)
+		if err != nil {
+			return nil, err
+		}
+		// Point the copied page back at the new /Pages node.
+		if pd, ok := w.objects[pageRef.Number-1].(Dict); ok {
+			pd["Parent"] = pagesRef
+		}
+		kids = append(kids, pageRef)
+	}
+
+	w.Fill(pagesRef, Dict{
+		"Type":  Name("Pages"),
+		"Kids":  kids,
+		"Count": Integer(int64(len(kids))),
+	})
+
+	catRef := w.Add(Dict{
+		"Type":  Name("Catalog"),
+		"Pages": pagesRef,
+	})
+	w.SetRoot(catRef)
+
+	if len(info) > 0 {
+		w.SetInfo(w.Add(info))
+	}
+
+	return w.Bytes()
+}
+
+// rectArray renders a Rectangle as a 4-element PDF array [llx lly urx ury],
+// emitting whole values as Integer and fractional ones as Real.
+func rectArray(r Rectangle) Array {
+	return Array{numObj(r.LLX), numObj(r.LLY), numObj(r.URX), numObj(r.URY)}
+}
+
+// numObj returns an Integer for a whole, finite value and a Real otherwise.
+func numObj(f float64) Object {
+	if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) {
+		return Integer(int64(f))
+	}
+	return Real(f)
+}

@@ -2,12 +2,16 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
+	"unicode/utf16"
 
 	"github.com/thai-pc/fluxdocs/core/extract"
+	"github.com/thai-pc/fluxdocs/core/parse"
 	"github.com/thai-pc/fluxdocs/core/render"
 )
 
@@ -101,18 +105,79 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 	return results, nil
 }
 
-// Merge appends other after d and returns a new document (d and other are left
-// unchanged).
+// Merge appends other's pages after d's pages and returns a new document; d and
+// other are left unchanged. Both documents are copied into a single fresh PDF
+// (their reachable object graphs are deep-copied and renumbered), then re-opened
+// so the returned handle is a fully wired Document (resolver, pages, metadata).
+//
+// The merged /Info is synthesized from d's metadata (Producer = "FluxDocs");
+// merge does NOT union document-level metadata, form fields, bookmarks, or
+// tagging — those catalog features are dropped in Wave 1 (see the design note).
+// Original page /Annots are carried through; the FluxDocs annotation JSON layer
+// (a separate mechanism) is not baked in.
+//
+// Returns ErrInvalidPDF if either document was not opened from bytes/a file
+// (a resolver-less, test-constructed Document cannot be serialized), or if the
+// serialize/re-open round-trip fails.
 func (d *Document) Merge(other *Document) (*Document, error) {
-	_ = other
-	return nil, errNotImplemented
+	if other == nil || d.resolver == nil || other.resolver == nil {
+		return nil, ErrInvalidPDF
+	}
+
+	sources := make([]parse.PageSource, 0, len(d.pageInfos)+len(other.pageInfos))
+	for _, pi := range d.pageInfos {
+		sources = append(sources, parse.PageSource{Resolver: d.resolver, Page: pi})
+	}
+	for _, pi := range other.pageInfos {
+		sources = append(sources, parse.PageSource{Resolver: other.resolver, Page: pi})
+	}
+
+	built, err := parse.BuildDocument(sources, buildInfoDict(d))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidPDF, err)
+	}
+	return OpenBytes(built)
 }
 
 // Split divides d into multiple documents by page ranges [start, end] (0-based,
-// inclusive).
+// inclusive). It returns one *Document per range, in the given order; d is left
+// unchanged. Each output is a fresh, self-contained PDF built from d's pages and
+// re-opened.
+//
+// An empty pageRanges returns an empty slice and no error. Any range with
+// start < 0, end < start, or end >= PageCount returns ErrPageNotFound (a range
+// referencing a non-existent page). Returns ErrInvalidPDF if d was not opened
+// from bytes/a file, or if a build fails.
 func (d *Document) Split(pageRanges [][2]int) ([]*Document, error) {
-	_ = pageRanges
-	return nil, errNotImplemented
+	if d.resolver == nil {
+		return nil, ErrInvalidPDF
+	}
+
+	// Validate every range up front, before building anything.
+	for _, rng := range pageRanges {
+		start, end := rng[0], rng[1]
+		if start < 0 || end < start || end >= len(d.pageInfos) {
+			return nil, ErrPageNotFound
+		}
+	}
+
+	out := make([]*Document, 0, len(pageRanges))
+	for _, rng := range pageRanges {
+		sources := make([]parse.PageSource, 0, rng[1]-rng[0]+1)
+		for i := rng[0]; i <= rng[1]; i++ {
+			sources = append(sources, parse.PageSource{Resolver: d.resolver, Page: d.pageInfos[i]})
+		}
+		built, err := parse.BuildDocument(sources, buildInfoDict(d))
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidPDF, err)
+		}
+		doc, err := OpenBytes(built)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, doc)
+	}
+	return out, nil
 }
 
 // Rotate rotates one page by a multiple of 90 degrees (90/180/270, or negative).
@@ -133,18 +198,92 @@ func (d *Document) Reorder(newOrder []int) error {
 	return errNotImplemented
 }
 
-// Save writes the document (including flattened annotations, if any) to the
-// file at path.
+// Save writes the document as a clean, single-file PDF to path. It writes the
+// current page set WITHOUT baking in the FluxDocs annotation layer (annotations
+// are a separate JSON layer; flattening them onto a page is a future increment,
+// FlattenAnnotations). Original page /Annots present in the source PDF are
+// preserved. Save is native-only (filesystem); use SaveTo on the WASM path.
+//
+// Returns the underlying os error if the file cannot be created/written, or
+// ErrInvalidPDF if the document was not opened from bytes/a file.
 func (d *Document) Save(path string) error {
-	_ = path
-	return errNotImplemented
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := d.SaveTo(f); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
-// SaveTo writes the document to w. Use it to stream a server response without
-// touching disk, or to write into a browser buffer under WASM.
+// SaveTo serializes the document's current page set and writes it to w. Use it
+// to stream a server response without touching disk, or to write into a browser
+// buffer under WASM (it never touches the filesystem or the network). The
+// FluxDocs annotation layer is not baked in (see Save).
+//
+// Returns ErrInvalidPDF if the document was not opened from bytes/a file (a
+// resolver-less, test-constructed Document cannot be serialized), or the writer
+// error from w.
 func (d *Document) SaveTo(w io.Writer) error {
-	_ = w
-	return errNotImplemented
+	if d.resolver == nil {
+		return ErrInvalidPDF
+	}
+
+	sources := make([]parse.PageSource, 0, len(d.pageInfos))
+	for _, pi := range d.pageInfos {
+		sources = append(sources, parse.PageSource{Resolver: d.resolver, Page: pi})
+	}
+
+	built, err := parse.BuildDocument(sources, buildInfoDict(d))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidPDF, err)
+	}
+	_, err = w.Write(built)
+	return err
+}
+
+// buildInfoDict synthesizes a minimal /Info dictionary from a document's
+// metadata. Producer is always "FluxDocs"; Title/Author/Subject are carried
+// through when present. Merge/Split/Save use this rather than copying the
+// source /Info object graph (which could dangle after a page-only copy).
+func buildInfoDict(d *Document) parse.Dict {
+	info := parse.Dict{"Producer": pdfTextString("FluxDocs")}
+	if d.Title != "" {
+		info["Title"] = pdfTextString(d.Title)
+	}
+	if d.Metadata.Author != "" {
+		info["Author"] = pdfTextString(d.Metadata.Author)
+	}
+	if d.Metadata.Subject != "" {
+		info["Subject"] = pdfTextString(d.Metadata.Subject)
+	}
+	return info
+}
+
+// pdfTextString encodes a Go string as a PDF text string (§7.9.2.2): plain
+// bytes when it is printable ASCII, otherwise UTF-16BE with a byte-order mark,
+// emitted as a hex string so arbitrary bytes survive serialization.
+func pdfTextString(s string) parse.String {
+	ascii := true
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return parse.String{Value: []byte(s)}
+	}
+
+	u16 := utf16.Encode([]rune(s))
+	buf := make([]byte, 0, 2+len(u16)*2)
+	buf = append(buf, 0xFE, 0xFF) // UTF-16BE BOM
+	for _, u := range u16 {
+		buf = append(buf, byte(u>>8), byte(u))
+	}
+	return parse.String{Value: buf, Hex: true}
 }
 
 // Close releases resources held by the document. Safe to call multiple times.
