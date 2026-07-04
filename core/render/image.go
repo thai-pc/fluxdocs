@@ -30,9 +30,10 @@ func (d *decodedImage) at(col, row int) color.RGBA {
 }
 
 // doXObject handles the Do operator: it resolves /Resources /XObject /<name> to
-// a stream, and if that stream is an image XObject the renderer decodes and
-// draws it. Form XObjects and anything the decoder cannot handle are a graceful
-// no-op, so the rest of the page still renders (§8.8).
+// a stream and dispatches on its /Subtype. An /Image is decoded and drawn; a
+// /Form is interpreted recursively into the same surface (see form.go). Anything
+// the renderer cannot handle is a graceful no-op, so the rest of the page still
+// renders (§8.8).
 func (in *interp) doXObject(name parse.Name) {
 	if in.res == nil || in.resources == nil {
 		return
@@ -41,26 +42,38 @@ func (in *interp) doXObject(name parse.Name) {
 	if err != nil || !ok {
 		return
 	}
-	st, ok := resolveStream(in.res, xobjDict[name])
+	// Keep the raw entry: when it is an indirect reference it serves as the
+	// form's font-cache and cycle-detection key (form.go).
+	raw := xobjDict[name]
+	st, ok := resolveStream(in.res, raw)
 	if !ok {
 		return
 	}
+	ref, hasRef := raw.(parse.Reference)
+
 	subtype, hasSubtype := st.Dict.GetName("Subtype")
-	if hasSubtype && subtype == "Form" {
-		return // nested content streams are out of scope in Wave 1
-	}
-	if hasSubtype && subtype != "Image" {
+	switch {
+	case hasSubtype && subtype == "Form":
+		in.execForm(st, ref, hasRef)
+		return
+	case hasSubtype && subtype == "Image":
+		// fall through to the image path below
+	case hasSubtype:
+		return // PS, PostScript, or any other subtype: unsupported
+	default:
+		// Untyped stream: disambiguate leniently. /Width+/Height ⇒ image (the
+		// historical behaviour); otherwise a /BBox ⇒ form.
+		_, hasW := st.Dict["Width"]
+		_, hasH := st.Dict["Height"]
+		if hasW && hasH {
+			break
+		}
+		if _, hasBBox := st.Dict["BBox"]; hasBBox {
+			in.execForm(st, ref, hasRef)
+		}
 		return
 	}
-	if !hasSubtype {
-		// Be lenient: accept an untyped stream that at least declares dimensions.
-		if _, w := st.Dict["Width"]; !w {
-			return
-		}
-		if _, h := st.Dict["Height"]; !h {
-			return
-		}
-	}
+
 	img, ok := decodeImage(in.res, st, in.gs.fill)
 	if !ok {
 		return
@@ -350,6 +363,12 @@ func drawImage(rs *raster, ctm matrix, img *decodedImage) {
 	y0 := clampCoord(int(math.Floor(minY)), rs.h)
 	x1 := clampCoord(int(math.Ceil(maxX)), rs.w)
 	y1 := clampCoord(int(math.Ceil(maxY)), rs.h)
+	// Restrict to the active clip so a form's /BBox crops its images (blend also
+	// enforces this per pixel; clamping the box just avoids the wasted scan).
+	x0 = maxInt(x0, rs.clip.x0)
+	y0 = maxInt(y0, rs.clip.y0)
+	x1 = minInt(x1, rs.clip.x1)
+	y1 = minInt(y1, rs.clip.y1)
 	if x0 >= x1 || y0 >= y1 {
 		return // empty box
 	}

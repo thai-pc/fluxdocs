@@ -17,6 +17,11 @@ type gstate struct {
 	stroke    color.RGBA
 	lineWidth float64 // user-space units
 
+	// clip is the axis-aligned device-space clip rectangle. It lives in gstate so
+	// q/Q (and a Form XObject's implicit q/Q) save and restore it. Wave 1 narrows
+	// it only for a form's /BBox; W/W* path clipping is still ignored.
+	clip clipRect
+
 	// Text state (§9.3).
 	font       *glyphFont
 	fontSize   float64
@@ -39,15 +44,22 @@ type interp struct {
 	stack []gstate
 
 	// res and resources give the Do operator access to the object model and the
-	// page's /Resources so it can resolve XObject streams (§8.8). Wave 1 models
-	// only the page-level resource scope; nested Form XObject resources are not
-	// tracked yet.
+	// current resource scope so it can resolve XObject streams and fonts (§8.8).
+	// resources and fonts are stack-scoped: on entry to a Form XObject they swap
+	// to the form's /Resources and its fonts, then restore on exit (form.go).
 	res       *parse.Resolver
 	resources parse.Dict
 
 	fonts map[parse.Name]*glyphFont
 	tm    matrix // text matrix (set by Tm/Td/…, reset by BT)
 	tlm   matrix // text line matrix
+
+	// Form XObject recursion controls (SECURITY.md §2–3, see form.go).
+	formDepth  int                                           // current form nesting depth
+	formPath   map[parse.Reference]bool                      // XObject refs on the active recursion path (cycle guard)
+	formBudget int                                           // remaining form executions for this page render
+	fontCache  map[parse.Reference]map[parse.Name]*glyphFont // per-form fonts, keyed by XObject reference
+	stackFloor int                                           // Q may not pop below this stack length (form q/Q isolation)
 
 	// Current path, in device space. Each subpath is a polyline; closed marks
 	// subpaths finished with h/re (relevant only to stroking).
@@ -60,10 +72,12 @@ type interp struct {
 	startY   float64
 }
 
-// run interprets ops against the raster, using base as the initial CTM (PDF
-// user space to device pixels) and fonts for text. res and resources let the Do
-// operator resolve image XObjects from the page's /Resources; both may be nil,
-// in which case Do is a no-op.
+// run interprets a page's ops against the raster, using base as the initial CTM
+// (PDF user space to device pixels) and fonts for text. res and resources let
+// the Do operator resolve image and form XObjects from the page's /Resources;
+// both may be nil, in which case Do is a no-op. run is the top-level entry point:
+// it builds the interpreter (initialising the form-recursion controls and the
+// full-canvas clip) and hands the operator loop to interpret.
 func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*glyphFont, res *parse.Resolver, resources parse.Dict) {
 	in := &interp{
 		rs: rs,
@@ -73,13 +87,24 @@ func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*g
 			stroke:    color.RGBA{0, 0, 0, 0xff},
 			lineWidth: 1,
 			hScale:    1,
+			clip:      fullClip(rs.w, rs.h),
 		},
-		res:       res,
-		resources: resources,
-		fonts:     fonts,
-		tm:        identity(),
-		tlm:       identity(),
+		res:        res,
+		resources:  resources,
+		fonts:      fonts,
+		tm:         identity(),
+		tlm:        identity(),
+		formPath:   map[parse.Reference]bool{},
+		formBudget: maxFormBudget,
+		fontCache:  map[parse.Reference]map[parse.Name]*glyphFont{},
 	}
+	in.interpret(ops)
+}
+
+// interpret runs the operator loop. It is the shared interpretation core used by
+// both the page (from run) and every Form XObject (from execForm), so there is a
+// single operator switch reused at every nesting level.
+func (in *interp) interpret(ops []parse.ContentOp) {
 	for _, op := range ops {
 		in.apply(op)
 	}
@@ -92,9 +117,12 @@ func (in *interp) apply(op parse.ContentOp) {
 	case "q":
 		in.stack = append(in.stack, in.gs)
 	case "Q":
-		if n := len(in.stack); n > 0 {
+		// Refuse to pop below stackFloor so a stray Q inside a Form XObject cannot
+		// steal a caller's saved frame (form q/Q isolation, form.go).
+		if n := len(in.stack); n > in.stackFloor {
 			in.gs = in.stack[n-1]
 			in.stack = in.stack[:n-1]
+			in.syncClip() // Q may restore a wider clip (e.g. leaving a form /BBox)
 		}
 	case "cm":
 		if len(o) >= 6 {

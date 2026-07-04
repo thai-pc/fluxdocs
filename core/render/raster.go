@@ -63,26 +63,79 @@ func (m matrix) scaleFactor() float64 {
 // point is a device-space coordinate in pixels.
 type point struct{ X, Y float64 }
 
+// clipRect is an axis-aligned, half-open device-pixel clip rectangle
+// [x0,x1)×[y0,y1). It is the only clipping the Wave 1 rasterizer models, and it
+// exists solely to bound a Form XObject to its /BBox (see form.go); general
+// path clipping via W/W* is still ignored. A rectangle is "empty" when it has no
+// interior, in which case no pixel passes the clip.
+type clipRect struct{ x0, y0, x1, y1 int }
+
+// fullClip returns the clip covering the whole w×h canvas (no restriction).
+func fullClip(w, h int) clipRect { return clipRect{0, 0, w, h} }
+
+// intersect returns the overlap of two clip rectangles. The result may be empty.
+func (c clipRect) intersect(o clipRect) clipRect {
+	return clipRect{
+		x0: maxInt(c.x0, o.x0),
+		y0: maxInt(c.y0, o.y0),
+		x1: minInt(c.x1, o.x1),
+		y1: minInt(c.y1, o.y1),
+	}
+}
+
+// empty reports whether the rectangle has no interior (nothing can be painted).
+func (c clipRect) empty() bool { return c.x0 >= c.x1 || c.y0 >= c.y1 }
+
+// contains reports whether device pixel (x, y) lies inside the clip.
+func (c clipRect) contains(x, y int) bool {
+	return x >= c.x0 && x < c.x1 && y >= c.y0 && y < c.y1
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // raster is an RGBA drawing surface. Pixels are premultiplied-free (opaque
 // output); alpha compositing uses source-over.
 type raster struct {
 	img  *image.RGBA
 	w, h int
+
+	// clip is the active device-space clip rectangle enforced by blend, kept in
+	// sync with the interpreter's graphics-state clip. It starts as the full
+	// canvas and is narrowed only while a Form XObject's /BBox is in effect. A
+	// page is interpreted sequentially, so mutating this shared field is safe.
+	clip clipRect
 }
 
 // newRaster returns a w×h surface filled with opaque white (the default PDF
-// page background).
+// page background), with the clip set to the whole canvas.
 func newRaster(w, h int) *raster {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for i := range img.Pix {
 		img.Pix[i] = 0xff // R=G=B=A=255
 	}
-	return &raster{img: img, w: w, h: h}
+	return &raster{img: img, w: w, h: h, clip: fullClip(w, h)}
 }
 
-// blend composites src (source-over) onto the pixel at (x, y).
+// blend composites src (source-over) onto the pixel at (x, y). Pixels outside
+// the canvas bounds or the active clip rectangle are rejected — the single choke
+// point through which fills, strokes, glyphs, and images honour the clip.
 func (r *raster) blend(x, y int, src color.RGBA) {
 	if x < 0 || y < 0 || x >= r.w || y >= r.h {
+		return
+	}
+	if !r.clip.contains(x, y) {
 		return
 	}
 	if src.A == 0 {
@@ -173,15 +226,19 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 	}
 }
 
-// span fills a horizontal run of pixels [x0, x1) on row y.
+// span fills a horizontal run of pixels [x0, x1) on row y. It clamps to both the
+// canvas and the active clip x-range for speed; blend re-checks each pixel.
 func (r *raster) span(x0, x1 float64, y int, col color.RGBA) {
+	if y < r.clip.y0 || y >= r.clip.y1 {
+		return
+	}
 	ix0 := int(math.Round(x0))
 	ix1 := int(math.Round(x1))
-	if ix0 < 0 {
-		ix0 = 0
+	if ix0 < r.clip.x0 {
+		ix0 = r.clip.x0
 	}
-	if ix1 > r.w {
-		ix1 = r.w
+	if ix1 > r.clip.x1 {
+		ix1 = r.clip.x1
 	}
 	for x := ix0; x < ix1; x++ {
 		r.blend(x, y, col)
