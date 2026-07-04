@@ -101,18 +101,23 @@ gains behaviour (draws annotations when present) — existing `RenderPage` tests
 docs with no annotations, so output is unchanged. `render.Page` signature is
 unchanged.
 
-## 7. FOLLOW-UP (sketch only — separate increment): FlattenAnnotations
+## 7. FlattenAnnotations (IMPLEMENTED — core/flatten.go)
 
 Permanent bake into the page **content stream** (no device matrix — PDF user
-space directly):
+space directly), now implemented as described here:
 - highlight → set alpha via an `ExtGState` `/ca`, `rg` + `re` + `f`.
 - shape → `re` + `S`; draw → `m`/`l`…/`S`; note → a small filled `re` marker.
-- Wrap the appended ops in `q … Q` and append to the page `/Contents` (an array,
-  or wrap the existing single stream), then rebuild a new `*Document` via the
-  writer (`parse.BuildDocument`). Returns a NEW Document (flattened annotations
-  can't be edited); the JSON layer for those annotations is cleared on the copy.
-- Open questions: ExtGState resource injection into `/Resources`; append-vs-wrap
-  of existing content; interaction with `/Rotate`. Deferred to its own note.
+- Each annotation's ops are wrapped in `q … Q` and appended to the page
+  `/Contents` (normalized to an array, overlay last) as a new content stream via
+  the generalized `parse.PageSource.AppendContent`; constant alpha is applied
+  through named ExtGStates injected into a **page-private clone** of `/Resources`
+  (`parse.PageSource.ExtGStates`), so shared/deduplicated resource objects are
+  never mutated. The document is rebuilt with `parse.BuildDocument` and re-opened,
+  so the returned Document has an empty JSON layer (annotations now live in the
+  content). Freehand points are capped (`maxFlattenPoints`).
+- Resolved: ExtGState injection uses clone-on-write; content is appended (not
+  wrapping the original) with a leading newline for token separation; `/Rotate`
+  needs no special handling since annotations are authored in page user space.
 
 ## 8. Open questions
 

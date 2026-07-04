@@ -330,17 +330,8 @@ func (d *Document) Close() error {
 // --- §7.3 Annotation Operations ---
 // The annotation data layer (AddAnnotation, UpdateAnnotation, RemoveAnnotation,
 // GetAnnotations, ExportAnnotationLayer, ImportAnnotationLayer) lives in
-// annotation.go. FlattenAnnotations stays unimplemented here — baking
-// annotations into the content stream is a separate render increment.
-
-// FlattenAnnotations bakes annotations into the PDF content and returns a new
-// document — flattened annotations can no longer be edited.
-//
-// Not yet implemented: this increment builds the in-memory/JSON annotation data
-// layer only; nothing is drawn onto a page here (a core/render follow-up).
-func (d *Document) FlattenAnnotations() (*Document, error) {
-	return nil, errNotImplemented
-}
+// annotation.go; FlattenAnnotations (baking the layer into the page content
+// streams) lives in flatten.go.
 
 // --- §7.4 Redaction (Pro) ---
 // SECURITY WARNING: redaction must permanently remove content from the content

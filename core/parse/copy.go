@@ -27,6 +27,21 @@ const (
 type PageSource struct {
 	Resolver *Resolver
 	Page     PageInfo
+
+	// AppendContent, when non-empty, is appended to the copied page as an extra
+	// content stream, concatenated after the page's own content (§7.8.2). It lets
+	// a caller overlay marks in PDF user space — e.g. flattened annotations or a
+	// watermark — without decoding the original content. It should be a
+	// self-contained, q/Q-balanced content fragment.
+	AppendContent []byte
+
+	// ExtGStates are named graphics-state parameter dictionaries merged into the
+	// copied page's /Resources /ExtGState (e.g. {"FdGS0": {"Type":"ExtGState",
+	// "ca":Real(0.4),"CA":Real(0.4)}} for constant alpha). Each is injected into
+	// a page-private clone of the resources so shared/deduplicated resource
+	// objects are never mutated. Names should carry a distinctive prefix to avoid
+	// colliding with the page's own entries.
+	ExtGStates map[Name]Dict
 }
 
 // Copier copies indirect objects from one source Resolver into a Writer,
@@ -213,9 +228,13 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Point the copied page back at the new /Pages node.
+		// Point the copied page back at the new /Pages node, and overlay any extra
+		// content (flattened annotations) supplied by the caller.
 		if pd, ok := w.objects[pageRef.Number-1].(Dict); ok {
 			pd["Parent"] = pagesRef
+			if len(s.AppendContent) > 0 {
+				applyOverlay(w, pd, s.AppendContent, s.ExtGStates)
+			}
 		}
 		kids = append(kids, pageRef)
 	}
@@ -237,6 +256,75 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 	}
 
 	return w.Bytes()
+}
+
+// applyOverlay appends an extra content stream to a copied page and injects the
+// caller's named ExtGState dicts into a page-private clone of its /Resources.
+// It mutates only freshly created objects (the new content stream) and clones
+// the resource dictionaries before writing, so shared/deduplicated resource
+// objects from the source are never corrupted.
+func applyOverlay(w *Writer, page Dict, content []byte, exts map[Name]Dict) {
+	// 1. Append the overlay as a new indirect content stream. A page's /Contents
+	// may be a single stream reference, an array of them, an inline stream, or
+	// absent; normalize to an array with the overlay last so it draws on top. A
+	// leading newline separates it from the previous stream's final token so the
+	// two cannot merge even in a reader that does not insert the §7.8.2
+	// inter-stream whitespace.
+	raw := make([]byte, 0, len(content)+1)
+	raw = append(raw, '\n')
+	raw = append(raw, content...)
+	ov := w.Add(&Stream{Dict: Dict{}, Raw: raw})
+	switch c := page["Contents"].(type) {
+	case nil:
+		page["Contents"] = Array{ov}
+	case Array:
+		na := make(Array, len(c), len(c)+1)
+		copy(na, c)
+		for i, e := range na {
+			if st, ok := e.(*Stream); ok {
+				na[i] = w.Add(st) // a stream cannot sit directly in an array
+			}
+		}
+		page["Contents"] = append(na, ov)
+	case *Stream:
+		page["Contents"] = Array{w.Add(c), ov}
+	default: // a single Reference (or other) content object
+		page["Contents"] = Array{c, ov}
+	}
+
+	// 2. Inject the ExtGState entries into a page-private resources clone.
+	if len(exts) == 0 {
+		return
+	}
+	res := cloneDictValue(w, page["Resources"])
+	eg := cloneDictValue(w, res["ExtGState"])
+	for name, gs := range exts {
+		eg[name] = gs
+	}
+	res["ExtGState"] = eg
+	page["Resources"] = res
+}
+
+// cloneDictValue returns a fresh shallow copy of a dictionary value that may be
+// a direct Dict, an indirect Reference into w, or absent. The returned map is
+// always safe to mutate without affecting any shared source object.
+func cloneDictValue(w *Writer, v Object) Dict {
+	var src Dict
+	switch d := v.(type) {
+	case Dict:
+		src = d
+	case Reference:
+		if idx := d.Number - 1; idx >= 0 && idx < len(w.objects) {
+			if dd, ok := w.objects[idx].(Dict); ok {
+				src = dd
+			}
+		}
+	}
+	out := make(Dict, len(src)+1)
+	for k, val := range src {
+		out[k] = val
+	}
+	return out
 }
 
 // rectArray renders a Rectangle as a 4-element PDF array [llx lly urx ury],
