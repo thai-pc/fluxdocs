@@ -156,6 +156,11 @@ type RenderOptions struct {
 	Format    string // "png" | "jpeg" | "svg"
 	PageRange []int  // empty = all pages
 	Quality   int    // 1-100, applies to jpeg
+
+	// SkipAnnotations, when true, renders the bare page without the FluxDocs
+	// annotation layer. By default (false) annotations for the page are drawn as
+	// a non-destructive overlay — annotations are applied at render time (§9).
+	SkipAnnotations bool
 }
 
 // ExtractOptions controls text/table extraction.

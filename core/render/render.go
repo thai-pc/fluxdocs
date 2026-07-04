@@ -35,6 +35,12 @@ type Options struct {
 	DPI     int    // dots per inch; <=0 means 150
 	Format  string // "png" | "jpeg"
 	Quality int    // JPEG quality 1..100; <=0 means 90
+
+	// Annotations, if non-empty, are drawn as a non-destructive overlay on top
+	// of the page content (in PDF user space, transformed by the same device
+	// matrix). Empty = no overlay, so a page renders identically to a plain
+	// content render.
+	Annotations []Annotation
 }
 
 // Page rasterizes one page to encoded image bytes in opts.Format.
@@ -69,6 +75,9 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 	if len(content) > 0 {
 		fonts := loadFonts(r, pi.Resources)
 		run(rs, base, parse.ScanContent(content), fonts, r, pi.Resources)
+	}
+	if len(opts.Annotations) > 0 {
+		drawAnnotations(rs, base, opts.Annotations)
 	}
 	return encode(rs, format, opts.Quality)
 }

@@ -48,6 +48,10 @@ func (d *Document) GetPage(index int) (*Page, error) {
 // fonts; image XObjects, Type1 fonts, and non-embedded fonts are not yet drawn
 // (see the render package).
 //
+// The FluxDocs annotation layer for the page is drawn as a non-destructive
+// overlay on top of the content (§9); set opts.SkipAnnotations to render the
+// bare page. The source PDF is never modified.
+//
 // Returns the encoded image bytes, ErrPageNotFound if index is out of range, or
 // a render error.
 func (d *Document) RenderPage(index int, opts RenderOptions) ([]byte, error) {
@@ -57,10 +61,17 @@ func (d *Document) RenderPage(index int, opts RenderOptions) ([]byte, error) {
 	if d.resolver == nil || index >= len(d.pageInfos) {
 		return nil, errNotImplemented
 	}
+	var overlay []render.Annotation
+	if !opts.SkipAnnotations {
+		if anns, err := d.GetAnnotations(d.Pages[index].ID); err == nil {
+			overlay = renderAnnotations(anns)
+		}
+	}
 	img, err := render.Page(d.resolver, d.pageInfos[index], render.Options{
-		DPI:     opts.DPI,
-		Format:  opts.Format,
-		Quality: opts.Quality,
+		DPI:         opts.DPI,
+		Format:      opts.Format,
+		Quality:     opts.Quality,
+		Annotations: overlay,
 	})
 	if err != nil {
 		return nil, err
@@ -69,6 +80,41 @@ func (d *Document) RenderPage(index int, opts RenderOptions) ([]byte, error) {
 		d.onPageRendered(index, img)
 	}
 	return img, nil
+}
+
+// renderAnnotations translates the core annotation layer into the render layer's
+// own annotation value type (render cannot import core — import cycle). Only the
+// four Wave-1 drawable types are passed through; the deferred stamp/redact/
+// signature records are skipped (not drawn).
+func renderAnnotations(anns []Annotation) []render.Annotation {
+	if len(anns) == 0 {
+		return nil
+	}
+	out := make([]render.Annotation, 0, len(anns))
+	for _, a := range anns {
+		switch a.Type {
+		case AnnotationHighlight, AnnotationNote, AnnotationDraw, AnnotationShape:
+		default:
+			continue // deferred type: not drawn in Wave 1
+		}
+		ra := render.Annotation{
+			Type:    string(a.Type),
+			X:       a.Rect.X,
+			Y:       a.Rect.Y,
+			Width:   a.Rect.Width,
+			Height:  a.Rect.Height,
+			Color:   a.Color,
+			Opacity: a.Opacity,
+		}
+		if len(a.Points) > 0 {
+			ra.Points = make([]render.AnnPoint, len(a.Points))
+			for i, p := range a.Points {
+				ra.Points[i] = render.AnnPoint{X: p.X, Y: p.Y}
+			}
+		}
+		out = append(out, ra)
+	}
+	return out
 }
 
 // RenderAllPages renders every page in parallel via a goroutine pool bounded by
