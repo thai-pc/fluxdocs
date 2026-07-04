@@ -32,6 +32,12 @@ var (
 	// ErrAnnotationNotFound — no annotation matches the given AnnotationID.
 	ErrAnnotationNotFound = errors.New("fluxdocs: annotation not found")
 
+	// ErrInvalidAnnotation — an annotation failed validation: an unsupported
+	// type for AddAnnotation (only highlight/note/draw/shape are editable), a
+	// rect with negative or non-finite dimensions, an invalid patch, or an
+	// imported layer that exceeds the size cap.
+	ErrInvalidAnnotation = errors.New("fluxdocs: invalid annotation")
+
 	// ErrFormFieldNotFound — no form field matches the given name.
 	ErrFormFieldNotFound = errors.New("fluxdocs: form field not found")
 

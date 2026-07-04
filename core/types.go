@@ -39,6 +39,19 @@ type Document struct {
 	onPageRendered     func(pageIndex int, img []byte)
 	onFormFieldChange  func(f FormField)
 
+	// Annotation layer (unexported source of truth). annotations is the ordered
+	// list; insertion order is preserved so GetAnnotations and export/round-trip
+	// are deterministic. annotationSeq mints monotonic "ann-<n>" IDs. The
+	// current-layer identity fields are initialized lazily on first use (see
+	// ensureLayerLocked in annotation.go) because a Document may be constructed
+	// directly (tests) as well as via OpenBytes. All of this is guarded by mu.
+	annotations    []Annotation
+	annotationSeq  uint64
+	layerID        LayerID
+	layerName      string
+	layerVisible   bool
+	layerCreatedAt time.Time
+
 	// Parse-layer handles kept alive for lazy operations (text extraction,
 	// rendering). resolver resolves indirect objects against the file bytes;
 	// pageInfos[i] carries page i's unresolved /Contents and /Resources,
@@ -81,28 +94,41 @@ const (
 // Annotation is stored independently of the original PDF and is applied only
 // when rendering or flattening. This lets multiple users annotate without
 // modifying the source file, and makes undo and syncing easy.
+//
+// JSON tags are the serialization contract (spec Appendix A, camelCase). They
+// are explicit — not left to Go's default casing — because the JS wrappers and
+// stored .json sidecars depend on the exact keys. omitempty is applied only to
+// fields that are semantically absent when empty (content/points/authorId/meta);
+// never to rect/type/color/opacity or numeric coordinates, where a real zero
+// (e.g. opacity 0, x 0) must survive a round trip. It is intentionally NOT used
+// on the timestamps: encoding/json does not treat a struct as empty, so it would
+// be a no-op there and misleading.
 type Annotation struct {
-	ID        AnnotationID
-	PageID    PageID
-	Type      AnnotationType
-	Rect      Rect
-	Color     string  // hex, e.g. "#f59e0b"
-	Opacity   float64 // 0..1
-	Content   string  // text for note/stamp
-	Points    []Point // used for draw (freehand)
-	AuthorID  string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Meta      map[string]any
+	ID        AnnotationID   `json:"id"`
+	PageID    PageID         `json:"pageId"`
+	Type      AnnotationType `json:"type"`
+	Rect      Rect           `json:"rect"`
+	Color     string         `json:"color"`             // hex, e.g. "#f59e0b"
+	Opacity   float64        `json:"opacity"`           // 0..1
+	Content   string         `json:"content,omitempty"` // text for note/stamp
+	Points    []Point        `json:"points,omitempty"`  // used for draw (freehand)
+	AuthorID  string         `json:"authorId,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+	Meta      map[string]any `json:"meta,omitempty"`
 }
 
 // Rect is in PDF coordinate space (origin at bottom-left, units in points).
 type Rect struct {
-	X, Y, Width, Height float64
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 type Point struct {
-	X, Y float64
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
 }
 
 type FormFieldType string
@@ -142,12 +168,12 @@ type ExtractOptions struct {
 // AnnotationLayer is a set of annotations stored separately from the original
 // PDF (§6.2); it can be exported/imported independently for multi-user review.
 type AnnotationLayer struct {
-	ID          LayerID
-	DocumentID  DocumentID
-	Name        string // e.g. "Long's review"
-	Annotations []Annotation
-	Visible     bool
-	CreatedAt   time.Time
+	ID          LayerID      `json:"id"`
+	DocumentID  DocumentID   `json:"documentId"`
+	Name        string       `json:"name"` // e.g. "Long's review"
+	Annotations []Annotation `json:"annotations"`
+	Visible     bool         `json:"visible"`
+	CreatedAt   time.Time    `json:"createdAt"`
 }
 
 // ViewerConfig configures the viewer in a client wrapper (§6.3). The callbacks

@@ -159,53 +159,18 @@ func (d *Document) Close() error {
 }
 
 // --- §7.3 Annotation Operations ---
-
-// AddAnnotation adds an annotation to the current layer and returns the stored
-// copy with its ID and timestamps assigned.
-func (d *Document) AddAnnotation(a Annotation) (Annotation, error) {
-	return Annotation{}, errNotImplemented
-}
-
-// UpdateAnnotation applies a partial update by patch (a nil field is left
-// unchanged).
-//
-// Returns the updated annotation, or ErrAnnotationNotFound.
-func (d *Document) UpdateAnnotation(id AnnotationID, patch AnnotationPatch) (Annotation, error) {
-	_ = id
-	_ = patch
-	return Annotation{}, errNotImplemented
-}
-
-// RemoveAnnotation deletes the annotation by ID, or returns
-// ErrAnnotationNotFound.
-func (d *Document) RemoveAnnotation(id AnnotationID) error {
-	_ = id
-	return errNotImplemented
-}
-
-// GetAnnotations returns all annotations belonging to one page.
-func (d *Document) GetAnnotations(pageID PageID) ([]Annotation, error) {
-	_ = pageID
-	return nil, errNotImplemented
-}
+// The annotation data layer (AddAnnotation, UpdateAnnotation, RemoveAnnotation,
+// GetAnnotations, ExportAnnotationLayer, ImportAnnotationLayer) lives in
+// annotation.go. FlattenAnnotations stays unimplemented here — baking
+// annotations into the content stream is a separate render increment.
 
 // FlattenAnnotations bakes annotations into the PDF content and returns a new
 // document — flattened annotations can no longer be edited.
+//
+// Not yet implemented: this increment builds the in-memory/JSON annotation data
+// layer only; nothing is drawn onto a page here (a core/render follow-up).
 func (d *Document) FlattenAnnotations() (*Document, error) {
 	return nil, errNotImplemented
-}
-
-// ExportAnnotationLayer exports the annotation layer independently of the
-// original PDF (§6.2), for separate storage/sync or sharing among reviewers.
-func (d *Document) ExportAnnotationLayer() (*AnnotationLayer, error) {
-	return nil, errNotImplemented
-}
-
-// ImportAnnotationLayer applies a previously exported annotation layer onto the
-// document.
-func (d *Document) ImportAnnotationLayer(layer AnnotationLayer) error {
-	_ = layer
-	return errNotImplemented
 }
 
 // --- §7.4 Redaction (Pro) ---
