@@ -27,6 +27,12 @@ var (
 	// ErrPageNotFound — the page index is outside [0, PageCount).
 	ErrPageNotFound = errors.New("fluxdocs: page not found")
 
+	// ErrInvalidPageOrder — a page-organization argument is malformed: a Reorder
+	// permutation of the wrong length or with a duplicate/missing index, or a
+	// Rotate angle that is not a multiple of 90 degrees. An out-of-range page
+	// index stays ErrPageNotFound.
+	ErrInvalidPageOrder = errors.New("fluxdocs: invalid page order")
+
 	// --- Beyond §10.2: cases the public API in §7 needs to distinguish ---
 
 	// ErrAnnotationNotFound — no annotation matches the given AnnotationID.

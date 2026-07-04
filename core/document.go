@@ -180,23 +180,7 @@ func (d *Document) Split(pageRanges [][2]int) ([]*Document, error) {
 	return out, nil
 }
 
-// Rotate rotates one page by a multiple of 90 degrees (90/180/270, or negative).
-//
-// Returns ErrPageNotFound if pageIndex is out of range.
-func (d *Document) Rotate(pageIndex int, degrees int) error {
-	if pageIndex < 0 || pageIndex >= len(d.Pages) {
-		return ErrPageNotFound
-	}
-	_ = degrees
-	return errNotImplemented
-}
-
-// Reorder rearranges pages according to newOrder (a permutation of
-// [0, PageCount)).
-func (d *Document) Reorder(newOrder []int) error {
-	_ = newOrder
-	return errNotImplemented
-}
+// Rotate and Reorder — the page-organization operations — live in pageops.go.
 
 // Save writes the document as a clean, single-file PDF to path. It writes the
 // current page set WITHOUT baking in the FluxDocs annotation layer (annotations
