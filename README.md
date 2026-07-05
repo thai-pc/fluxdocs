@@ -76,11 +76,14 @@ docs/        spec.md — the full technical specification (reference document)
   stream (not painted over); the leak gate passes 100%.
 - **Watermark** — translucent, rotated text stamp.
 - **Forms** — AcroForm read, fill, and flatten.
+- **Document compare** — page-by-page word diff of two documents' text.
+- **OCR** — Tesseract via CGO behind the `ocr` build tag, so the default build
+  stays 100% pure Go (`go test -tags ocr ./core/ocr/...`).
 - **Agent-native MCP server** (`fluxdocs-mcp`) — a self-hostable Model Context
   Protocol server exposing open/extract/render/redact as tools an AI agent can
   call; documents stay on the user's own machine.
 
-Next: e-signature (PKCS#7), OCR, document compare, PDF/A.
+Next: e-signature (PKCS#7), PDF/A.
 
 ## Developing
 

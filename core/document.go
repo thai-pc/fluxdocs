@@ -394,15 +394,22 @@ func (d *Document) ExtractTables(pageIndex int) ([]Table, error) {
 	return nil, errNotImplemented
 }
 
-// OCRPage (Pro) runs OCR on a scanned-image page. Requires the `ocr` build tag
-// (Tesseract via CGO).
+// OCRPage (Pro) runs OCR on a page: it rasterizes the page and recognizes the
+// text with Tesseract. It requires a binary built with the `ocr` build tag
+// (Tesseract via CGO); the default pure-Go build returns ErrFeatureRequiresPro.
 //
-// Returns ErrPageNotFound if pageIndex is out of range.
+// Returns ErrPageNotFound if pageIndex is out of range, ErrInvalidPDF if the
+// document was not opened from bytes, or ErrFeatureRequiresPro when built
+// without the `ocr` tag. The actual implementation lives in ocr_enabled.go
+// (with the tag) / ocr_stub.go (without).
 func (d *Document) OCRPage(pageIndex int) (string, error) {
 	if pageIndex < 0 || pageIndex >= len(d.Pages) {
 		return "", ErrPageNotFound
 	}
-	return "", errNotImplemented
+	if d.resolver == nil || pageIndex >= len(d.pageInfos) {
+		return "", ErrInvalidPDF
+	}
+	return d.ocrPage(pageIndex)
 }
 
 // ExtractStructured (Cloud) takes a desired schema and calls an LLM to return
