@@ -1,0 +1,44 @@
+{
+  "name": "@fluxdocs/vue",
+  "version": "0.1.0",
+  "description": "Vue 3 components and composables for FluxDocs — a privacy-first, client-side PDF viewer powered by WebAssembly.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "pdf",
+    "vue",
+    "viewer",
+    "wasm",
+    "fluxdocs"
+  ],
+  "dependencies": {
+    "@fluxdocs/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "vue": ">=3.3"
+  },
+  "devDependencies": {
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.4.0",
+    "vitest": "^2.1.8",
+    "vue": "^3.5.13"
+  }
+}
