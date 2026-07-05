@@ -1,0 +1,7 @@
+{
+  "name": "fluxdocs-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "FluxDocs JS/WASM wrappers workspace (see packages/*). The Go core lives in core/.",
+  "license": "MIT"
+}
