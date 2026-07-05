@@ -336,39 +336,7 @@ func (d *Document) Close() error {
 // --- §7.4 Redaction (Pro) ---
 // SECURITY WARNING: redaction must permanently remove content from the content
 // stream, not merely paint over it (see .claude/SECURITY.md §1 and spec §13.4).
-// After redaction, a mandatory test re-runs ExtractText over the redacted area
-// -> it must return empty.
-
-// RedactText marks regions whose text matches a regex pattern (e.g. national ID
-// or credit-card numbers) and returns the list of Rects. Nothing is removed
-// until RedactAndFlatten.
-//
-// Returns ErrPageNotFound if pageIndex is out of range.
-func (d *Document) RedactText(pageIndex int, pattern string) ([]Rect, error) {
-	if pageIndex < 0 || pageIndex >= len(d.Pages) {
-		return nil, ErrPageNotFound
-	}
-	_ = pattern
-	return nil, errNotImplemented
-}
-
-// RedactArea marks a specified region for redaction.
-//
-// Returns ErrPageNotFound if pageIndex is out of range.
-func (d *Document) RedactArea(pageIndex int, rect Rect) error {
-	if pageIndex < 0 || pageIndex >= len(d.Pages) {
-		return ErrPageNotFound
-	}
-	_ = rect
-	return errNotImplemented
-}
-
-// RedactAndFlatten PERMANENTLY removes content within every marked region from
-// the content stream plus hidden metadata/annotations, then returns a new
-// document. This is NOT recoverable.
-func (d *Document) RedactAndFlatten() (*Document, error) {
-	return nil, errNotImplemented
-}
+// RedactText / RedactArea / RedactAndFlatten live in redact.go.
 
 // --- §7.5 Forms (Pro) ---
 

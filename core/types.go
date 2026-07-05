@@ -52,6 +52,11 @@ type Document struct {
 	layerVisible   bool
 	layerCreatedAt time.Time
 
+	// redactions is the pending redaction plan: page index -> regions to remove.
+	// It is populated by RedactText/RedactArea and consumed (permanently) by
+	// RedactAndFlatten. Guarded by mu.
+	redactions map[int][]Rect
+
 	// Parse-layer handles kept alive for lazy operations (text extraction,
 	// rendering). resolver resolves indirect objects against the file bytes;
 	// pageInfos[i] carries page i's unresolved /Contents and /Resources,

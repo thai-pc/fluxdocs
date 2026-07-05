@@ -42,6 +42,17 @@ type PageSource struct {
 	// objects are never mutated. Names should carry a distinctive prefix to avoid
 	// colliding with the page's own entries.
 	ExtGStates map[Name]Dict
+
+	// ReplaceContent, when non-nil, REPLACES the copied page's /Contents entirely
+	// with a single content stream of these bytes (the page's original content
+	// objects are not referenced). Redaction uses this to emit a content stream
+	// with the sensitive text-showing operators removed. An empty (non-nil) slice
+	// yields an empty page.
+	ReplaceContent []byte
+
+	// DropAnnots, when true, removes the copied page's /Annots. Redaction sets it
+	// so annotation objects that may carry the redacted text are not copied.
+	DropAnnots bool
 }
 
 // Copier copies indirect objects from one source Resolver into a Writer,
@@ -228,10 +239,16 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Point the copied page back at the new /Pages node, and overlay any extra
-		// content (flattened annotations) supplied by the caller.
+		// Point the copied page back at the new /Pages node, and apply any
+		// caller-supplied content changes (annotation overlay or redaction).
 		if pd, ok := w.objects[pageRef.Number-1].(Dict); ok {
 			pd["Parent"] = pagesRef
+			if s.DropAnnots {
+				delete(pd, "Annots")
+			}
+			if s.ReplaceContent != nil {
+				pd["Contents"] = w.Add(&Stream{Dict: Dict{}, Raw: s.ReplaceContent})
+			}
 			if len(s.AppendContent) > 0 {
 				applyOverlay(w, pd, s.AppendContent, s.ExtGStates)
 			}

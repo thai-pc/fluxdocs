@@ -20,14 +20,39 @@ type ContentOp struct {
 	Operands []Object
 }
 
+// ContentOpSpan is a ContentOp plus the byte range [Start,End) it occupies in
+// the scanned content stream — from its first operand through the operator.
+// Removing that exact range from the original bytes deletes precisely this
+// operation and leaves every other byte untouched, which is how redaction
+// strips text-showing operators without re-serializing (and risking corruption
+// of) the rest of the stream.
+type ContentOpSpan struct {
+	ContentOp
+	Start int
+	End   int
+}
+
 // ScanContent tokenizes a decoded content stream into a flat list of operators
 // with their operands. It is lenient by design: content streams in the wild are
 // frequently malformed, so a token error skips a byte rather than aborting, and
 // inline images are skipped whole. It never returns an error — a hostile or
 // broken stream yields whatever operators could be recovered.
 func ScanContent(data []byte) []ContentOp {
-	var ops []ContentOp
+	spans := ScanContentSpans(data)
+	ops := make([]ContentOp, len(spans))
+	for i, s := range spans {
+		ops[i] = s.ContentOp
+	}
+	return ops
+}
+
+// ScanContentSpans is ScanContent with each operator's byte range recorded (see
+// ContentOpSpan). It is the single implementation; ScanContent projects away the
+// spans.
+func ScanContentSpans(data []byte) []ContentOpSpan {
+	var ops []ContentOpSpan
 	var operands []Object
+	opStart := -1 // byte offset of the current op group's first token
 	p := &iparser{data: data, pos: 0}
 
 	for p.pos < len(data) {
@@ -36,7 +61,11 @@ func ScanContent(data []byte) []ContentOp {
 		if err != nil {
 			p.pos = start + 1 // lenient: skip the offending byte
 			operands = nil
+			opStart = -1
 			continue
+		}
+		if opStart < 0 && t.kind != tokEOF {
+			opStart = start
 		}
 
 		switch t.kind {
@@ -61,6 +90,7 @@ func ScanContent(data []byte) []ContentOp {
 			arr, err := p.parseArray()
 			if err != nil {
 				operands = nil
+				opStart = -1
 				break
 			}
 			operands = append(operands, arr)
@@ -69,6 +99,7 @@ func ScanContent(data []byte) []ContentOp {
 			obj, err := p.parseDictOrStream()
 			if err != nil {
 				operands = nil
+				opStart = -1
 				break
 			}
 			operands = append(operands, obj)
@@ -86,15 +117,22 @@ func ScanContent(data []byte) []ContentOp {
 				// Skip everything through the closing EI and drop pending operands.
 				p.pos = skipInlineImage(data, ni)
 				operands = nil
+				opStart = -1
 				continue
 			default: // any other keyword is an operator
-				ops = append(ops, ContentOp{Op: t.kw, Operands: operands})
+				ops = append(ops, ContentOpSpan{
+					ContentOp: ContentOp{Op: t.kw, Operands: operands},
+					Start:     opStart,
+					End:       ni,
+				})
 				operands = nil
+				opStart = -1
 			}
 			p.pos = ni
 
 		default: // stray ] or >> — resync
 			operands = nil
+			opStart = -1
 			p.pos = ni
 		}
 
