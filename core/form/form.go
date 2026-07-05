@@ -210,6 +210,118 @@ func readOptions(r *parse.Resolver, o parse.Object) []string {
 	return out
 }
 
+// FillWidget is a form widget to draw when flattening: its page, rectangle,
+// field type, and the value to render.
+type FillWidget struct {
+	PageIndex int
+	Rect      parse.Rectangle
+	Type      FieldType
+	Value     string
+}
+
+// WidgetsToFlatten scans each page's /Annots for form widgets. It returns the
+// widgets that have a value to draw (applying overrides: field name -> value),
+// and the set of pages that carry any widget (so the caller can drop their
+// interactive annotations even where nothing is drawn). Empty text and unchecked
+// buttons ("Off") produce no drawn widget.
+func WidgetsToFlatten(r *parse.Resolver, pages []parse.PageInfo, overrides map[string]string) ([]FillWidget, map[int]bool) {
+	var out []FillWidget
+	withWidgets := map[int]bool{}
+	for i := range pages {
+		for _, aref := range resolveArray(r, pages[i].Dict["Annots"]) {
+			ad, ok, err := r.ResolveDict(aref)
+			if err != nil || !ok {
+				continue
+			}
+			if sub, _ := ad.GetName("Subtype"); sub != "Widget" {
+				continue
+			}
+			withWidgets[i] = true
+
+			name, ft, flags, val, ok := fieldOfWidget(r, ad)
+			if !ok {
+				continue
+			}
+			if v, has := overrides[name]; has {
+				val = v
+			}
+			if val == "" || val == "Off" {
+				continue // nothing to draw (blank text / unchecked)
+			}
+			rect, ok := rectangle(r, ad["Rect"])
+			if !ok {
+				continue
+			}
+			out = append(out, FillWidget{PageIndex: i, Rect: rect, Type: fieldType(ft, flags), Value: val})
+		}
+	}
+	return out, withWidgets
+}
+
+// fieldOfWidget climbs a widget's /Parent chain to resolve the owning field's
+// qualified name, type, flags, and value (the widget itself may carry them when
+// widget and field are merged).
+func fieldOfWidget(r *parse.Resolver, widget parse.Dict) (name string, ft parse.Name, flags int64, value string, ok bool) {
+	node := widget
+	var parts []string
+	gotFT, gotV := false, false
+	for depth := 0; depth <= maxFieldDepth; depth++ {
+		if t, has := node["T"].(parse.String); has {
+			parts = append([]string{decodeText(t.Value)}, parts...)
+		}
+		if f, has := node.GetName("FT"); has && !gotFT {
+			ft, gotFT = f, true
+		}
+		if ff, has := node.GetInt("Ff"); has && flags == 0 {
+			flags = int64(ff)
+		}
+		if v, has := node["V"]; has && !gotV {
+			value, gotV = decodeValue(v), true
+		}
+		parent, has := node["Parent"]
+		if !has {
+			break
+		}
+		pd, ok, err := r.ResolveDict(parent)
+		if err != nil || !ok {
+			break
+		}
+		node = pd
+	}
+	return strings.Join(parts, "."), ft, flags, value, gotFT
+}
+
+// rectangle resolves a /Rect array [llx lly urx ury] to a normalized Rectangle.
+func rectangle(r *parse.Resolver, obj parse.Object) (parse.Rectangle, bool) {
+	arr := resolveArray(r, obj)
+	if len(arr) < 4 {
+		return parse.Rectangle{}, false
+	}
+	var f [4]float64
+	for i := 0; i < 4; i++ {
+		v, err := r.Resolve(arr[i])
+		if err != nil {
+			return parse.Rectangle{}, false
+		}
+		switch n := v.(type) {
+		case parse.Integer:
+			f[i] = float64(n)
+		case parse.Real:
+			f[i] = float64(n)
+		default:
+			return parse.Rectangle{}, false
+		}
+	}
+	llx, lly, urx, ury := f[0], f[1], f[2], f[3]
+	if urx < llx {
+		llx, urx = urx, llx
+	}
+	if ury < lly {
+		lly, ury = ury, lly
+	}
+	return parse.Rectangle{LLX: llx, LLY: lly, URX: urx, URY: ury}, true
+}
+
 // resolveArray resolves obj (following a reference) to an Array, or nil.
 func resolveArray(r *parse.Resolver, obj parse.Object) parse.Array {
 	resolved, err := r.Resolve(obj)
