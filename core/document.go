@@ -339,21 +339,14 @@ func (d *Document) Close() error {
 // RedactText / RedactArea / RedactAndFlatten live in redact.go.
 
 // --- §7.5 Forms (Pro) ---
-
-// GetFormFields lists the AcroForm fields in the document.
-func (d *Document) GetFormFields() ([]FormField, error) {
-	return nil, errNotImplemented
-}
-
-// SetFormFieldValue sets a field value by name, or returns ErrFormFieldNotFound.
-func (d *Document) SetFormFieldValue(name string, value string) error {
-	_ = name
-	_ = value
-	return errNotImplemented
-}
+// GetFormFields and SetFormFieldValue live in form.go.
 
 // FlattenForm turns form fields into static content that can no longer be
 // edited.
+//
+// Not yet implemented: reading (GetFormFields) and filling (SetFormFieldValue)
+// are done; drawing the filled values into the page content and dropping the
+// interactive widgets is a follow-up increment.
 func (d *Document) FlattenForm() (*Document, error) {
 	return nil, errNotImplemented
 }

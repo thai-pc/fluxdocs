@@ -57,6 +57,10 @@ type Document struct {
 	// RedactAndFlatten. Guarded by mu.
 	redactions map[int][]Rect
 
+	// formValues holds pending AcroForm field fills (field name -> value) set via
+	// SetFormFieldValue and reflected by GetFormFields. Guarded by mu.
+	formValues map[string]string
+
 	// Parse-layer handles kept alive for lazy operations (text extraction,
 	// rendering). resolver resolves indirect objects against the file bytes;
 	// pageInfos[i] carries page i's unresolved /Contents and /Resources,
