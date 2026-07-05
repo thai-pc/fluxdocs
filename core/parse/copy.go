@@ -53,6 +53,13 @@ type PageSource struct {
 	// DropAnnots, when true, removes the copied page's /Annots. Redaction sets it
 	// so annotation objects that may carry the redacted text are not copied.
 	DropAnnots bool
+
+	// Fonts are named font dictionaries merged into the copied page's /Resources
+	// /Font (e.g. {"WMHelv": {"Type":"Font","Subtype":"Type1","BaseFont":
+	// "Helvetica"}}), so an overlay (e.g. a watermark) can reference a font the
+	// page does not itself declare. Injected into the same page-private resources
+	// clone as ExtGStates; use a distinctive name prefix.
+	Fonts map[Name]Dict
 }
 
 // Copier copies indirect objects from one source Resolver into a Writer,
@@ -250,7 +257,7 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 				pd["Contents"] = w.Add(&Stream{Dict: Dict{}, Raw: s.ReplaceContent})
 			}
 			if len(s.AppendContent) > 0 {
-				applyOverlay(w, pd, s.AppendContent, s.ExtGStates)
+				applyOverlay(w, pd, s.AppendContent, s.ExtGStates, s.Fonts)
 			}
 		}
 		kids = append(kids, pageRef)
@@ -276,11 +283,11 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 }
 
 // applyOverlay appends an extra content stream to a copied page and injects the
-// caller's named ExtGState dicts into a page-private clone of its /Resources.
-// It mutates only freshly created objects (the new content stream) and clones
-// the resource dictionaries before writing, so shared/deduplicated resource
-// objects from the source are never corrupted.
-func applyOverlay(w *Writer, page Dict, content []byte, exts map[Name]Dict) {
+// caller's named ExtGState and Font dicts into a page-private clone of its
+// /Resources. It mutates only freshly created objects (the new content stream)
+// and clones the resource dictionaries before writing, so shared/deduplicated
+// resource objects from the source are never corrupted.
+func applyOverlay(w *Writer, page Dict, content []byte, exts, fonts map[Name]Dict) {
 	// 1. Append the overlay as a new indirect content stream. A page's /Contents
 	// may be a single stream reference, an array of them, an inline stream, or
 	// absent; normalize to an array with the overlay last so it draws on top. A
@@ -309,16 +316,25 @@ func applyOverlay(w *Writer, page Dict, content []byte, exts map[Name]Dict) {
 		page["Contents"] = Array{c, ov}
 	}
 
-	// 2. Inject the ExtGState entries into a page-private resources clone.
-	if len(exts) == 0 {
+	// 2. Inject ExtGState and Font entries into a page-private resources clone.
+	if len(exts) == 0 && len(fonts) == 0 {
 		return
 	}
 	res := cloneDictValue(w, page["Resources"])
-	eg := cloneDictValue(w, res["ExtGState"])
-	for name, gs := range exts {
-		eg[name] = gs
+	if len(exts) > 0 {
+		eg := cloneDictValue(w, res["ExtGState"])
+		for name, gs := range exts {
+			eg[name] = gs
+		}
+		res["ExtGState"] = eg
 	}
-	res["ExtGState"] = eg
+	if len(fonts) > 0 {
+		fd := cloneDictValue(w, res["Font"])
+		for name, f := range fonts {
+			fd[name] = f
+		}
+		res["Font"] = fd
+	}
 	page["Resources"] = res
 }
 

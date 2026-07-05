@@ -47,6 +47,10 @@ var (
 	// ErrFormFieldNotFound — no form field matches the given name.
 	ErrFormFieldNotFound = errors.New("fluxdocs: form field not found")
 
+	// ErrInvalidArgument — an operation was called with a malformed argument
+	// (e.g. an empty watermark text). Distinct from the structural ErrInvalidPDF.
+	ErrInvalidArgument = errors.New("fluxdocs: invalid argument")
+
 	// ErrUnsupportedFormat — RenderOptions.Format is not in the supported set
 	// ("png" | "jpeg" | "svg").
 	ErrUnsupportedFormat = errors.New("fluxdocs: unsupported render format")

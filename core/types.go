@@ -175,6 +175,18 @@ type ExtractOptions struct {
 	OCRFallback    bool // if the page is a scanned image, fall back to OCR (Pro)
 }
 
+// WatermarkOptions configures a text watermark stamped over pages (Pro). The
+// watermark is drawn centered and rotated on each target page, translucent, in a
+// standard Helvetica font.
+type WatermarkOptions struct {
+	Text     string  // the watermark text (required)
+	FontSize float64 // points; <=0 means 48
+	Color    string  // hex "#rrggbb"; empty means a neutral gray
+	Opacity  float64 // 0..1; <=0 means 0.3
+	Rotation float64 // degrees counter-clockwise; default 45 when zero-valued
+	Pages    []int   // 0-based target pages; empty = all pages
+}
+
 // AnnotationLayer is a set of annotations stored separately from the original
 // PDF (§6.2); it can be exported/imported independently for multi-user review.
 type AnnotationLayer struct {
