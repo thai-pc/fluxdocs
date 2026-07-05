@@ -10,9 +10,11 @@ and scattered, feature-thin open-source libraries (pdf.js, pdf-lib).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Go core](https://img.shields.io/badge/core-100%25%20Go-00ADD8)
-![Status](https://img.shields.io/badge/status-pre--build-orange)
+![Status](https://img.shields.io/badge/status-alpha-yellow)
 
-> **Status:** Pre-build / Planning (v0.1.0) — laying the foundations. See
+> **Status:** Alpha (v0.1.0) — the Wave-1 Core is functional end to end (parse →
+> render → annotate → merge/split → save → WASM → CLI), and Wave-2 Pro features
+> have started (safe redaction, watermark, form read/fill). See
 > [Progress](#progress).
 
 ## Why FluxDocs
@@ -52,15 +54,31 @@ docs/        spec.md — the full technical specification (reference document)
 
 ## Progress
 
-Done:
-- Core type system and the full `Document` API surface (per spec §6–§7).
-- PDF parsing layer: object model, lexer, indirect objects, streams, the
-  (classic) xref table, and a reference resolver.
-- Continuous integration (GitHub Actions): native + WASM builds, `go test -race`,
-  and a redaction security gate.
+**Wave 1 — Core (MIT), functional:**
+- **Parser** — object model, lexer, indirect objects, streams, classic + stream
+  xref, compressed object streams, page-tree flattening, lenient recovery.
+- **Text extraction** — content-stream interpreter with `/ToUnicode` CMaps.
+- **Rendering** to PNG/JPEG — vector paths, embedded TrueType/CFF glyphs, image
+  XObjects (JPEG/raw/ImageMask/SMask), form XObjects, and an annotation overlay.
+- **Annotation layer** — CRUD kept separate from the PDF, JSON export/import, and
+  permanent flattening into the content stream.
+- **PDF writer** — merge, split, save, reorder, rotate (a real object-graph
+  copier with cycle/DoS guards).
+- **WASM entry point** (`globalThis.fluxdocs`) and the **`fluxdocs` CLI**
+  (info/extract/render/merge/split/rotate).
+- **Client SDKs** — `@fluxdocs/core` (typed WASM wrapper), `@fluxdocs/react`,
+  `@fluxdocs/vue`.
+- **Hardening** — fuzz targets (millions of executions, no crashes) and a
+  synthetic clean/malformed PDF corpus round-trip.
 
-Next: turn the resolver into a flattened page tree, then render the first page to
-a raster image.
+**Wave 2 — Pro, in progress:**
+- **Safe redaction** — text-showing operators are removed from the content
+  stream (not painted over); the leak gate passes 100%.
+- **Watermark** — translucent, rotated text stamp.
+- **Forms** — AcroForm read + fill (flatten is next).
+
+Next: form flattening, then e-signature (PKCS#7), OCR, document compare, and an
+agent-native MCP server.
 
 ## Developing
 
