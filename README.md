@@ -75,10 +75,12 @@ docs/        spec.md — the full technical specification (reference document)
 - **Safe redaction** — text-showing operators are removed from the content
   stream (not painted over); the leak gate passes 100%.
 - **Watermark** — translucent, rotated text stamp.
-- **Forms** — AcroForm read + fill (flatten is next).
+- **Forms** — AcroForm read, fill, and flatten.
+- **Agent-native MCP server** (`fluxdocs-mcp`) — a self-hostable Model Context
+  Protocol server exposing open/extract/render/redact as tools an AI agent can
+  call; documents stay on the user's own machine.
 
-Next: form flattening, then e-signature (PKCS#7), OCR, document compare, and an
-agent-native MCP server.
+Next: e-signature (PKCS#7), OCR, document compare, PDF/A.
 
 ## Developing
 
