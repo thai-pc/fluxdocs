@@ -238,6 +238,35 @@ type Table struct {
 	Bounds    Rect
 }
 
+// DiffOp classifies a segment of a document comparison.
+type DiffOp string
+
+const (
+	DiffEqual  DiffOp = "equal"  // unchanged between the two documents
+	DiffInsert DiffOp = "insert" // added in the second document
+	DiffDelete DiffOp = "delete" // removed from the first document
+)
+
+// DiffSegment is a run of text sharing one DiffOp.
+type DiffSegment struct {
+	Op   DiffOp
+	Text string
+}
+
+// PageDiff is the word-level comparison of one page across two documents.
+type PageDiff struct {
+	PageIndex int
+	Identical bool
+	Segments  []DiffSegment
+}
+
+// CompareResult is the result of Document.Compare: a per-page word diff of the
+// two documents' extracted text.
+type CompareResult struct {
+	Identical bool
+	Pages     []PageDiff
+}
+
 // SignatureOptions configures SignDocument (Pro, PKCS#7).
 type SignatureOptions struct {
 	Reason      string
