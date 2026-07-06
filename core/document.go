@@ -13,6 +13,7 @@ import (
 	"github.com/thai-pc/fluxdocs/core/extract"
 	"github.com/thai-pc/fluxdocs/core/parse"
 	"github.com/thai-pc/fluxdocs/core/render"
+	"github.com/thai-pc/fluxdocs/core/sign"
 )
 
 // errNotImplemented marks a method that exists in the public API but is not yet
@@ -341,11 +342,29 @@ func (d *Document) Close() error {
 // --- §7.5 Forms (Pro) ---
 // GetFormFields, SetFormFieldValue, and FlattenForm live in form.go.
 
-// SignDocument signs the document per opts (PKCS#7) and returns a new signed
-// document.
+// SignDocument attaches a detached PKCS#7 digital signature to the document via
+// an incremental update and returns a new signed document (Pro). The original
+// bytes are preserved verbatim (so the signature stays valid); an invisible
+// signature field is added. RSA + SHA-256 is supported.
+//
+// Returns ErrInvalidPDF if the document was not opened from bytes, or an error
+// if the certificate/key cannot be parsed or signing fails.
 func (d *Document) SignDocument(opts SignatureOptions) (*Document, error) {
-	_ = opts
-	return nil, errNotImplemented
+	if d.resolver == nil {
+		return nil, ErrInvalidPDF
+	}
+	signed, err := sign.Sign(d.resolver, sign.Options{
+		Reason:      opts.Reason,
+		Location:    opts.Location,
+		ContactInfo: opts.ContactInfo,
+		FieldName:   opts.FieldName,
+		CertPEM:     opts.CertPEM,
+		KeyPEM:      opts.KeyPEM,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return OpenBytes(signed)
 }
 
 // --- §7.6 Extraction ---

@@ -77,6 +77,9 @@ docs/        spec.md — the full technical specification (reference document)
 - **Watermark** — translucent, rotated text stamp.
 - **Forms** — AcroForm read, fill, and flatten.
 - **Document compare** — page-by-page word diff of two documents' text.
+- **Digital signatures** — a detached PKCS#7/CMS signature (pure-Go, RSA +
+  SHA-256) embedded via an incremental update, so the original bytes stay
+  verbatim and the signature validates.
 - **OCR** — Tesseract via CGO behind the `ocr` build tag, so the default build
   stays 100% pure Go (`go test -tags ocr ./core/ocr/...`).
 - **Agent-native MCP server** (`fluxdocs-mcp`) — a self-hostable Model Context

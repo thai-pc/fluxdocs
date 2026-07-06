@@ -43,6 +43,31 @@ func NewResolver(data []byte) (*Resolver, error) {
 // Trailer returns the most recent trailer dictionary.
 func (r *Resolver) Trailer() Dict { return r.xref.Trailer }
 
+// Bytes returns the original file bytes the resolver was built from. The slice
+// is the live buffer; callers must not modify it (incremental-update writers
+// append to a copy).
+func (r *Resolver) Bytes() []byte { return r.data }
+
+// RootRef returns the /Root reference from the trailer, if the trailer points at
+// the catalog by an indirect reference (the normal case).
+func (r *Resolver) RootRef() (Reference, bool) {
+	ref, ok := r.xref.Trailer["Root"].(Reference)
+	return ref, ok
+}
+
+// MaxObjectNumber returns the highest object number present in the cross-
+// reference table. An incremental update allocates new objects starting at
+// MaxObjectNumber()+1.
+func (r *Resolver) MaxObjectNumber() int {
+	max := 0
+	for num := range r.xref.Entries {
+		if num > max {
+			max = num
+		}
+	}
+	return max
+}
+
 // object loads an indirect object by number (via its xref offset). A free or
 // nonexistent object resolves to Null (per spec, a reference to a missing
 // object is null).

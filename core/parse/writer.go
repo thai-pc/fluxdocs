@@ -161,6 +161,16 @@ func writeXrefEntry(buf *bytes.Buffer, off int) {
 	buf.Write(line[:])
 }
 
+// SerializeObject returns obj as conforming PDF syntax (ISO §7.3), with any
+// indirect references emitted verbatim (n g R) rather than renumbered. It is
+// used by the incremental-update signer to re-emit an existing object (e.g. an
+// updated catalog) without disturbing the rest of the file.
+func SerializeObject(obj Object) []byte {
+	var buf bytes.Buffer
+	serializeObject(&buf, obj)
+	return buf.Bytes()
+}
+
 // serializeObject writes obj as conforming PDF syntax (ISO §7.3). It handles
 // every Object variant plus a nil interface (defensively emitted as null).
 func serializeObject(buf *bytes.Buffer, obj Object) {
