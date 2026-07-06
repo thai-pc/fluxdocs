@@ -11,13 +11,17 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 
+	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
+
 	"github.com/thai-pc/fluxdocs/cloud/ai"
 	"github.com/thai-pc/fluxdocs/cloud/api"
+	"github.com/thai-pc/fluxdocs/cloud/db"
 	"github.com/thai-pc/fluxdocs/core"
 )
 
@@ -35,8 +39,12 @@ func run() error {
 	if key == "" {
 		return fmt.Errorf("FLUXDOCS_API_KEY is required")
 	}
-	keys := api.NewMemKeyStore()
-	keys.Add(api.HashKey(key), "default") // only the hash is stored
+
+	// Pick persistence: PostgreSQL when DATABASE_URL is set, else in-memory.
+	docs, keys, err := stores(os.Getenv("DATABASE_URL"), api.HashKey(key), log)
+	if err != nil {
+		return err
+	}
 
 	// Enable the AI endpoints only when a Claude key is present.
 	var aiClient core.AIClient
@@ -45,7 +53,7 @@ func run() error {
 		log.Info("AI endpoints enabled")
 	}
 
-	srv := api.New(api.NewMemDocumentStore(), keys, aiClient, log)
+	srv := api.New(docs, keys, aiClient, log)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -54,4 +62,39 @@ func run() error {
 	addr := ":" + port
 	log.Info("listening", "addr", addr)
 	return http.ListenAndServe(addr, srv.Handler())
+}
+
+// stores returns the document and key stores. With a DATABASE_URL it applies the
+// schema, seeds the default org and the given API-key hash, and returns
+// PostgreSQL-backed stores; otherwise it returns in-memory stores. Only the key
+// hash is ever persisted.
+func stores(dsn, keyHash string, log *slog.Logger) (api.DocumentStore, api.KeyStore, error) {
+	if dsn == "" {
+		log.Info("persistence", "backend", "in-memory")
+		keys := api.NewMemKeyStore()
+		keys.Add(keyHash, "default")
+		return api.NewMemDocumentStore(), keys, nil
+	}
+
+	sqlDB, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open database: %w", err)
+	}
+	if err := sqlDB.Ping(); err != nil {
+		return nil, nil, fmt.Errorf("connect to database: %w", err)
+	}
+	if _, err := sqlDB.Exec(db.Schema); err != nil {
+		return nil, nil, fmt.Errorf("apply schema: %w", err)
+	}
+	if _, err := sqlDB.Exec(
+		`INSERT INTO orgs (id, name) VALUES ('default', 'Default') ON CONFLICT (id) DO NOTHING`); err != nil {
+		return nil, nil, fmt.Errorf("seed org: %w", err)
+	}
+	if _, err := sqlDB.Exec(
+		`INSERT INTO api_keys (key_hash, org_id) VALUES ($1, 'default') ON CONFLICT (key_hash) DO NOTHING`,
+		keyHash); err != nil {
+		return nil, nil, fmt.Errorf("seed api key: %w", err)
+	}
+	log.Info("persistence", "backend", "postgres")
+	return api.NewPostgresDocumentStore(sqlDB), api.NewPostgresKeyStore(sqlDB), nil
 }
