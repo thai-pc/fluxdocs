@@ -85,13 +85,24 @@ func TestRedactArea_RemovesTextNotJustPaintsOver(t *testing.T) {
 		t.Errorf("over-redacted: non-secret text lost: %q", text)
 	}
 
-	// The secret bytes must not survive anywhere in the serialized PDF.
+	// The secret bytes must not survive anywhere in the serialized PDF — checked
+	// on BOTH the verbatim RedactAndFlatten output (out.Bytes(), what callers
+	// like the CLI/MCP write directly) and a re-saved copy. The verbatim check is
+	// the strict one: a re-save rebuilds the object graph and would silently drop
+	// an orphaned original-content stream, hiding the very leak we must catch.
+	raw, err := out.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("SECRET-1234")) {
+		t.Errorf("LEAK: secret bytes remain in the verbatim redacted PDF")
+	}
 	var buf bytes.Buffer
 	if err := out.SaveTo(&buf); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(buf.Bytes(), []byte("SECRET-1234")) {
-		t.Errorf("LEAK: secret bytes remain in the redacted PDF")
+		t.Errorf("LEAK: secret bytes remain in the re-saved redacted PDF")
 	}
 }
 

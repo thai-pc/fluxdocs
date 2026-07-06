@@ -53,10 +53,18 @@ func FuzzRedact(f *testing.F) {
 				pattern, x, y, w, h, text)
 		}
 
+		// Verbatim output (what the CLI/MCP write) is the strict check — a
+		// re-save would rebuild the graph and drop an orphaned original-content
+		// stream, hiding a leak.
+		if raw, err := out.Bytes(); err == nil {
+			if bytes.Contains(raw, []byte("SECRET-1234")) {
+				t.Fatalf("LEAK: secret bytes remain in verbatim output (pattern=%q)", pattern)
+			}
+		}
 		var buf bytes.Buffer
 		if err := out.SaveTo(&buf); err == nil {
 			if bytes.Contains(buf.Bytes(), []byte("SECRET-1234")) {
-				t.Fatalf("LEAK: secret bytes remain after redaction (pattern=%q)", pattern)
+				t.Fatalf("LEAK: secret bytes remain after re-save (pattern=%q)", pattern)
 			}
 		}
 	})

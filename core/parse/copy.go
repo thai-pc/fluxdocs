@@ -305,6 +305,13 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 	copiers := make(map[*Resolver]*Copier)
 
 	kids := make(Array, 0, len(sources))
+	// replaced records the object numbers of original page-content streams that
+	// ReplaceContent (redaction) repointed away from. Their bytes still carry the
+	// removed text, so after all pages are copied any that no other page still
+	// references are blanked — otherwise the secret would linger as an orphaned,
+	// unreferenced object in the output (.claude/SECURITY.md §1: redaction must
+	// remove content, and a paint-over or a dangling copy both fail that).
+	var replaced []int
 	for _, s := range sources {
 		if s.Resolver == nil {
 			return nil, Reference{}, fmt.Errorf("%w: page source has no resolver", errLex)
@@ -326,6 +333,7 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 				delete(pd, "Annots")
 			}
 			if s.ReplaceContent != nil {
+				replaced = append(replaced, contentRefNums(pd["Contents"])...)
 				pd["Contents"] = w.Add(&Stream{Dict: Dict{}, Raw: s.ReplaceContent})
 			}
 			if len(s.AppendContent) > 0 {
@@ -335,12 +343,63 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 		kids = append(kids, pageRef)
 	}
 
+	blankOrphanedContent(w, kids, replaced)
+
 	w.Fill(pagesRef, Dict{
 		"Type":  Name("Pages"),
 		"Kids":  kids,
 		"Count": Integer(int64(len(kids))),
 	})
 	return w, pagesRef, nil
+}
+
+// contentRefNums returns the object numbers referenced by a page's /Contents,
+// which is either a single Reference or an Array of References (inline streams,
+// having no number, are ignored).
+func contentRefNums(contents Object) []int {
+	var nums []int
+	switch c := contents.(type) {
+	case Reference:
+		nums = append(nums, c.Number)
+	case Array:
+		for _, el := range c {
+			if ref, ok := el.(Reference); ok {
+				nums = append(nums, ref.Number)
+			}
+		}
+	}
+	return nums
+}
+
+// blankOrphanedContent replaces every stream in replaced that no kept page still
+// references (via its final /Contents) with an empty stream, so a redacted
+// page's original content bytes do not survive as an orphan. It only touches
+// streams, and only ones gone unreferenced, so a content stream shared by an
+// un-redacted page is left intact.
+func blankOrphanedContent(w *Writer, kids Array, replaced []int) {
+	if len(replaced) == 0 {
+		return
+	}
+	live := make(map[int]bool)
+	for _, k := range kids {
+		kref, ok := k.(Reference)
+		if !ok {
+			continue
+		}
+		if pd, ok := w.objects[kref.Number-1].(Dict); ok {
+			for _, n := range contentRefNums(pd["Contents"]) {
+				live[n] = true
+			}
+		}
+	}
+	for _, n := range replaced {
+		if live[n] || n < 1 || n > len(w.objects) {
+			continue
+		}
+		if _, ok := w.objects[n-1].(*Stream); ok {
+			w.objects[n-1] = &Stream{Dict: Dict{}, Raw: []byte{}}
+		}
+	}
 }
 
 // applyOverlay appends an extra content stream to a copied page and injects the
