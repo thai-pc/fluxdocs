@@ -88,8 +88,9 @@ docs/        spec.md — the full technical specification (reference document)
   validator (font embedding and certification are follow-ups).
 - **Agent-native MCP server** (`fluxdocs-mcp`) — a self-hostable Model Context
   Protocol server exposing open/extract/render/redact/auto_redact_pii/watermark/
-  compare/pdfa/forms/sign as tools an AI agent can call; documents stay on the
-  user's own machine.
+  compare/pdfa/forms/sign — plus the Cloud AI tools extract_structured and
+  ask_document — as tools an AI agent can call; documents stay on the user's own
+  machine (the AI tools call out only to the configured LLM backend).
 
 Wave 2 is feature-complete.
 

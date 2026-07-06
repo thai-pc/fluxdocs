@@ -31,11 +31,26 @@ type Server struct {
 	mu   sync.Mutex
 	docs map[int]*core.Document
 	next int
+
+	// aiClient is the Cloud-tier LLM backend for the extract_structured and
+	// ask_document tools. When nil, those tools construct a default Claude client
+	// (reading ANTHROPIC_API_KEY) on demand. Tests inject a stub here. Guarded by
+	// mu.
+	aiClient core.AIClient
 }
 
 // NewServer returns a ready MCP server.
 func NewServer() *Server {
 	return &Server{docs: map[int]*core.Document{}, next: 1}
+}
+
+// SetAIClient installs the LLM backend used by the Cloud AI tools, overriding
+// the default Claude client. Passing a client makes the AI tools usable without
+// ANTHROPIC_API_KEY (e.g. in tests).
+func (s *Server) SetAIClient(c core.AIClient) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.aiClient = c
 }
 
 // --- JSON-RPC 2.0 wire types ---
