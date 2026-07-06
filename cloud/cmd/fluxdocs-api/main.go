@@ -40,8 +40,8 @@ func run() error {
 		return fmt.Errorf("FLUXDOCS_API_KEY is required")
 	}
 
-	// Pick persistence: PostgreSQL when DATABASE_URL is set, else in-memory.
-	docs, keys, shares, err := stores(os.Getenv("DATABASE_URL"), api.HashKey(key), log)
+	// Wire persistence (Postgres/R2/in-memory, per env).
+	docs, keys, shares, err := stores(api.HashKey(key), log)
 	if err != nil {
 		return err
 	}
@@ -64,37 +64,69 @@ func run() error {
 	return http.ListenAndServe(addr, srv.Handler())
 }
 
-// stores returns the document and key stores. With a DATABASE_URL it applies the
-// schema, seeds the default org and the given API-key hash, and returns
-// PostgreSQL-backed stores; otherwise it returns in-memory stores. Only the key
-// hash is ever persisted.
-func stores(dsn, keyHash string, log *slog.Logger) (api.DocumentStore, api.KeyStore, api.ShareStore, error) {
-	if dsn == "" {
-		log.Info("persistence", "backend", "in-memory")
-		keys := api.NewMemKeyStore()
-		keys.Add(keyHash, "default")
-		return api.NewMemDocumentStore(), keys, api.NewMemShareStore(), nil
+// stores wires the persistence layer. Metadata (keys, share links) lives in
+// PostgreSQL when DATABASE_URL is set, else in memory. The document blob store is
+// chosen independently: Cloudflare R2 when R2 is configured, else the same
+// database as the metadata, else in memory. Only the key hash is ever persisted.
+func stores(keyHash string, log *slog.Logger) (api.DocumentStore, api.KeyStore, api.ShareStore, error) {
+	var (
+		keys   api.KeyStore
+		shares api.ShareStore
+		sqlDB  *sql.DB
+	)
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		var err error
+		if sqlDB, err = openDB(dsn, keyHash); err != nil {
+			return nil, nil, nil, err
+		}
+		keys, shares = api.NewPostgresKeyStore(sqlDB), api.NewPostgresShareStore(sqlDB)
+		log.Info("metadata", "backend", "postgres")
+	} else {
+		mk := api.NewMemKeyStore()
+		mk.Add(keyHash, "default")
+		keys, shares = mk, api.NewMemShareStore()
+		log.Info("metadata", "backend", "in-memory")
 	}
 
+	// Document blob store.
+	if r2 := os.Getenv("R2_ENDPOINT"); r2 != "" {
+		log.Info("documents", "backend", "r2")
+		return api.NewR2DocumentStore(api.R2Config{
+			Endpoint:  r2,
+			Bucket:    os.Getenv("R2_BUCKET"),
+			Region:    os.Getenv("R2_REGION"),
+			AccessKey: os.Getenv("R2_ACCESS_KEY_ID"),
+			SecretKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
+		}, nil), keys, shares, nil
+	}
+	if sqlDB != nil {
+		log.Info("documents", "backend", "postgres")
+		return api.NewPostgresDocumentStore(sqlDB), keys, shares, nil
+	}
+	log.Info("documents", "backend", "in-memory")
+	return api.NewMemDocumentStore(), keys, shares, nil
+}
+
+// openDB opens Postgres, applies the schema, and seeds the default org + key.
+func openDB(dsn, keyHash string) (*sql.DB, error) {
 	sqlDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 	if err := sqlDB.Ping(); err != nil {
-		return nil, nil, nil, fmt.Errorf("connect to database: %w", err)
+		return nil, fmt.Errorf("connect to database: %w", err)
 	}
 	if _, err := sqlDB.Exec(db.Schema); err != nil {
-		return nil, nil, nil, fmt.Errorf("apply schema: %w", err)
+		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 	if _, err := sqlDB.Exec(
 		`INSERT INTO orgs (id, name) VALUES ('default', 'Default') ON CONFLICT (id) DO NOTHING`); err != nil {
-		return nil, nil, nil, fmt.Errorf("seed org: %w", err)
+		return nil, fmt.Errorf("seed org: %w", err)
 	}
 	if _, err := sqlDB.Exec(
 		`INSERT INTO api_keys (key_hash, org_id) VALUES ($1, 'default') ON CONFLICT (key_hash) DO NOTHING`,
 		keyHash); err != nil {
-		return nil, nil, nil, fmt.Errorf("seed api key: %w", err)
+		return nil, fmt.Errorf("seed api key: %w", err)
 	}
-	log.Info("persistence", "backend", "postgres")
-	return api.NewPostgresDocumentStore(sqlDB), api.NewPostgresKeyStore(sqlDB), api.NewPostgresShareStore(sqlDB), nil
+	return sqlDB, nil
 }

@@ -110,8 +110,11 @@ Wave 2 is feature-complete.
   can never read another's documents (SECURITY.md §4). Persistence sits behind
   `DocumentStore`/`KeyStore` interfaces with two implementations: **PostgreSQL**
   (`database/sql`, org-scoped parameterized queries, embedded schema, keys stored
-  as hashes) selected via `DATABASE_URL`, and in-memory for tests/local dev.
-  Object storage (Cloudflare R2) is next. It also mints **share links** — a
+  as hashes) selected via `DATABASE_URL`, and in-memory for tests/local dev. The
+  document blob store is chosen independently: **Cloudflare R2** (S3 REST + a
+  hand-written AWS SigV4 signer, no SDK, objects under an `org_id/` prefix) when
+  R2 is configured, else the database, else in-memory. It also mints **share
+  links** — a
   public `GET /shared/{token}` that serves one document without an API key,
   gated by an unguessable token plus an optional **bcrypt-hashed password** and
   server-enforced **expiry** (SECURITY.md §4); the token is redacted from
