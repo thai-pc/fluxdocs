@@ -47,6 +47,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSplit(rest, stdout, stderr)
 	case "rotate":
 		return cmdRotate(rest, stdout, stderr)
+	case "watermark":
+		return cmdWatermark(rest, stdout, stderr)
+	case "redact":
+		return cmdRedact(rest, stdout, stderr)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "fluxdocs "+version)
 		return 0
@@ -70,6 +74,8 @@ Usage:
   fluxdocs merge   -o <out.pdf> <in1.pdf> <in2.pdf> [in3.pdf ...]
   fluxdocs split   <file.pdf> --ranges 0-1,2-3 [-o prefix]
   fluxdocs rotate  <file.pdf> --page N --degrees D [-o out.pdf]
+  fluxdocs watermark <file.pdf> --text "DRAFT" [--opacity 0.3] [--size 48] [--rotation 45] [-o out.pdf]
+  fluxdocs redact  <file.pdf> --pattern "REGEX" [--page N] [-o out.pdf]
   fluxdocs version
 `)
 }
@@ -326,6 +332,96 @@ func cmdRotate(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "rotate: %v", err)
 	}
 	fmt.Fprintf(stdout, "wrote %s\n", outPath)
+	return 0
+}
+
+func cmdWatermark(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("watermark", stderr)
+	text := fs.String("text", "", "watermark text (required)")
+	opacity := fs.Float64("opacity", 0.3, "opacity 0..1")
+	size := fs.Float64("size", 48, "font size in points")
+	rotation := fs.Float64("rotation", 45, "rotation in degrees")
+	color := fs.String("color", "", "hex color, e.g. #888888")
+	out := fs.String("o", "", "output PDF path (default: <input>-watermarked.pdf)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) != 1 {
+		return fail(stderr, "watermark: expected exactly one PDF path")
+	}
+	if *text == "" {
+		return fail(stderr, "watermark: --text is required")
+	}
+	in := pos[0]
+	doc, err := core.OpenDocument(in)
+	if err != nil {
+		return fail(stderr, "watermark: %v", err)
+	}
+	defer doc.Close()
+
+	marked, err := doc.Watermark(core.WatermarkOptions{
+		Text: *text, Opacity: *opacity, FontSize: *size, Rotation: *rotation, Color: *color,
+	})
+	if err != nil {
+		return fail(stderr, "watermark: %v", err)
+	}
+	outPath := *out
+	if outPath == "" {
+		outPath = trimPDFExt(in) + "-watermarked.pdf"
+	}
+	if err := marked.Save(outPath); err != nil {
+		return fail(stderr, "watermark: %v", err)
+	}
+	fmt.Fprintf(stdout, "wrote %s\n", outPath)
+	return 0
+}
+
+func cmdRedact(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("redact", stderr)
+	pattern := fs.String("pattern", "", "regular expression to redact (required)")
+	page := fs.Int("page", -1, "0-based page to redact (default: all pages)")
+	out := fs.String("o", "", "output PDF path (default: <input>-redacted.pdf)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) != 1 {
+		return fail(stderr, "redact: expected exactly one PDF path")
+	}
+	if *pattern == "" {
+		return fail(stderr, "redact: --pattern is required")
+	}
+	in := pos[0]
+	doc, err := core.OpenDocument(in)
+	if err != nil {
+		return fail(stderr, "redact: %v", err)
+	}
+	defer doc.Close()
+
+	total := 0
+	for p := 0; p < doc.PageCount; p++ {
+		if *page >= 0 && p != *page {
+			continue
+		}
+		rects, err := doc.RedactText(p, *pattern)
+		if err != nil {
+			return fail(stderr, "redact: page %d: %v", p, err)
+		}
+		total += len(rects)
+	}
+	redacted, err := doc.RedactAndFlatten()
+	if err != nil {
+		return fail(stderr, "redact: %v", err)
+	}
+	outPath := *out
+	if outPath == "" {
+		outPath = trimPDFExt(in) + "-redacted.pdf"
+	}
+	if err := redacted.Save(outPath); err != nil {
+		return fail(stderr, "redact: %v", err)
+	}
+	fmt.Fprintf(stdout, "redacted %d region(s), wrote %s\n", total, outPath)
 	return 0
 }
 
