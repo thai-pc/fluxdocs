@@ -275,6 +275,25 @@ func (d *Document) SaveTo(w io.Writer) error {
 	return err
 }
 
+// Bytes returns the exact PDF bytes the document was opened from. Unlike SaveTo,
+// which re-serializes the page set (dropping non-page catalog features such as a
+// digital signature or PDF/A output intent), Bytes returns the file verbatim. It
+// is the correct way to persist a document produced by SignDocument or
+// ConvertToPDFA (both re-open from freshly built bytes), whose structure a
+// rebuild would break. It does NOT reflect uncommitted in-memory annotation-layer
+// edits.
+//
+// Returns ErrInvalidPDF if the document was not opened from bytes/a file.
+func (d *Document) Bytes() ([]byte, error) {
+	if d.resolver == nil {
+		return nil, ErrInvalidPDF
+	}
+	src := d.resolver.Bytes()
+	out := make([]byte, len(src))
+	copy(out, src)
+	return out, nil
+}
+
 // buildInfoDict synthesizes a minimal /Info dictionary from a document's
 // metadata. Producer is always "FluxDocs"; Title/Author/Subject are carried
 // through when present. Merge/Split/Save use this rather than copying the

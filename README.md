@@ -65,7 +65,7 @@ docs/        spec.md — the full technical specification (reference document)
 - **PDF writer** — merge, split, save, reorder, rotate (a real object-graph
   copier with cycle/DoS guards).
 - **WASM entry point** (`globalThis.fluxdocs`) and the **`fluxdocs` CLI**
-  (info/extract/render/merge/split/rotate).
+  (info/extract/render/merge/split/rotate/watermark/redact/sign/compare/pdfa).
 - **Client SDKs** — `@fluxdocs/core` (typed WASM wrapper), `@fluxdocs/react`,
   `@fluxdocs/vue`.
 - **Hardening** — fuzz targets (millions of executions, no crashes) and a

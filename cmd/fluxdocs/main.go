@@ -51,6 +51,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdWatermark(rest, stdout, stderr)
 	case "redact":
 		return cmdRedact(rest, stdout, stderr)
+	case "sign":
+		return cmdSign(rest, stdout, stderr)
+	case "compare":
+		return cmdCompare(rest, stdout, stderr)
+	case "pdfa":
+		return cmdPDFA(rest, stdout, stderr)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "fluxdocs "+version)
 		return 0
@@ -76,6 +82,9 @@ Usage:
   fluxdocs rotate  <file.pdf> --page N --degrees D [-o out.pdf]
   fluxdocs watermark <file.pdf> --text "DRAFT" [--opacity 0.3] [--size 48] [--rotation 45] [-o out.pdf]
   fluxdocs redact  <file.pdf> --pattern "REGEX" [--page N] [-o out.pdf]
+  fluxdocs sign    <file.pdf> --cert cert.pem --key key.pem [--reason R] [-o out.pdf]
+  fluxdocs compare <a.pdf> <b.pdf>
+  fluxdocs pdfa    <file.pdf> [--validate] [-o out.pdf]
   fluxdocs version
 `)
 }
@@ -422,6 +431,168 @@ func cmdRedact(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "redact: %v", err)
 	}
 	fmt.Fprintf(stdout, "redacted %d region(s), wrote %s\n", total, outPath)
+	return 0
+}
+
+func cmdSign(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("sign", stderr)
+	certPath := fs.String("cert", "", "PEM certificate file (required)")
+	keyPath := fs.String("key", "", "PEM private key file (required)")
+	reason := fs.String("reason", "", "signing reason")
+	location := fs.String("location", "", "signing location")
+	out := fs.String("o", "", "output PDF path (default: <input>-signed.pdf)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) != 1 {
+		return fail(stderr, "sign: expected exactly one PDF path")
+	}
+	if *certPath == "" || *keyPath == "" {
+		return fail(stderr, "sign: --cert and --key are required")
+	}
+	certPEM, err := os.ReadFile(*certPath)
+	if err != nil {
+		return fail(stderr, "sign: %v", err)
+	}
+	keyPEM, err := os.ReadFile(*keyPath)
+	if err != nil {
+		return fail(stderr, "sign: %v", err)
+	}
+	in := pos[0]
+	doc, err := core.OpenDocument(in)
+	if err != nil {
+		return fail(stderr, "sign: %v", err)
+	}
+	defer doc.Close()
+
+	signed, err := doc.SignDocument(core.SignatureOptions{
+		CertPEM: certPEM, KeyPEM: keyPEM, Reason: *reason, Location: *location,
+	})
+	if err != nil {
+		return fail(stderr, "sign: %v", err)
+	}
+	outPath := *out
+	if outPath == "" {
+		outPath = trimPDFExt(in) + "-signed.pdf"
+	}
+	// Write the exact bytes: re-serializing would invalidate the signature's
+	// byte range.
+	if err := writeExact(signed, outPath); err != nil {
+		return fail(stderr, "sign: %v", err)
+	}
+	fmt.Fprintf(stdout, "wrote %s\n", outPath)
+	return 0
+}
+
+// writeExact writes a document's verbatim bytes to path (preserving signatures /
+// PDF-A markers that a rebuild would drop).
+func writeExact(doc *core.Document, path string) error {
+	b, err := doc.Bytes()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+func cmdCompare(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("compare", stderr)
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) != 2 {
+		return fail(stderr, "compare: expected exactly two PDF paths")
+	}
+	a, err := core.OpenDocument(pos[0])
+	if err != nil {
+		return fail(stderr, "compare: %s: %v", pos[0], err)
+	}
+	defer a.Close()
+	b, err := core.OpenDocument(pos[1])
+	if err != nil {
+		return fail(stderr, "compare: %s: %v", pos[1], err)
+	}
+	defer b.Close()
+
+	result, err := a.Compare(b)
+	if err != nil {
+		return fail(stderr, "compare: %v", err)
+	}
+	if result.Identical {
+		fmt.Fprintln(stdout, "documents are identical")
+		return 0
+	}
+	for _, pd := range result.Pages {
+		if pd.Identical {
+			continue
+		}
+		fmt.Fprintf(stdout, "page %d:\n", pd.PageIndex)
+		for _, s := range pd.Segments {
+			switch s.Op {
+			case core.DiffInsert:
+				fmt.Fprintf(stdout, "  + %s\n", s.Text)
+			case core.DiffDelete:
+				fmt.Fprintf(stdout, "  - %s\n", s.Text)
+			}
+		}
+	}
+	return 0
+}
+
+func cmdPDFA(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("pdfa", stderr)
+	validate := fs.Bool("validate", false, "validate PDF/A markers instead of converting")
+	out := fs.String("o", "", "output PDF path (default: <input>-pdfa.pdf)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) != 1 {
+		return fail(stderr, "pdfa: expected exactly one PDF path")
+	}
+	in := pos[0]
+	doc, err := core.OpenDocument(in)
+	if err != nil {
+		return fail(stderr, "pdfa: %v", err)
+	}
+	defer doc.Close()
+
+	if *validate {
+		report, err := doc.ValidatePDFA()
+		if err != nil {
+			return fail(stderr, "pdfa: %v", err)
+		}
+		for _, c := range report.Checks {
+			mark := "PASS"
+			if !c.Pass {
+				mark = "FAIL"
+			}
+			fmt.Fprintf(stdout, "[%s] %s", mark, c.Rule)
+			if c.Note != "" {
+				fmt.Fprintf(stdout, " — %s", c.Note)
+			}
+			fmt.Fprintln(stdout)
+		}
+		if !report.Conformant {
+			return 1
+		}
+		return 0
+	}
+
+	pdfaDoc, err := doc.ConvertToPDFA()
+	if err != nil {
+		return fail(stderr, "pdfa: %v", err)
+	}
+	outPath := *out
+	if outPath == "" {
+		outPath = trimPDFExt(in) + "-pdfa.pdf"
+	}
+	// Write the exact bytes: a rebuild would drop the PDF/A metadata + OutputIntent.
+	if err := writeExact(pdfaDoc, outPath); err != nil {
+		return fail(stderr, "pdfa: %v", err)
+	}
+	fmt.Fprintf(stdout, "wrote %s\n", outPath)
 	return 0
 }
 
