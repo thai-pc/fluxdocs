@@ -120,8 +120,12 @@ Wave 2 is feature-complete.
   public `GET /shared/{token}` that serves one document without an API key,
   gated by an unguessable token plus an optional **bcrypt-hashed password** and
   server-enforced **expiry** (SECURITY.md §4); the token is redacted from
-  request logs. The whole surface is testable with no external services
-  (httptest + sqlmock).
+  request logs. Long-running work runs as **async jobs** —
+  `POST /documents/{id}/redact-pii-async` returns a job id (202) and
+  `GET /jobs/{id}` polls it — on a bounded worker pool behind a `JobQueue`
+  interface (River, a PostgreSQL-backed queue, is the durable production
+  backend). The whole surface is testable with no external services (httptest +
+  sqlmock).
 
 ## Developing
 

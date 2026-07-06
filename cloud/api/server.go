@@ -29,6 +29,7 @@ type Server struct {
 	shares ShareStore
 	ai     core.AIClient // optional; the AI endpoints 501 when nil
 	jwt    *JWTVerifier  // optional; enables Bearer-JWT auth and POST /v1/token
+	queue  JobQueue      // optional; enables the async job endpoints
 	log    *slog.Logger
 	router http.Handler
 }
@@ -36,6 +37,13 @@ type Server struct {
 // UseJWT enables JWT bearer authentication and the POST /v1/token endpoint,
 // signing/verifying with secret. Call it after New (before serving).
 func (s *Server) UseJWT(secret []byte) { s.jwt = NewJWTVerifier(secret) }
+
+// SetQueue enables the async job endpoints, registering the built-in job kinds
+// (currently redact_pii) on the queue. Call it after New (before serving).
+func (s *Server) SetQueue(q JobQueue) {
+	s.queue = q
+	q.Register("redact_pii", s.runRedactPIIJob)
+}
 
 // New builds a Server. shares may be nil (the share endpoints then 501). ai may
 // be nil (the AI endpoints report they are unconfigured). log may be nil (a
@@ -72,8 +80,10 @@ func (s *Server) routes() http.Handler {
 		r.Get("/documents/{id}", s.getDocument)
 		r.Post("/documents/{id}/extract", s.extractText)
 		r.Post("/documents/{id}/redact-pii", s.redactPII)
+		r.Post("/documents/{id}/redact-pii-async", s.enqueueRedactPII)
 		r.Post("/documents/{id}/extract-structured", s.extractStructured)
 		r.Post("/documents/{id}/shares", s.createShare)
+		r.Get("/jobs/{jobID}", s.getJob)
 	})
 	return r
 }

@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
 
 	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
 
@@ -60,6 +61,13 @@ func run() error {
 		srv.UseJWT([]byte(secret))
 		log.Info("JWT auth enabled")
 	}
+
+	// Enable async jobs. The in-process worker pool is used here; the durable
+	// production backend is River (PostgreSQL-backed) behind the same JobQueue.
+	queue := api.NewMemQueue(runtime.NumCPU())
+	defer queue.Stop()
+	srv.SetQueue(queue)
+	log.Info("async jobs enabled", "backend", "in-memory")
 
 	port := os.Getenv("PORT")
 	if port == "" {
