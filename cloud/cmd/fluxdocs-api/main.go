@@ -55,6 +55,12 @@ func run() error {
 
 	srv := api.New(docs, keys, shares, aiClient, log)
 
+	// Enable JWT bearer auth + POST /v1/token when a signing secret is set.
+	if secret := os.Getenv("JWT_SECRET"); secret != "" {
+		srv.UseJWT([]byte(secret))
+		log.Info("JWT auth enabled")
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

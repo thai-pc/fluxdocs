@@ -28,9 +28,14 @@ type Server struct {
 	keys   KeyStore
 	shares ShareStore
 	ai     core.AIClient // optional; the AI endpoints 501 when nil
+	jwt    *JWTVerifier  // optional; enables Bearer-JWT auth and POST /v1/token
 	log    *slog.Logger
 	router http.Handler
 }
+
+// UseJWT enables JWT bearer authentication and the POST /v1/token endpoint,
+// signing/verifying with secret. Call it after New (before serving).
+func (s *Server) UseJWT(secret []byte) { s.jwt = NewJWTVerifier(secret) }
 
 // New builds a Server. shares may be nil (the share endpoints then 501). ai may
 // be nil (the AI endpoints report they are unconfigured). log may be nil (a
@@ -62,6 +67,7 @@ func (s *Server) routes() http.Handler {
 	// Everything under /v1 requires a valid API key and is org-scoped.
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.authenticate)
+		r.Post("/token", s.issueToken)
 		r.Post("/documents", s.uploadDocument)
 		r.Get("/documents/{id}", s.getDocument)
 		r.Post("/documents/{id}/extract", s.extractText)
@@ -96,21 +102,38 @@ func newToken() string {
 
 // --- middleware ---
 
-// authenticate resolves the org from the request's API key and stashes it in the
-// context. A missing or unknown key is a 401. The key itself is never logged.
+// authenticate resolves the org from the request's credential — a Bearer JWT
+// (when JWT is enabled and the token has the JWT shape) or an API key — and
+// stashes it in the context. A missing or invalid credential is a 401. The
+// credential itself is never logged.
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := apiKeyFromRequest(r)
-		if key == "" {
-			writeError(w, http.StatusUnauthorized, "missing API key")
+		cred := apiKeyFromRequest(r)
+		if cred == "" {
+			writeError(w, http.StatusUnauthorized, "missing credentials")
 			return
 		}
-		orgID, ok := s.keys.OrgForKeyHash(r.Context(), HashKey(key))
-		if !ok {
-			writeError(w, http.StatusUnauthorized, "invalid API key")
-			return
+
+		var org string
+		if s.jwt != nil && looksLikeJWT(cred) {
+			// A JWT-shaped bearer token is verified as a JWT; a bad one is 401
+			// (not retried as an API key).
+			o, err := s.jwt.Verify(cred)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "invalid token")
+				return
+			}
+			org = o
+		} else {
+			o, ok := s.keys.OrgForKeyHash(r.Context(), HashKey(cred))
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "invalid API key")
+				return
+			}
+			org = o
 		}
-		ctx := context.WithValue(r.Context(), orgIDKey, orgID)
+
+		ctx := context.WithValue(r.Context(), orgIDKey, org)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
