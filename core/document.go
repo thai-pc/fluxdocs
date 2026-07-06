@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -450,18 +451,48 @@ func (d *Document) OCRPage(pageIndex int) (string, error) {
 	return d.ocrPage(pageIndex)
 }
 
-// ExtractStructured (Cloud) takes a desired schema and calls an LLM to return
-// structured JSON.
+// ExtractStructured (Cloud) extracts the document text and asks the configured
+// LLM backend to return it as structured JSON shaped by schema. schema accepts a
+// core.Schema, a []core.SchemaField, or a map[string]string (field ->
+// description). It returns ErrFeatureRequiresCloud if no AIClient is configured
+// (SetAIClient) and ErrInvalidArgument if schema is malformed. The document text
+// never leaves the process unless a Cloud backend is explicitly installed.
 func (d *Document) ExtractStructured(schema any) (map[string]any, error) {
-	_ = schema
-	return nil, errNotImplemented
+	s, ok := toSchema(schema)
+	if !ok || len(s.Fields) == 0 {
+		return nil, ErrInvalidArgument
+	}
+	d.mu.Lock()
+	ai := d.ai
+	d.mu.Unlock()
+	if ai == nil {
+		return nil, ErrFeatureRequiresCloud
+	}
+	text, err := d.ExtractText(ExtractOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return ai.Extract(context.Background(), text, s)
 }
 
-// AskDocument (Cloud) answers a question about the document via an LLM, with
-// citations to page/position.
+// AskDocument (Cloud) answers a natural-language question grounded in the
+// document text via the configured LLM backend. It returns
+// ErrFeatureRequiresCloud if no AIClient is configured (SetAIClient).
 func (d *Document) AskDocument(question string) (string, error) {
-	_ = question
-	return "", errNotImplemented
+	if strings.TrimSpace(question) == "" {
+		return "", ErrInvalidArgument
+	}
+	d.mu.Lock()
+	ai := d.ai
+	d.mu.Unlock()
+	if ai == nil {
+		return "", ErrFeatureRequiresCloud
+	}
+	text, err := d.ExtractText(ExtractOptions{})
+	if err != nil {
+		return "", err
+	}
+	return ai.Ask(context.Background(), text, question)
 }
 
 // --- §7.7 Events (callbacks, since the Go core has no native event loop) ---

@@ -90,8 +90,17 @@ docs/        spec.md — the full technical specification (reference document)
   forms/sign as tools an AI agent can call; documents stay on the user's own
   machine.
 
-Wave 2 is feature-complete; next is polish (broader corpus, external PDF/A
-certification, richer MCP tools).
+Wave 2 is feature-complete.
+
+**Wave 3 — Cloud, started:**
+- **AI structured extraction & Q&A** — `Document.ExtractStructured(schema)` and
+  `Document.AskDocument(question)`. The pure-Go core reads the text locally and
+  delegates to an injected `core.AIClient`; the concrete backend
+  (`cloud/ai`) is a Claude Messages API client written on a standard
+  `net/http` client (no SDK), using a forced tool call for schema-shaped JSON.
+  The core makes **no** network call itself — install a backend with
+  `SetAIClient`, keeping the MIT/WASM core network-free. See
+  `examples/ai-extraction-demo`.
 
 ## Developing
 

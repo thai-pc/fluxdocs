@@ -68,6 +68,12 @@ type Document struct {
 	// (e.g. constructed in a test).
 	resolver  *parse.Resolver
 	pageInfos []parse.PageInfo
+
+	// ai is an optional Cloud-tier LLM backend, injected via SetAIClient. The
+	// pure-Go core never makes network calls itself (privacy-first, WASM-safe);
+	// when ai is nil the Cloud methods return ErrFeatureRequiresCloud. Guarded
+	// by mu. Implementations live in cloud/ai.
+	ai AIClient
 }
 
 type DocumentMetadata struct {
