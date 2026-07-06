@@ -36,8 +36,13 @@ type Writer struct {
 	objects  []Object   // objects[i] is indirect object number i+1
 	root     *Reference // /Root for the trailer (required before emit)
 	info     *Reference // /Info for the trailer (optional)
+	id       []byte     // trailer /ID value (both entries), optional
 	outBytes int64      // running tally of stream bytes queued, for the DoS cap
 }
+
+// SetID sets the trailer /ID (both array entries to the same value). PDF/A
+// requires a file identifier. id should be 16 bytes.
+func (w *Writer) SetID(id []byte) { w.id = append([]byte(nil), id...) }
 
 // NewWriter returns an empty Writer whose next object number is 1.
 func NewWriter() *Writer { return &Writer{} }
@@ -134,6 +139,10 @@ func (w *Writer) Bytes() ([]byte, error) {
 	}
 	if w.info != nil {
 		tr["Info"] = *w.info
+	}
+	if w.id != nil {
+		idStr := String{Value: w.id, Hex: true}
+		tr["ID"] = Array{idStr, idStr}
 	}
 	serializeObject(&buf, tr)
 	buf.WriteString("\nstartxref\n")

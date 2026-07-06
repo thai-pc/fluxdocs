@@ -267,6 +267,22 @@ type CompareResult struct {
 	Pages     []PageDiff
 }
 
+// PDFACheck is one PDF/A structural validation rule and whether it passed.
+type PDFACheck struct {
+	Rule string
+	Pass bool
+	Note string
+}
+
+// PDFAReport is the result of ValidatePDFA: the structural PDF/A-1b markers
+// found in a document. Conformant is true only when every check passed. It is a
+// structural check, not a certified validation (font embedding and transparency
+// are not verified).
+type PDFAReport struct {
+	Conformant bool
+	Checks     []PDFACheck
+}
+
 // SignatureOptions configures SignDocument (Pro, PKCS#7).
 type SignatureOptions struct {
 	Reason      string

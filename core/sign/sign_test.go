@@ -251,10 +251,10 @@ func extractContents(t *testing.T, data []byte) []byte {
 	}
 	i += len("/Contents <")
 	end := bytes.IndexByte(data[i:], '>')
-	hexStr := bytes.TrimRight(data[i:i+end], "0")
-	if len(hexStr)%2 == 1 {
-		hexStr = hexStr[:len(hexStr)-1] // drop a dangling nibble from padding trim
-	}
+	// Decode the whole hex field (signature DER followed by '0' padding). asn1
+	// reads only the DER and ignores the trailing zero bytes, so we must NOT trim
+	// (trimming '0' can eat a legitimate final nibble of the DER).
+	hexStr := data[i : i+end]
 	out := make([]byte, len(hexStr)/2)
 	for j := 0; j < len(out); j++ {
 		out[j] = hexNibble(hexStr[2*j])<<4 | hexNibble(hexStr[2*j+1])

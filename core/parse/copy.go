@@ -222,6 +222,78 @@ func (c *Copier) copyRef(ref Reference, depth int) (Reference, error) {
 // direct PDF objects). Returns a wrapped errLex on a guard violation, an
 // unresolved object, or a nil source resolver.
 func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
+	w, pagesRef, err := copyPages(sources)
+	if err != nil {
+		return nil, err
+	}
+	catRef := w.Add(Dict{"Type": Name("Catalog"), "Pages": pagesRef})
+	w.SetRoot(catRef)
+	if len(info) > 0 {
+		w.SetInfo(w.Add(info))
+	}
+	return w.Bytes()
+}
+
+// PDFAParams carries the extra objects a PDF/A build adds to the catalog and
+// trailer: the XMP metadata, the ICC output profile, and the file identifier.
+type PDFAParams struct {
+	XMP           []byte // XMP metadata stream content (uncompressed)
+	ICC           []byte // ICC profile bytes for the OutputIntent
+	ICCComponents int    // number of colour components in the ICC profile (3 for RGB)
+	ID            []byte // trailer /ID (16 bytes)
+	Condition     string // OutputConditionIdentifier, e.g. "sRGB"
+}
+
+// BuildDocumentPDFA is BuildDocument with the PDF/A-1b structural additions: an
+// XMP /Metadata stream on the catalog, an sRGB /OutputIntents entry backed by an
+// embedded ICC profile, and a trailer /ID.
+func BuildDocumentPDFA(sources []PageSource, info Dict, p PDFAParams) ([]byte, error) {
+	w, pagesRef, err := copyPages(sources)
+	if err != nil {
+		return nil, err
+	}
+
+	cat := Dict{"Type": Name("Catalog"), "Pages": pagesRef}
+	if len(p.XMP) > 0 {
+		metaRef := w.Add(&Stream{
+			Dict: Dict{"Type": Name("Metadata"), "Subtype": Name("XML")},
+			Raw:  p.XMP,
+		})
+		cat["Metadata"] = metaRef
+	}
+	if len(p.ICC) > 0 {
+		iccRef := w.Add(&Stream{
+			Dict: Dict{"N": Integer(int64(p.ICCComponents))},
+			Raw:  p.ICC,
+		})
+		cond := p.Condition
+		if cond == "" {
+			cond = "sRGB"
+		}
+		oiRef := w.Add(Dict{
+			"Type":                      Name("OutputIntent"),
+			"S":                         Name("GTS_PDFA1"),
+			"OutputConditionIdentifier": String{Value: []byte(cond)},
+			"Info":                      String{Value: []byte(cond)},
+			"DestOutputProfile":         iccRef,
+		})
+		cat["OutputIntents"] = Array{oiRef}
+	}
+
+	w.SetRoot(w.Add(cat))
+	if len(info) > 0 {
+		w.SetInfo(w.Add(info))
+	}
+	if len(p.ID) > 0 {
+		w.SetID(p.ID)
+	}
+	return w.Bytes()
+}
+
+// copyPages copies the ordered pages into a fresh Writer and fills the /Pages
+// node, returning the writer and the /Pages reference. Shared by BuildDocument
+// and BuildDocumentPDFA.
+func copyPages(sources []PageSource) (*Writer, Reference, error) {
 	w := NewWriter()
 
 	// Reserve the /Pages node first: pages need it as their /Parent.
@@ -235,7 +307,7 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 	kids := make(Array, 0, len(sources))
 	for _, s := range sources {
 		if s.Resolver == nil {
-			return nil, fmt.Errorf("%w: page source has no resolver", errLex)
+			return nil, Reference{}, fmt.Errorf("%w: page source has no resolver", errLex)
 		}
 		cp := copiers[s.Resolver]
 		if cp == nil {
@@ -244,7 +316,7 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 		}
 		pageRef, err := cp.CopyPage(s.Page)
 		if err != nil {
-			return nil, err
+			return nil, Reference{}, err
 		}
 		// Point the copied page back at the new /Pages node, and apply any
 		// caller-supplied content changes (annotation overlay or redaction).
@@ -268,18 +340,7 @@ func BuildDocument(sources []PageSource, info Dict) ([]byte, error) {
 		"Kids":  kids,
 		"Count": Integer(int64(len(kids))),
 	})
-
-	catRef := w.Add(Dict{
-		"Type":  Name("Catalog"),
-		"Pages": pagesRef,
-	})
-	w.SetRoot(catRef)
-
-	if len(info) > 0 {
-		w.SetInfo(w.Add(info))
-	}
-
-	return w.Bytes()
+	return w, pagesRef, nil
 }
 
 // applyOverlay appends an extra content stream to a copied page and injects the

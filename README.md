@@ -82,11 +82,15 @@ docs/        spec.md — the full technical specification (reference document)
   verbatim and the signature validates.
 - **OCR** — Tesseract via CGO behind the `ocr` build tag, so the default build
   stays 100% pure Go (`go test -tags ocr ./core/ocr/...`).
+- **PDF/A-1b tagging** — adds the XMP conformance metadata, an sRGB OutputIntent
+  with an embedded ICC profile, and a file identifier, plus a structural
+  validator (font embedding and certification are follow-ups).
 - **Agent-native MCP server** (`fluxdocs-mcp`) — a self-hostable Model Context
   Protocol server exposing open/extract/render/redact as tools an AI agent can
   call; documents stay on the user's own machine.
 
-Next: e-signature (PKCS#7), PDF/A.
+Wave 2 is feature-complete; next is polish (broader corpus, external PDF/A
+certification, richer MCP tools).
 
 ## Developing
 
