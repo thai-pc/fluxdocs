@@ -45,7 +45,7 @@ cmd/         the `fluxdocs` command-line tool
 cloud/       Go backend for the Cloud tier
 wasm/        entry point for the WASM build
 packages/    JS/TS wrappers (@fluxdocs/react, /vue, …)
-examples/    demos: go-server, react, vue, cli-batch-redact, ai-extraction
+examples/    runnable demos: go-server-demo (HTTP), cli-batch-redact-demo (+ react/vue/ai)
 apps/        docs site + landing page
 testing/     PDF corpus, golden files, security tests, benchmarks
 docs/        spec.md — the full technical specification (reference document)
