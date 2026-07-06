@@ -1,3 +1,5 @@
+github.com/go-chi/chi/v5 v5.3.0 h1:halUjDxhshgXHMrao5bB8eNBXo/rnzwr8m5m36glehM=
+github.com/go-chi/chi/v5 v5.3.0/go.mod h1:R+tYY2hNuVUUjxoPtqUdgBqevM9s9njzkTLutVsOCto=
 github.com/thai-pc/fluxdocs v0.2.8 h1:wS9s+zVvSpyMtgIdLvvpzvNzApi42KcLsZVrbQbxwYw=
 github.com/thai-pc/fluxdocs v0.2.8/go.mod h1:MdAd1S1BkTmmjSvpjkf1Wt0+/EUxkD5LOM2+t/8/cmo=
 golang.org/x/image v0.18.0 h1:jGzIakQa/ZXI1I0Fxvaa9W7yP25TqT6cHIHn+6CqvSQ=

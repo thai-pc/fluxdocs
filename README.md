@@ -103,6 +103,14 @@ Wave 2 is feature-complete.
   The core makes **no** network call itself — install a backend with
   `SetAIClient`, keeping the MIT/WASM core network-free. See
   `examples/ai-extraction-demo`.
+- **Cloud HTTP backend** (`cloud/api`, binary `fluxdocs-api`) — a Chi-routed REST
+  API over the core: upload, metadata, text extraction, auto-redact PII, and AI
+  structured extraction. Authenticated by API key (**stored only as a hash**) and
+  **org-scoped** — every document read/write is keyed by `org_id`, so one tenant
+  can never read another's documents (SECURITY.md §4). Persistence and object
+  storage sit behind `DocumentStore`/`KeyStore` interfaces (in-memory today;
+  PostgreSQL + Cloudflare R2 to follow) so the whole surface is testable with no
+  external services.
 
 ## Developing
 
