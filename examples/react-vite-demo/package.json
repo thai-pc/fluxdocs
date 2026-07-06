@@ -1,0 +1,25 @@
+{
+  "name": "react-vite-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build:wasm": "cd ../.. && GOOS=js GOARCH=wasm go build -o examples/react-vite-demo/public/fluxdocs.wasm ./wasm && cp \"$(go env GOROOT)/lib/wasm/wasm_exec.js\" examples/react-vite-demo/public/wasm_exec.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "pnpm build:wasm && vite build",
+    "dev": "pnpm build:wasm && vite"
+  },
+  "dependencies": {
+    "@fluxdocs/core": "workspace:*",
+    "@fluxdocs/react": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.4.0",
+    "vite": "^6.0.0"
+  }
+}
