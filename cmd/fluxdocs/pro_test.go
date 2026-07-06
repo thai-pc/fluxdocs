@@ -66,3 +66,47 @@ func TestRedact_RequiresPattern(t *testing.T) {
 		t.Errorf("redact without --pattern: code=%d, want 1", code)
 	}
 }
+
+func TestAutoRedact(t *testing.T) {
+	content := "BT /F1 12 Tf 72 700 Td (SSN 123-45-6789 card 4111 1111 1111 1111) Tj 0 -20 Td (public line) Tj ET"
+	pdf := buildPDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 800] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		4: streamObj(content),
+		5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}, "<< /Size 6 /Root 1 0 R >>")
+	path := filepath.Join(t.TempDir(), "pii.pdf")
+	if err := os.WriteFile(path, pdf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "clean.pdf")
+
+	code, stdout, errs := runCLI("autoredact", path, "--kinds", "ssn,credit_card", "-o", out)
+	if code != 0 {
+		t.Fatalf("autoredact: code=%d errs=%q", code, errs)
+	}
+	if !strings.Contains(stdout, "auto-redacted") {
+		t.Errorf("stdout=%q", stdout)
+	}
+	doc, err := core.OpenDocument(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt, _ := doc.ExtractText(core.ExtractOptions{})
+	for _, secret := range []string{"123-45-6789", "4111 1111 1111 1111"} {
+		if strings.Contains(txt, secret) {
+			t.Errorf("LEAK: %q still extractable", secret)
+		}
+	}
+	if !strings.Contains(txt, "public line") {
+		t.Errorf("over-redacted: public text lost: %q", txt)
+	}
+}
+
+func TestAutoRedact_UnknownKinds(t *testing.T) {
+	path := writePDF(t, 1)
+	if code, _, _ := runCLI("autoredact", path, "--kinds", "bogus"); code != 1 {
+		t.Errorf("autoredact with only unknown kinds: code=%d, want 1", code)
+	}
+}

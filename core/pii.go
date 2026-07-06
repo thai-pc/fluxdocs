@@ -24,6 +24,11 @@ const (
 	PIICreditCard = pii.CreditCard
 )
 
+// PIIKindsFromStrings maps user-supplied names ("email", "ssn", "phone",
+// "credit_card") to PII kinds, ignoring unrecognized names. It lets CLI/MCP
+// callers accept kind names without importing the pii sub-package.
+func PIIKindsFromStrings(names []string) []PIIKind { return pii.KindsFromStrings(names) }
+
 // AutoRedactPII marks every occurrence of the given PII kinds (all kinds when
 // none are named) for redaction across all pages, and returns how many regions
 // were marked per kind. Nothing is removed until RedactAndFlatten. The document

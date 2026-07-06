@@ -200,3 +200,55 @@ func contains(s []string, w string) bool {
 	}
 	return false
 }
+
+// piiSecretPDF writes a one-page PDF containing PII plus a public line.
+func piiSecretPDF(t *testing.T) string {
+	t.Helper()
+	content := "BT /F1 12 Tf 72 700 Td (SSN 123-45-6789 mail a@b.com) Tj 0 -20 Td (public notice) Tj ET"
+	pdf := buildPDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 800] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		4: stream(content),
+		5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}, "<< /Size 6 /Root 1 0 R >>")
+	path := filepath.Join(t.TempDir(), "pii.pdf")
+	if err := os.WriteFile(path, pdf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestAutoRedactPIITool(t *testing.T) {
+	s := NewServer()
+	h := openHandle(t, s, piiSecretPDF(t))
+	out := filepath.Join(t.TempDir(), "clean.pdf")
+
+	item, isErr := callTool(t, s, "auto_redact_pii", map[string]any{
+		"handle": h, "out_path": out, "kinds": []string{"ssn", "email"},
+	})
+	if isErr {
+		t.Fatalf("auto_redact_pii error: %v", item)
+	}
+	if !strings.Contains(item["text"].(string), "\"saved\"") {
+		t.Errorf("unexpected result: %v", item["text"])
+	}
+
+	// The tool writes verbatim (writeExact); the leak fix must hold — the PII
+	// must be gone from both the extracted text and the raw bytes.
+	doc, err := core.OpenDocument(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := doc.ExtractText(core.ExtractOptions{})
+	if strings.Contains(text, "123-45-6789") || strings.Contains(text, "a@b.com") {
+		t.Errorf("LEAK: PII still extractable: %q", text)
+	}
+	if !strings.Contains(text, "public notice") {
+		t.Errorf("over-redacted: public text lost: %q", text)
+	}
+	raw, _ := os.ReadFile(out)
+	if strings.Contains(string(raw), "123-45-6789") {
+		t.Errorf("LEAK: SSN bytes remain in the verbatim MCP output")
+	}
+}

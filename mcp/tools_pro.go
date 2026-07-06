@@ -159,6 +159,51 @@ func init() {
 	})
 
 	register(tool{
+		name:        "auto_redact_pii",
+		description: "Detect and permanently redact personally identifiable information (emails, US SSNs, phone numbers, Luhn-valid credit-card numbers) across all pages, then write the result to a local path. Detection is pattern-based and runs entirely on this machine. Irreversible.",
+		schema: obj(map[string]any{
+			"handle":   prop("integer", "Document handle"),
+			"out_path": prop("string", "Local path to write the redacted PDF"),
+			"kinds": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string", "enum": []string{"email", "ssn", "phone", "credit_card"}},
+				"description": "PII kinds to redact; omit for all kinds",
+			},
+		}, "handle", "out_path"),
+		handler: func(s *Server, args json.RawMessage) ([]contentItem, bool) {
+			var a struct {
+				Handle  int      `json:"handle"`
+				OutPath string   `json:"out_path"`
+				Kinds   []string `json:"kinds"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil || a.OutPath == "" {
+				return errText("invalid arguments: 'handle' and 'out_path' are required")
+			}
+			doc, ok := s.doc(a.Handle)
+			if !ok {
+				return errText("unknown document handle %d", a.Handle)
+			}
+			counts, err := doc.AutoRedactPII(core.PIIKindsFromStrings(a.Kinds)...)
+			if err != nil {
+				return errText("auto_redact_pii failed: %v", err)
+			}
+			out, err := doc.RedactAndFlatten()
+			if err != nil {
+				return errText("redaction failed: %v", err)
+			}
+			// Write verbatim; RedactAndFlatten already produced leak-free bytes.
+			if err := writeExact(out, a.OutPath); err != nil {
+				return errText("save failed: %v", err)
+			}
+			byKind := make(map[string]int, len(counts))
+			for k, n := range counts {
+				byKind[string(k)] = n
+			}
+			return jsonText(map[string]any{"saved": a.OutPath, "redacted": byKind})
+		},
+	})
+
+	register(tool{
 		name:        "sign_and_save",
 		description: "Apply a detached PKCS#7 digital signature (RSA) using a local PEM certificate and key, and write the signed PDF to a local path. The key never leaves the machine.",
 		schema: obj(map[string]any{

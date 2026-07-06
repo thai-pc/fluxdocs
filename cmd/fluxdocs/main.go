@@ -51,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdWatermark(rest, stdout, stderr)
 	case "redact":
 		return cmdRedact(rest, stdout, stderr)
+	case "autoredact":
+		return cmdAutoRedact(rest, stdout, stderr)
 	case "sign":
 		return cmdSign(rest, stdout, stderr)
 	case "compare":
@@ -82,6 +84,7 @@ Usage:
   fluxdocs rotate  <file.pdf> --page N --degrees D [-o out.pdf]
   fluxdocs watermark <file.pdf> --text "DRAFT" [--opacity 0.3] [--size 48] [--rotation 45] [-o out.pdf]
   fluxdocs redact  <file.pdf> --pattern "REGEX" [--page N] [-o out.pdf]
+  fluxdocs autoredact <file.pdf> [--kinds email,ssn,phone,credit_card] [-o out.pdf]
   fluxdocs sign    <file.pdf> --cert cert.pem --key key.pem [--reason R] [-o out.pdf]
   fluxdocs compare <a.pdf> <b.pdf>
   fluxdocs pdfa    <file.pdf> [--validate] [-o out.pdf]
@@ -431,6 +434,54 @@ func cmdRedact(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "redact: %v", err)
 	}
 	fmt.Fprintf(stdout, "redacted %d region(s), wrote %s\n", total, outPath)
+	return 0
+}
+
+func cmdAutoRedact(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("autoredact", stderr)
+	kinds := fs.String("kinds", "", "comma-separated PII kinds to redact: email,ssn,phone,credit_card (default: all)")
+	out := fs.String("o", "", "output PDF path (default: <input>-redacted.pdf)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) != 1 {
+		return fail(stderr, "autoredact: expected exactly one PDF path")
+	}
+	in := pos[0]
+	doc, err := core.OpenDocument(in)
+	if err != nil {
+		return fail(stderr, "autoredact: %v", err)
+	}
+	defer doc.Close()
+
+	var selected []core.PIIKind
+	if *kinds != "" {
+		selected = core.PIIKindsFromStrings(strings.Split(*kinds, ","))
+		if len(selected) == 0 {
+			return fail(stderr, "autoredact: no recognized kinds in %q", *kinds)
+		}
+	}
+	counts, err := doc.AutoRedactPII(selected...)
+	if err != nil {
+		return fail(stderr, "autoredact: %v", err)
+	}
+	redacted, err := doc.RedactAndFlatten()
+	if err != nil {
+		return fail(stderr, "autoredact: %v", err)
+	}
+	outPath := *out
+	if outPath == "" {
+		outPath = trimPDFExt(in) + "-redacted.pdf"
+	}
+	if err := redacted.Save(outPath); err != nil {
+		return fail(stderr, "autoredact: %v", err)
+	}
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	fmt.Fprintf(stdout, "auto-redacted %d PII region(s) %v, wrote %s\n", total, counts, outPath)
 	return 0
 }
 
