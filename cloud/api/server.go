@@ -26,18 +26,20 @@ const orgIDKey ctxKey = iota
 type Server struct {
 	docs   DocumentStore
 	keys   KeyStore
+	shares ShareStore
 	ai     core.AIClient // optional; the AI endpoints 501 when nil
 	log    *slog.Logger
 	router http.Handler
 }
 
-// New builds a Server. ai may be nil (the AI endpoints then report they are
-// unconfigured). log may be nil (a discarding logger is used).
-func New(docs DocumentStore, keys KeyStore, ai core.AIClient, log *slog.Logger) *Server {
+// New builds a Server. shares may be nil (the share endpoints then 501). ai may
+// be nil (the AI endpoints report they are unconfigured). log may be nil (a
+// discarding logger is used).
+func New(docs DocumentStore, keys KeyStore, shares ShareStore, ai core.AIClient, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(discard{}, nil))
 	}
-	s := &Server{docs: docs, keys: keys, ai: ai, log: log}
+	s := &Server{docs: docs, keys: keys, shares: shares, ai: ai, log: log}
 	s.router = s.routes()
 	return s
 }
@@ -53,6 +55,10 @@ func (s *Server) routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	// Public: fetch a document by an unguessable share token (no API key). The
+	// token, plus an optional password and expiry, is the only credential.
+	r.Get("/shared/{token}", s.getShared)
+
 	// Everything under /v1 requires a valid API key and is org-scoped.
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.authenticate)
@@ -61,6 +67,7 @@ func (s *Server) routes() http.Handler {
 		r.Post("/documents/{id}/extract", s.extractText)
 		r.Post("/documents/{id}/redact-pii", s.redactPII)
 		r.Post("/documents/{id}/extract-structured", s.extractStructured)
+		r.Post("/documents/{id}/shares", s.createShare)
 	})
 	return r
 }
@@ -75,6 +82,14 @@ func HashKey(raw string) string {
 // newID returns a random 128-bit hex identifier for a stored document.
 func newID() string {
 	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// newToken returns a random 256-bit hex share token — large enough that it can't
+// be guessed, since it is the sole credential for a public share link.
+func newToken() string {
+	var b [32]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
@@ -124,9 +139,18 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		s.log.Info("request",
-			"method", r.Method, "path", r.URL.Path,
+			"method", r.Method, "path", redactPath(r.URL.Path),
 			"status", sw.status, "dur_ms", time.Since(start).Milliseconds())
 	})
+}
+
+// redactPath hides the secret share token from logs: a share URL is
+// /shared/<token>, and the token is a credential (SECURITY.md §4).
+func redactPath(path string) string {
+	if strings.HasPrefix(path, "/shared/") {
+		return "/shared/[token]"
+	}
+	return path
 }
 
 // recoverer turns a handler panic into a 500 instead of crashing the process.

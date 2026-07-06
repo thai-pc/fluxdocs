@@ -111,8 +111,12 @@ Wave 2 is feature-complete.
   `DocumentStore`/`KeyStore` interfaces with two implementations: **PostgreSQL**
   (`database/sql`, org-scoped parameterized queries, embedded schema, keys stored
   as hashes) selected via `DATABASE_URL`, and in-memory for tests/local dev.
-  Object storage (Cloudflare R2) is next. The whole surface is testable with no
-  external services (httptest + sqlmock).
+  Object storage (Cloudflare R2) is next. It also mints **share links** — a
+  public `GET /shared/{token}` that serves one document without an API key,
+  gated by an unguessable token plus an optional **bcrypt-hashed password** and
+  server-enforced **expiry** (SECURITY.md §4); the token is redacted from
+  request logs. The whole surface is testable with no external services
+  (httptest + sqlmock).
 
 ## Developing
 

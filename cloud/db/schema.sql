@@ -30,3 +30,17 @@ CREATE TABLE IF NOT EXISTS documents (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (org_id, id)
 );
+
+-- share_links is a capability to read one document without an API key. The
+-- token is the secret; the password (if any) is stored only as a bcrypt hash and
+-- expires_at is enforced server-side (SECURITY.md §4).
+CREATE TABLE IF NOT EXISTS share_links (
+    token         TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL REFERENCES orgs (id),
+    document_id   TEXT NOT NULL,
+    password_hash TEXT NOT NULL DEFAULT '',
+    expires_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS share_links_doc_idx ON share_links (org_id, document_id);

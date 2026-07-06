@@ -58,7 +58,7 @@ func testServer(t *testing.T, ai core.AIClient) (*Server, string) {
 	keys := NewMemKeyStore()
 	const key = "sk-test-abc"
 	keys.Add(HashKey(key), "org-a")
-	return New(NewMemDocumentStore(), keys, ai, nil), key
+	return New(NewMemDocumentStore(), keys, NewMemShareStore(), ai, nil), key
 }
 
 // do performs a request with the given key and returns status + decoded body.
@@ -120,7 +120,7 @@ func TestOrgIsolation(t *testing.T) {
 	keys := NewMemKeyStore()
 	keys.Add(HashKey("key-a"), "org-a")
 	keys.Add(HashKey("key-b"), "org-b")
-	s := New(NewMemDocumentStore(), keys, nil, nil)
+	s := New(NewMemDocumentStore(), keys, NewMemShareStore(), nil, nil)
 
 	_, body := do(t, s, http.MethodPost, "/v1/documents", "key-a", textPDF("org-a secret"))
 	id := body["id"].(string)

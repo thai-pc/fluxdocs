@@ -75,8 +75,55 @@ func (s *PostgresKeyStore) OrgForKeyHash(ctx context.Context, keyHash string) (s
 	return orgID, true
 }
 
-// compile-time checks that both satisfy the store interfaces.
+// PostgresShareStore persists share links in the share_links table.
+type PostgresShareStore struct{ DB *sql.DB }
+
+// NewPostgresShareStore returns a store over db.
+func NewPostgresShareStore(db *sql.DB) *PostgresShareStore {
+	return &PostgresShareStore{DB: db}
+}
+
+// CreateShare inserts a share link. A zero ExpiresAt is stored as SQL NULL.
+func (s *PostgresShareStore) CreateShare(ctx context.Context, l ShareLink) error {
+	var expires any
+	if !l.ExpiresAt.IsZero() {
+		expires = l.ExpiresAt
+	}
+	_, err := s.DB.ExecContext(ctx,
+		`INSERT INTO share_links (token, org_id, document_id, password_hash, expires_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		l.Token, l.OrgID, l.DocumentID, l.PasswordHash, expires)
+	if err != nil {
+		return fmt.Errorf("fluxdocs/api: create share: %w", err)
+	}
+	return nil
+}
+
+// GetShare looks up a share link by token, or ErrNotFound.
+func (s *PostgresShareStore) GetShare(ctx context.Context, token string) (ShareLink, error) {
+	var (
+		l       = ShareLink{Token: token}
+		expires sql.NullTime
+	)
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT org_id, document_id, password_hash, expires_at, created_at
+		 FROM share_links WHERE token = $1`, token).
+		Scan(&l.OrgID, &l.DocumentID, &l.PasswordHash, &expires, &l.CreatedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ShareLink{}, ErrNotFound
+	case err != nil:
+		return ShareLink{}, fmt.Errorf("fluxdocs/api: get share: %w", err)
+	}
+	if expires.Valid {
+		l.ExpiresAt = expires.Time
+	}
+	return l, nil
+}
+
+// compile-time checks that the stores satisfy their interfaces.
 var (
 	_ DocumentStore = (*PostgresDocumentStore)(nil)
 	_ KeyStore      = (*PostgresKeyStore)(nil)
+	_ ShareStore    = (*PostgresShareStore)(nil)
 )

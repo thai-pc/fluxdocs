@@ -41,7 +41,7 @@ func run() error {
 	}
 
 	// Pick persistence: PostgreSQL when DATABASE_URL is set, else in-memory.
-	docs, keys, err := stores(os.Getenv("DATABASE_URL"), api.HashKey(key), log)
+	docs, keys, shares, err := stores(os.Getenv("DATABASE_URL"), api.HashKey(key), log)
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func run() error {
 		log.Info("AI endpoints enabled")
 	}
 
-	srv := api.New(docs, keys, aiClient, log)
+	srv := api.New(docs, keys, shares, aiClient, log)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -68,33 +68,33 @@ func run() error {
 // schema, seeds the default org and the given API-key hash, and returns
 // PostgreSQL-backed stores; otherwise it returns in-memory stores. Only the key
 // hash is ever persisted.
-func stores(dsn, keyHash string, log *slog.Logger) (api.DocumentStore, api.KeyStore, error) {
+func stores(dsn, keyHash string, log *slog.Logger) (api.DocumentStore, api.KeyStore, api.ShareStore, error) {
 	if dsn == "" {
 		log.Info("persistence", "backend", "in-memory")
 		keys := api.NewMemKeyStore()
 		keys.Add(keyHash, "default")
-		return api.NewMemDocumentStore(), keys, nil
+		return api.NewMemDocumentStore(), keys, api.NewMemShareStore(), nil
 	}
 
 	sqlDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open database: %w", err)
+		return nil, nil, nil, fmt.Errorf("open database: %w", err)
 	}
 	if err := sqlDB.Ping(); err != nil {
-		return nil, nil, fmt.Errorf("connect to database: %w", err)
+		return nil, nil, nil, fmt.Errorf("connect to database: %w", err)
 	}
 	if _, err := sqlDB.Exec(db.Schema); err != nil {
-		return nil, nil, fmt.Errorf("apply schema: %w", err)
+		return nil, nil, nil, fmt.Errorf("apply schema: %w", err)
 	}
 	if _, err := sqlDB.Exec(
 		`INSERT INTO orgs (id, name) VALUES ('default', 'Default') ON CONFLICT (id) DO NOTHING`); err != nil {
-		return nil, nil, fmt.Errorf("seed org: %w", err)
+		return nil, nil, nil, fmt.Errorf("seed org: %w", err)
 	}
 	if _, err := sqlDB.Exec(
 		`INSERT INTO api_keys (key_hash, org_id) VALUES ($1, 'default') ON CONFLICT (key_hash) DO NOTHING`,
 		keyHash); err != nil {
-		return nil, nil, fmt.Errorf("seed api key: %w", err)
+		return nil, nil, nil, fmt.Errorf("seed api key: %w", err)
 	}
 	log.Info("persistence", "backend", "postgres")
-	return api.NewPostgresDocumentStore(sqlDB), api.NewPostgresKeyStore(sqlDB), nil
+	return api.NewPostgresDocumentStore(sqlDB), api.NewPostgresKeyStore(sqlDB), api.NewPostgresShareStore(sqlDB), nil
 }
