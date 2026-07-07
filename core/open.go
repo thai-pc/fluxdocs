@@ -49,11 +49,15 @@ func OpenBytes(data []byte) (*Document, error) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPDF, err)
 	}
 
-	// Encryption is signalled by /Encrypt in the trailer. We cannot decrypt yet,
-	// so report it rather than returning garbled content.
+	// Encryption is signalled by /Encrypt in the trailer. Set up the Standard
+	// Security Handler (empty user password — the common openable case) before
+	// resolving any content; an unsupported handler or wrong password reports
+	// ErrEncryptedDocument rather than returning garbled content.
 	trailer := resolver.Trailer()
 	if _, ok := trailer["Encrypt"]; ok {
-		return nil, ErrEncryptedDocument
+		if err := resolver.EnableDecryption(nil); err != nil {
+			return nil, ErrEncryptedDocument
+		}
 	}
 
 	pageInfos, err := resolver.Pages()

@@ -56,7 +56,9 @@ docs/        spec.md — the full technical specification (reference document)
 
 **Wave 1 — Core (MIT), functional:**
 - **Parser** — object model, lexer, indirect objects, streams, classic + stream
-  xref, compressed object streams, page-tree flattening, lenient recovery.
+  xref, compressed object streams, page-tree flattening, lenient recovery, and
+  **decryption** of the Standard Security Handler (RC4 and AES-128, empty user
+  password; AES-256/R6 is a follow-up).
 - **Text extraction** — content-stream interpreter with `/ToUnicode` CMaps, plus
   heuristic **table detection** (`ExtractTables`) that reconstructs grid-shaped
   layouts from text positions.

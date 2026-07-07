@@ -58,13 +58,18 @@ func (r *Resolver) loadObjStm(streamNum int) (*objStm, error) {
 	if e.Offset < 0 || e.Offset >= int64(len(r.data)) {
 		return nil, fmt.Errorf("%w: ObjStm %d offset out of range", errLex, streamNum)
 	}
-	_, _, obj, _, err := ParseIndirectObjectAt(r.data, int(e.Offset))
+	_, gen, obj, _, err := ParseIndirectObjectAt(r.data, int(e.Offset))
 	if err != nil {
 		return nil, fmt.Errorf("loading ObjStm %d: %w", streamNum, err)
 	}
 	st, ok := obj.(*Stream)
 	if !ok {
 		return nil, fmt.Errorf("%w: object %d is not an ObjStm", errLex, streamNum)
+	}
+	// An ObjStm stream is encrypted like any other; decrypt its raw bytes before
+	// decoding. The objects it contains are then plaintext (not re-decrypted).
+	if r.decrypt != nil {
+		st.Raw = r.decrypt.decryptBytes(streamNum, gen, st.Raw)
 	}
 
 	n, ok := st.Dict.GetInt("N")

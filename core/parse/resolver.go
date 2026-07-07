@@ -21,6 +21,12 @@ type Resolver struct {
 	mu      sync.Mutex // guards cache and objstms
 	cache   map[int]Object
 	objstms map[int]*objStm // decoded /ObjStm, keyed by stream object number
+
+	// decrypt, when non-nil, decrypts the strings and streams of every offset-
+	// loaded object (and the ObjStm payloads) as they are read. It is installed
+	// by EnableDecryption and never applied to the /Encrypt object itself.
+	decrypt    *decryptor
+	encryptNum int // object number of /Encrypt (never decrypted); 0 if none
 }
 
 // NewResolver builds the xref table from data and returns a Resolver ready to
@@ -103,12 +109,53 @@ func (r *Resolver) object(num int) (Object, error) {
 	if e.Offset < 0 || e.Offset >= int64(len(r.data)) {
 		return nil, fmt.Errorf("%w: object %d offset %d out of range", errLex, num, e.Offset)
 	}
-	_, _, obj, _, err := ParseIndirectObjectAt(r.data, int(e.Offset))
+	_, gen, obj, _, err := ParseIndirectObjectAt(r.data, int(e.Offset))
 	if err != nil {
 		return nil, fmt.Errorf("loading object %d: %w", num, err)
 	}
+	// Decrypt the object's strings/streams, except the /Encrypt object, whose
+	// own strings (/O, /U) are stored unencrypted (ISO 32000 §7.6.1).
+	if r.decrypt != nil && num != r.encryptNum {
+		obj = r.decrypt.decryptObject(num, gen, obj)
+	}
 	r.cache[num] = obj
 	return obj, nil
+}
+
+// EnableDecryption sets up the Standard Security Handler for an encrypted
+// document using password (nil/empty for the common case). It is a no-op when
+// the trailer has no /Encrypt. It must be called right after NewResolver, before
+// any content object is resolved, so the cache holds decrypted objects.
+//
+// Returns an error if the handler is unsupported or the password is wrong.
+func (r *Resolver) EnableDecryption(password []byte) error {
+	encRef, ok := r.xref.Trailer["Encrypt"]
+	if !ok {
+		return nil // not encrypted
+	}
+	if ref, ok := encRef.(Reference); ok {
+		r.encryptNum = ref.Number
+	}
+	enc, err := r.Resolve(encRef) // resolved (and cached) before r.decrypt is set
+	if err != nil {
+		return err
+	}
+	encDict, ok := enc.(Dict)
+	if !ok {
+		return fmt.Errorf("%w: /Encrypt is not a dictionary", errLex)
+	}
+	var id []byte
+	if idArr, ok := r.xref.Trailer["ID"].(Array); ok && len(idArr) > 0 {
+		id = stringValue(idArr[0])
+	}
+	d, err := newDecryptor(encDict, id, password)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.decrypt = d
+	r.mu.Unlock()
+	return nil
 }
 
 // Resolve follows a Reference (including a reference->reference chain) to the
