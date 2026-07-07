@@ -123,6 +123,37 @@ func init() {
 	})
 
 	register(tool{
+		name:        "extract_tables",
+		description: "Detect and extract tabular data on a page as a grid of rows and columns (stream/whitespace heuristic; returns no tables when the page is not tabular).",
+		schema: obj(map[string]any{
+			"handle": prop("integer", "Document handle"),
+			"page":   prop("integer", "0-based page index"),
+		}, "handle", "page"),
+		handler: func(s *Server, args json.RawMessage) ([]contentItem, bool) {
+			var a struct {
+				Handle int `json:"handle"`
+				Page   int `json:"page"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return errText("invalid arguments")
+			}
+			doc, ok := s.doc(a.Handle)
+			if !ok {
+				return errText("unknown document handle %d", a.Handle)
+			}
+			tables, err := doc.ExtractTables(a.Page)
+			if err != nil {
+				return errText("extract_tables failed: %v", err)
+			}
+			out := make([]map[string]any, len(tables))
+			for i, t := range tables {
+				out[i] = map[string]any{"rows": t.Rows}
+			}
+			return jsonText(map[string]any{"tables": out})
+		},
+	})
+
+	register(tool{
 		name:        "render_page",
 		description: "Render a page to a PNG image (base64), including the annotation overlay. Useful for an agent to see a page.",
 		schema: obj(map[string]any{

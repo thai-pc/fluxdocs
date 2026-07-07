@@ -57,7 +57,9 @@ docs/        spec.md — the full technical specification (reference document)
 **Wave 1 — Core (MIT), functional:**
 - **Parser** — object model, lexer, indirect objects, streams, classic + stream
   xref, compressed object streams, page-tree flattening, lenient recovery.
-- **Text extraction** — content-stream interpreter with `/ToUnicode` CMaps.
+- **Text extraction** — content-stream interpreter with `/ToUnicode` CMaps, plus
+  heuristic **table detection** (`ExtractTables`) that reconstructs grid-shaped
+  layouts from text positions.
 - **Rendering** to PNG/JPEG — vector paths, embedded TrueType/CFF glyphs, image
   XObjects (JPEG/raw/ImageMask/SMask), form XObjects, and an annotation overlay.
 - **Annotation layer** — CRUD kept separate from the PDF, JSON export/import, and
@@ -87,7 +89,7 @@ docs/        spec.md — the full technical specification (reference document)
   with an embedded ICC profile, and a file identifier, plus a structural
   validator (font embedding and certification are follow-ups).
 - **Agent-native MCP server** (`fluxdocs-mcp`) — a self-hostable Model Context
-  Protocol server exposing open/extract/render/redact/auto_redact_pii/watermark/
+  Protocol server exposing open/extract/extract_tables/render/redact/auto_redact_pii/watermark/
   compare/pdfa/forms/sign — plus the Cloud AI tools extract_structured and
   ask_document — as tools an AI agent can call; documents stay on the user's own
   machine (the AI tools call out only to the configured LLM backend).

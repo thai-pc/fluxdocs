@@ -252,3 +252,26 @@ func TestAutoRedactPIITool(t *testing.T) {
 		t.Errorf("LEAK: SSN bytes remain in the verbatim MCP output")
 	}
 }
+
+func TestExtractTablesTool(t *testing.T) {
+	s := NewServer()
+	content := "BT /F1 10 Tf 1 0 0 1 72 700 Tm (Name) Tj 1 0 0 1 300 700 Tm (Age) Tj " +
+		"1 0 0 1 72 680 Tm (Alice) Tj 1 0 0 1 300 680 Tm (30) Tj ET"
+	pdf := buildPDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		4: stream(content),
+		5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}, "<< /Size 6 /Root 1 0 R >>")
+	path := filepath.Join(t.TempDir(), "grid.pdf")
+	os.WriteFile(path, pdf, 0o644)
+	h := openHandle(t, s, path)
+	item, isErr := callTool(t, s, "extract_tables", map[string]any{"handle": h, "page": 0})
+	if isErr {
+		t.Fatalf("extract_tables error: %v", item)
+	}
+	if !strings.Contains(item["text"].(string), "Alice") || !strings.Contains(item["text"].(string), "\"tables\"") {
+		t.Errorf("result = %v", item["text"])
+	}
+}

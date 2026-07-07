@@ -423,14 +423,35 @@ func (d *Document) ExtractTextByPage(pageIndex int, opts ExtractOptions) (string
 	})
 }
 
-// ExtractTables detects and extracts tables on a single page.
+// ExtractTables detects and extracts tables on a single page using the
+// stream/whitespace method: text runs are grouped into rows by baseline and
+// assigned to columns inferred from the widest row. It finds grid-shaped layouts
+// (Word/Excel/LaTeX exports) without needing ruled lines; it is a heuristic
+// returning at most one dominant grid per page, and returns no tables when the
+// page does not look tabular.
 //
-// Returns ErrPageNotFound if pageIndex is out of range.
+// Returns ErrPageNotFound if pageIndex is out of range, ErrInvalidPDF if the
+// document was not opened from bytes.
 func (d *Document) ExtractTables(pageIndex int) ([]Table, error) {
 	if pageIndex < 0 || pageIndex >= len(d.Pages) {
 		return nil, ErrPageNotFound
 	}
-	return nil, errNotImplemented
+	if d.resolver == nil || pageIndex >= len(d.pageInfos) {
+		return nil, ErrInvalidPDF
+	}
+	found, err := extract.PageTables(d.resolver, d.pageInfos[pageIndex], extract.Options{})
+	if err != nil {
+		return nil, err
+	}
+	tables := make([]Table, len(found))
+	for i, t := range found {
+		tables[i] = Table{
+			PageIndex: pageIndex,
+			Rows:      t.Rows,
+			Bounds:    Rect{X: t.Bounds[0], Y: t.Bounds[1], Width: t.Bounds[2] - t.Bounds[0], Height: t.Bounds[3] - t.Bounds[1]},
+		}
+	}
+	return tables, nil
 }
 
 // OCRPage (Pro) runs OCR on a page: it rasterizes the page and recognizes the
