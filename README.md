@@ -124,8 +124,9 @@ Wave 2 is feature-complete.
   `POST /documents/{id}/redact-pii-async` returns a job id (202) and
   `GET /jobs/{id}` polls it — on a bounded worker pool behind a `JobQueue`
   interface (River, a PostgreSQL-backed queue, is the durable production
-  backend). The whole surface is testable with no external services (httptest +
-  sqlmock).
+  backend). Requests are throttled per org with a **token-bucket rate limiter**
+  (429 + `Retry-After`), so one tenant can't starve another. The whole surface is
+  testable with no external services (httptest + sqlmock).
 
 ## Developing
 

@@ -24,15 +24,20 @@ const orgIDKey ctxKey = iota
 
 // Server is the Cloud HTTP backend. Construct it with New and serve its Handler.
 type Server struct {
-	docs   DocumentStore
-	keys   KeyStore
-	shares ShareStore
-	ai     core.AIClient // optional; the AI endpoints 501 when nil
-	jwt    *JWTVerifier  // optional; enables Bearer-JWT auth and POST /v1/token
-	queue  JobQueue      // optional; enables the async job endpoints
-	log    *slog.Logger
-	router http.Handler
+	docs    DocumentStore
+	keys    KeyStore
+	shares  ShareStore
+	ai      core.AIClient // optional; the AI endpoints 501 when nil
+	jwt     *JWTVerifier  // optional; enables Bearer-JWT auth and POST /v1/token
+	queue   JobQueue      // optional; enables the async job endpoints
+	limiter *RateLimiter  // optional; per-org request throttling
+	log     *slog.Logger
+	router  http.Handler
 }
+
+// UseRateLimit enables per-org token-bucket throttling: rate tokens/second up to
+// a burst capacity. Call it after New (before serving).
+func (s *Server) UseRateLimit(rate, burst float64) { s.limiter = NewRateLimiter(rate, burst) }
 
 // UseJWT enables JWT bearer authentication and the POST /v1/token endpoint,
 // signing/verifying with secret. Call it after New (before serving).
@@ -74,7 +79,7 @@ func (s *Server) routes() http.Handler {
 
 	// Everything under /v1 requires a valid API key and is org-scoped.
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(s.authenticate)
+		r.Use(s.authenticate, s.rateLimit) // throttle after the org is known
 		r.Post("/token", s.issueToken)
 		r.Post("/documents", s.uploadDocument)
 		r.Get("/documents/{id}", s.getDocument)

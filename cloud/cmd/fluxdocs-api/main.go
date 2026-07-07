@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 
 	_ "github.com/lib/pq" // registers the "postgres" database/sql driver
 
@@ -69,6 +70,14 @@ func run() error {
 	srv.SetQueue(queue)
 	log.Info("async jobs enabled", "backend", "in-memory")
 
+	// Enable per-org rate limiting when RATE_LIMIT_RPS is set (burst defaults to
+	// RATE_LIMIT_BURST, or the rate).
+	if rps := envFloat("RATE_LIMIT_RPS", 0); rps > 0 {
+		burst := envFloat("RATE_LIMIT_BURST", rps)
+		srv.UseRateLimit(rps, burst)
+		log.Info("rate limiting enabled", "rps", rps, "burst", burst)
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -76,6 +85,16 @@ func run() error {
 	addr := ":" + port
 	log.Info("listening", "addr", addr)
 	return http.ListenAndServe(addr, srv.Handler())
+}
+
+// envFloat reads a float env var, returning def when unset or unparseable.
+func envFloat(name string, def float64) float64 {
+	if v := os.Getenv(name); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
 }
 
 // stores wires the persistence layer. Metadata (keys, share links) lives in
