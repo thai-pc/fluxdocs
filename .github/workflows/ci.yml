@@ -28,7 +28,7 @@ jobs:
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
-            echo "::error::Các file cần gofmt:"
+            echo "::error::Files need gofmt:"
             echo "$unformatted"
             exit 1
           fi
@@ -36,26 +36,26 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # Build mặc định PHẢI là pure-Go: core giữ MIT, không kéo theo CGO
-      # ngoài ý muốn. CGO chỉ được bật sau build tag (ocr, mupdf).
+      # The default build MUST be pure-Go: core stays MIT and never pulls in
+      # CGO by accident. CGO is enabled only behind a build tag (ocr, mupdf).
       - name: Build (pure-Go, CGO disabled)
         env:
           CGO_ENABLED: "0"
         run: go build ./...
 
-      # Race detector cần CGO (C runtime); code vẫn pure-Go, CGO chỉ bật để
-      # dùng race runtime, không import C nào.
+      # The race detector needs CGO (C runtime); the code stays pure-Go, CGO is
+      # on only for the race runtime and nothing imports C.
       - name: Test (race)
         run: go test -race ./...
 
-      # GATE bảo mật: nội dung sau redact không được extract lại (spec §13.4,
-      # .claude/SECURITY.md §1). Bắt buộc pass 100% khi đã có test.
+      # SECURITY GATE: redacted content must not be extractable afterwards
+      # (spec §13.4, .claude/SECURITY.md §1). Must pass 100% once tests exist.
       - name: Redaction security gate
         run: |
           if ls testing/security/redaction/*_test.go >/dev/null 2>&1; then
             go test ./testing/security/redaction/...
           else
-            echo "Chưa có redaction test — gate ở chế độ placeholder."
+            echo "No redaction tests yet — gate is a placeholder."
           fi
 
   cloud:
@@ -74,14 +74,14 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go build ./...
-      # Module cloud còn rỗng (chỉ .gitkeep) ở giai đoạn pre-build; go test với
-      # 0 package exit 1. Chỉ chạy khi đã có package Go thật.
+      # go test exits 1 when a module has no packages, so only run it once the
+      # cloud module contains real Go packages.
       - name: Test (race)
         run: |
           if [ -n "$(go list ./... 2>/dev/null)" ]; then
             go test -race ./...
           else
-            echo "Cloud module chưa có package Go — bỏ qua test."
+            echo "Cloud module has no Go packages yet — skipping tests."
           fi
 
   wasm:
@@ -96,7 +96,30 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-      # Khác biệt cốt lõi của sản phẩm: cùng core Go compile sang WASM chạy
-      # client-side. Build này phải luôn xanh.
+      # The product's core differentiator: the same Go core compiled to WASM
+      # and run client-side. This build must always stay green.
       - name: Build core + wasm entry for js/wasm
         run: go build ./core/... ./wasm/...
+
+  web:
+    name: JS wrappers & demos (typecheck + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      # React/Vue resolve @fluxdocs/core through its dist/ (gitignored), so the
+      # packages are built first, in dependency order.
+      - name: Build packages
+        run: pnpm -r --filter "./packages/*" build
+      - name: Typecheck
+        run: pnpm -r typecheck
+      - name: Test
+        run: pnpm -r test
