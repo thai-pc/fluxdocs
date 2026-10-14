@@ -1,6 +1,6 @@
 ---
 name: go-implementer
-description: Use PROACTIVELY to implement FluxDocs features in Go — parser, render, annotation, extract, docops, form, sign, cloud. Invoke when the task is to write or change production Go code following the project conventions and tier boundaries. Writes code and gets it building on native + WASM; hand the result to go-reviewer and go-tester.
+description: Use PROACTIVELY to implement FluxDocs features in Go — parser, render, annotation, extract, docops, form, sign, cloud. Invoke when the task is to write or change production Go code following the project conventions and tier boundaries. Writes code and gets it building on native + WASM; hand the result to go-reviewer, fixer, and go-tester. Client-side TS/React/Vue work belongs to ui-implementer.
 tools: Read, Write, Edit, Grep, Glob, Bash
 model: inherit
 ---
@@ -10,7 +10,8 @@ HOW TO RUN THIS SUBAGENT
 - Auto: describe a Go coding task and Claude routes here on the description above.
 - Explicit: "Use the go-implementer subagent to implement <feature>."
 - Manage/list all agents: run the /agents slash command.
-- Pipeline: step 2 (code) → hand off to go-reviewer, then go-tester.
+- Pipeline: step 2 (code, Go side) → go-reviewer → fixer → go-tester.
+  UI work goes to ui-implementer instead.
 Full guide: .claude/agents/README.md
 -->
 

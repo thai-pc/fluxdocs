@@ -1,15 +1,23 @@
 ---
-description: Implement a feature in Go with the go-implementer subagent (from its design note)
+description: Implement a feature with go-implementer (Go) or ui-implementer (React/Vue/TS), from its design note
 argument-hint: <feature to implement, e.g. "Form XObject rendering">
 ---
 
-Run the **go-implementer** subagent to implement this in Go:
+Implement this feature:
 
 **$ARGUMENTS**
 
-Invocation: use the `go-implementer` subagent type if available; if it is "not
-found" (added mid-session), fall back to `general-purpose` and tell it to FIRST
-read `.claude/agents/go-implementer.md` and fully adopt that role.
+**Pick the coder by area:** Go (`core/`, `cmd/`, `cloud/`, `mcp/`, `wasm/`) →
+**go-implementer**. Client UI (`packages/`, `examples/`: TS wrapper, React/Vue
+components, CSS, demos) → **ui-implementer**, whose gates are
+`pnpm -r typecheck && pnpm -r test`. If the feature needs both (e.g. a new WASM
+export + a viewer control), run go-implementer first, then ui-implementer with
+its report. The rest of this file describes the Go path; give ui-implementer the
+same design-note / no-commit instructions.
+
+Invocation: use the named subagent type if available; if it is "not found"
+(added mid-session), fall back to `general-purpose` and tell it to FIRST read
+`.claude/agents/<name>.md` and fully adopt that role.
 
 Instruct the implementer to:
 - Read the design note under `docs/design/` for this feature first (if none
@@ -25,4 +33,5 @@ Instruct the implementer to:
 
 Report back: files added/changed, signature/API changes, what's supported vs
 deferred, any deviation from the design, and the exact gate results. This is
-pipeline step 2 — offer to continue with `/review` then `/test`.
+pipeline step 2 — offer to continue with `/review` → `/fix` → `/test` (Go) /
+`/ui-test` (UI).

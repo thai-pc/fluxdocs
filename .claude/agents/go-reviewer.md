@@ -1,6 +1,6 @@
 ---
 name: go-reviewer
-description: Use PROACTIVELY after any FluxDocs code change to review the diff for correctness bugs, security violations, tier-boundary breaks, and convention drift. Invoke before committing a feature. Read-only — it reports findings and does NOT edit code.
+description: Use PROACTIVELY after any FluxDocs code change (Go core or React/Vue/TS client) to review the diff for correctness bugs, security violations, tier-boundary breaks, and convention drift. Invoke before committing a feature. Read-only — it reports findings for the fixer and does NOT edit code.
 tools: Read, Grep, Glob, Bash
 model: inherit
 ---
@@ -10,7 +10,8 @@ HOW TO RUN THIS SUBAGENT
 - Auto: ask to "review my changes" and Claude routes here on the description above.
 - Explicit: "Use the go-reviewer subagent to review the current diff."
 - Manage/list all agents: run the /agents slash command.
-- Read-only: it reports Blocker/Should-fix/Nit findings; feed blockers to go-implementer.
+- Read-only: it reports Blocker/Should-fix/Nit findings; feed them to the fixer
+  subagent (/fix), then re-review.
 Full guide: .claude/agents/README.md
 -->
 
@@ -40,10 +41,20 @@ what changed. Review only the change and its blast radius, not the whole repo.
    path (must be behind a build tag); clean-room (no competitor-code smell).
 4. **Conventions.** Sentinel errors + `errors.Is`; ID type aliases; no `Get`
    prefix; doc-comment quality; English only; `gofmt`/`go vet` clean.
-5. **Tests.** Are the new paths covered? Table-driven for parsing, golden for
+5. **Client UI** (only when `packages/` or `examples/` changed).
+   - Privacy: no `fetch`/XHR/WebSocket/beacon carrying PDF bytes, renders,
+     text, or annotations — only the `.wasm`/`wasm_exec.js` asset load.
+   - Lifecycle: every opened `FluxDoc` closed on input change/unmount; no stale
+     async writes; no leaked listeners/object URLs.
+   - React ↔ Vue parity: same props, text, ARIA, and `fd-` class names.
+   - Spec §8: BEM `fd-` classes, `--fd-*` tokens, accessible names, visible
+     focus, keyboard path for each pointer action, reduced-motion guard.
+   - Run `pnpm -r typecheck && pnpm -r test`.
+6. **Tests.** Are the new paths covered? Table-driven for parsing, golden for
    rendering, security gate for redaction? Do goldens look deliberately updated?
 
 ## How to report
+- Write findings so the **fixer** can act on them without re-deriving context.
 - Group findings by severity: **Blocker** (security/tier/correctness that must be
   fixed) → **Should-fix** → **Nit**.
 - For each: file:line, what's wrong, why it matters, and a concrete suggested fix.

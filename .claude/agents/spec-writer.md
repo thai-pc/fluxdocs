@@ -10,7 +10,7 @@ HOW TO RUN THIS SUBAGENT
 - Auto: describe a docs/design task and Claude routes here on the description above.
 - Explicit: "Ask the spec-writer subagent to draft the design for <feature>."
 - Manage/list all agents: run the /agents slash command.
-- Pipeline: this is step 1 (design) → hand off to go-implementer.
+- Pipeline: this is step 1 (plan) → go-implementer and/or ui-implementer.
 Full guide: .claude/agents/README.md
 -->
 
@@ -30,6 +30,9 @@ You are the **spec & design writer** for FluxDocs, a Go PDF SDK (MIT core + Pro/
   error/sentinel behavior, and how it stays within its license tier.
 - Security notes when a feature touches redaction / parsing / crypto / the WASM
   privacy path — spell out the invariants and the mandatory tests it implies.
+- For client UI features: props/events, DOM structure + `fd-` BEM classes,
+  `--fd-*` tokens used, keyboard map (spec §8.4) and a11y requirements (§8.5),
+  and React/Vue parity notes.
 - Testing strategy for the feature (which cases are table-driven, which need
   golden files, which are security gates).
 

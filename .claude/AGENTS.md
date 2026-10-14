@@ -21,31 +21,35 @@
 
 ## Subagents (`.claude/agents/`)
 
-Four specialized subagents split the work; the main agent delegates and chains
-them. Each reads the same ground-truth docs and enforces the tier/security rules.
+Seven specialized subagents split the work along the pipeline
+**plan → code → review → fix → test (Go + UI/UX)**; the main agent delegates and
+chains them. Each reads the same ground-truth docs and enforces the tier/security
+rules.
 
-| Agent | Role | Writes code? |
-|---|---|---|
-| `spec-writer` | Design & spec docs (`docs/spec.md`, security/design notes) — produce the design *before* coding | No |
-| `go-implementer` | Implement the feature in Go, get it building on native + WASM | Yes (production) |
-| `go-reviewer` | Review the diff: security, correctness, tier boundaries, conventions | No (read-only) |
-| `go-tester` | Table-driven / golden / redaction-gate tests; run the full gate suite | Yes (tests) |
-
-**Standard pipeline for a feature** (mirrors the code → review → test → review rule):
+| Stage | Agent | Role | Writes code? |
+|---|---|---|---|
+| Plan | `spec-writer` | Design note / spec (`docs/design/`, `docs/spec.md`) before coding | No (docs) |
+| Code | `go-implementer` | Go feature work (core/cloud/cmd/wasm), green on native + WASM | Yes |
+| Code | `ui-implementer` | `@fluxdocs/core` TS wrapper, React/Vue components, CSS, demos | Yes |
+| Review | `go-reviewer` | Review the diff: security, correctness, tier, conventions, UI rules | No (read-only) |
+| Fix | `fixer` | Apply review/test findings minimally + regression tests | Yes (scoped) |
+| Test | `go-tester` | Table-driven / pixel / redaction-gate / race tests; Go gates | Yes (tests) |
+| Test | `ui-tester` | Component tests, WCAG/§8 audit, privacy check, browser E2E | Yes (tests only) |
 
 ```
-spec-writer  →  go-implementer  →  go-reviewer  →  go-tester  →  go-reviewer
- (design)        (code)            (review)        (tests)       (final review)
+spec-writer → go-implementer / ui-implementer → go-reviewer → fixer ⟲ go-reviewer
+            → go-tester + ui-tester → fixer (if bugs) → go-reviewer (final)
 ```
 
-Skip `spec-writer` for a small, well-understood change. `go-reviewer` is
-read-only and reports Blocker/Should-fix/Nit findings; feed its blockers back to
-`go-implementer`. `go-tester` must not weaken a security test to go green.
+Skip `spec-writer` for a small, well-understood change. `go-reviewer` never
+edits; its Blocker/Should-fix/Nit list goes to `fixer`, which loops with the
+reviewer at most 2 rounds before a human decides. Testers report product bugs to
+`fixer` instead of patching them, and must not weaken a security test to go green.
 
-**Invoke** a subagent by naming it ("Use the go-reviewer subagent to review the
-current diff"), or just describe the task and let Claude route by `description`;
-run `/agents` to list/manage them. Each agent file has a `HOW TO RUN` comment at
-the top; full guide in `.claude/agents/README.md`.
+**Invoke** with `/feature <feature>` for the whole chain, or per stage:
+`/spec`, `/implement`, `/review`, `/fix`, `/test`, `/ui-test`, `/gate`. You can
+also name an agent ("Use the fixer subagent to …") or let Claude route by
+`description`; `/agents` lists them. Full guide: `.claude/agents/README.md`.
 
 ## How to organize work
 

@@ -10,7 +10,8 @@ HOW TO RUN THIS SUBAGENT
 - Auto: ask to "add tests" / "run the gates" and Claude routes here on the description above.
 - Explicit: "Use the go-tester subagent to cover <feature> and run the gates."
 - Manage/list all agents: run the /agents slash command.
-- Pipeline: step 4 (tests) → hand back to go-reviewer for a final pass.
+- Pipeline: step 5 (tests, Go side; ui-tester covers the client UI) → product
+  bugs go to fixer → go-reviewer does the final pass.
 Full guide: .claude/agents/README.md
 -->
 
@@ -54,5 +55,5 @@ gofmt -l .   (must be empty)   &&   go vet ./...
 go test ./testing/security/redaction/...
 ```
 Report: tests added, coverage gaps that remain, and the exact pass/fail output.
-If a test reveals a product bug, describe it precisely and hand it back — don't
-paper over it.
+If a test reveals a product bug, describe it precisely (severity, file:line,
+failing test, expected vs actual) so the fixer can act on it — don't paper over it.

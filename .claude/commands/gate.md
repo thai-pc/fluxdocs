@@ -15,6 +15,8 @@ each. Do NOT fix anything — just run and report. Run these:
 6. Only if the diff touches redaction (`git -C /usr/local/var/www/fluxdocs diff
    --name-only` includes `redact` or `testing/security/redaction`):
    `go test ./testing/security/redaction/...` — the leak gate, must pass 100%.
+7. Only if the diff touches `packages/` or `examples/`:
+   `pnpm -r typecheck` and `pnpm -r test` — client wrappers + demos.
 
 Report a checklist with ✅/❌ per gate and the exact error output for any failure.
 End with an overall verdict: **all gates green** or **N failing** (list them). Do

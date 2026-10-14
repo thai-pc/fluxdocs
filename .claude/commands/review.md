@@ -19,6 +19,9 @@ Instruct the reviewer to:
   input, no panic/overflow/OOB, redaction removes content) → **correctness** →
   **tier/license** (pure-Go MIT, no cross-tier/CGO on the default path, WASM-safe,
   clean-room) → **conventions** (sentinel errors, house style, English only).
+  If the diff touches `packages/` or `examples/`, also apply the UI checklist in
+  `.claude/agents/go-reviewer.md` (privacy, React/Vue parity, `fd-` BEM, a11y)
+  and run `pnpm -r typecheck && pnpm -r test`.
 - Actually run the gates and report their real output:
   `go build ./...`, `GOOS=js GOARCH=wasm go build ./core/...`, `gofmt -l core/`,
   `go vet ./core/...`.
@@ -27,4 +30,5 @@ Instruct the reviewer to:
 Report back grouped by severity **Blocker / Should-fix / Nit** (each with
 file:line, why it matters, a concrete suggested fix), the gate results, and a
 final verdict: approve / approve with nits / request changes. Relay the summary;
-if there are Blockers, offer to send them to go-implementer to fix.
+if there are Blockers or Should-fix items, offer `/fix` (fixer subagent) with
+the findings list verbatim.
