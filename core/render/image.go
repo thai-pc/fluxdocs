@@ -266,9 +266,9 @@ func decodeRawImage(res *parse.Resolver, st *parse.Stream, csName parse.Name, w,
 		return nil, false
 	}
 
-	// Compute stride in int64: w is bounded only by maxCanvasPixels (up to 64M
-	// when h==1), so w*8*nComp can overflow a 32-bit int (the WASM target)
-	// before the size check below runs. Do the multiply wide, then narrow.
+	// Compute the size in int64 so the check below does not depend on int's
+	// width: stride×h can exceed 2^31 on a 32-bit int (386/arm). GOARCH=wasm,
+	// like amd64, has a 64-bit int. Do the multiply wide, then narrow.
 	stride64 := (int64(w)*8*int64(nComp) + 7) / 8
 	if stride64*int64(h) > maxImageBytes {
 		return nil, false
@@ -534,9 +534,10 @@ func imageSize(res *parse.Resolver, d parse.Dict) (w, h int, ok bool) {
 
 // imageInt reads an integer image-dictionary value under its full or abbreviated
 // key, resolving an indirect reference. ok is false when neither key holds an
-// integer. A real is truncated; one beyond the int32 range is clamped to it (see
-// clampToInt), so an absurd /Width is rejected by the callers' size checks on
-// every target instead of saturating to MaxInt64 under js/wasm.
+// integer. A real is truncated; an integer or real beyond the int32 range is
+// clamped to it (see clampToInt), so an absurd /Width is rejected by the
+// callers' size checks on every target instead of saturating to MaxInt64 under
+// js/wasm or wrapping on a 32-bit int.
 func imageInt(res *parse.Resolver, d parse.Dict, primary, abbrev parse.Name) (int, bool) {
 	for _, k := range [2]parse.Name{primary, abbrev} {
 		v, present := d[k]
@@ -549,6 +550,14 @@ func imageInt(res *parse.Resolver, d parse.Dict, primary, abbrev parse.Name) (in
 		}
 		switch n := r.(type) {
 		case parse.Integer:
+			// Clamp in int64 before narrowing, as for a Real, so the result does
+			// not depend on int's width (2^32+1 would wrap to 1 on a 32-bit int).
+			switch {
+			case n > math.MaxInt32:
+				return math.MaxInt32, true
+			case n < math.MinInt32:
+				return math.MinInt32, true
+			}
 			return int(n), true
 		case parse.Real:
 			return clampToInt(math.Trunc(float64(n)), math.MinInt32, math.MaxInt32), true

@@ -6,6 +6,7 @@ import (
 	"compress/zlib"
 	"fmt"
 	"io"
+	"math"
 )
 
 // maxDecoded bounds the output of any single stream decode, guarding against
@@ -138,7 +139,7 @@ func applyPredictor(data []byte, parms Dict) ([]byte, error) {
 
 	bytesPerPixel := int((int64(colors)*int64(bpc) + 7) / 8)
 	rowLen64 := (int64(colors)*int64(bpc)*int64(columns) + 7) / 8
-	if rowLen64 <= 0 || rowLen64 > maxDecoded {
+	if rowLen64 > maxDecoded { // ≥ 1: every factor was checked ≥ 1 above
 		return nil, fmt.Errorf("%w: invalid predictor row length", errLex)
 	}
 	rowLen := int(rowLen64)
@@ -227,9 +228,18 @@ func abs(x int) int {
 	return x
 }
 
-// parmInt reads an integer /DecodeParms value with a default.
+// parmInt reads an integer /DecodeParms value with a default. A value beyond
+// the int32 range is clamped to it in int64 before the conversion to int, so
+// the result does not depend on int's width (on a 32-bit int, 2^32+1 would wrap
+// to 1); every caller's bounds reject the clamped extremes.
 func parmInt(d Dict, key Name, def int) int {
 	if v, ok := d.GetInt(key); ok {
+		switch {
+		case v > math.MaxInt32:
+			return math.MaxInt32
+		case v < math.MinInt32:
+			return math.MinInt32
+		}
 		return int(v)
 	}
 	return def

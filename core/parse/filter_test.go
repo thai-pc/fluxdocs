@@ -2,6 +2,7 @@ package parse
 
 import (
 	"bytes"
+	"math"
 	"testing"
 )
 
@@ -204,5 +205,34 @@ func TestDecodeStream_PredictorEmptyData(t *testing.T) {
 		if err != nil || len(got) != 0 {
 			t.Errorf("Predictor %d: DecodeStream = %v, %v; want empty, nil", pred, got, err)
 		}
+	}
+}
+
+// TestParmInt_ClampsBeforeNarrowing pins that /DecodeParms integers are bounded
+// in int64 before conversion to int, so the result does not depend on int's
+// width: on a 32-bit int, Columns 2^32+1 used to wrap to 1 and pass the
+// predictor bounds.
+func TestParmInt_ClampsBeforeNarrowing(t *testing.T) {
+	tests := []struct {
+		name string
+		v    Object
+		want int
+	}{
+		{"in range", Integer(7), 7},
+		{"2^32+1", Integer(1<<32 + 1), math.MaxInt32},
+		{"MaxInt64", Integer(math.MaxInt64), math.MaxInt32},
+		{"-(2^32)-1", Integer(-(1 << 32) - 1), math.MinInt32},
+		{"absent", nil, 5},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := Dict{}
+			if tc.v != nil {
+				d["Columns"] = tc.v
+			}
+			if got := parmInt(d, "Columns", 5); got != tc.want {
+				t.Errorf("parmInt = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

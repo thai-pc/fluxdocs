@@ -292,6 +292,113 @@ func TestMatrixInvert_SingularGuard(t *testing.T) {
 	}
 }
 
+// TestMatrixInvert_HugeScale pins that a transform whose determinant overflows
+// float64 still inverts: 1e200 × 1e200 is +Inf, which used to collapse the
+// inverse to zeros. A non-finite transform has no inverse.
+func TestMatrixInvert_HugeScale(t *testing.T) {
+	for i, m := range []matrix{
+		{1e200, 0, 0, 1e200, 0, 0},
+		{0.5e200, 0, 0, -0.5e200, -0.75e200, 0.75e200},
+		{1e300, 1e299, -1e299, 1e300, 1e300, -1e300},
+	} {
+		inv, ok := m.invert()
+		if !ok {
+			t.Fatalf("case %d: invert reported singular for a non-degenerate matrix", i)
+		}
+		// Map two points through m then inv; both must come back.
+		for _, p := range [][2]float64{{0.25, 0.75}, {1, 0}} {
+			x, y := inv.apply(m.apply(p[0], p[1]))
+			if math.Abs(x-p[0]) > 1e-9 || math.Abs(y-p[1]) > 1e-9 {
+				t.Errorf("case %d: inv(m(%v)) = (%g, %g), want the point back", i, p, x, y)
+			}
+		}
+	}
+	for i, m := range []matrix{
+		{math.Inf(1), 0, 0, 1, 0, 0},
+		{math.NaN(), 0, 0, 1, 0, 0},
+	} {
+		if _, ok := m.invert(); ok {
+			t.Errorf("non-finite case %d: invert ok=true, want false", i)
+		}
+	}
+}
+
+// TestMatrixInvert_FiniteDeterminantMatchesPlainFormula pins that a transform
+// with a finite determinant inverts exactly as the plain adjugate formula did,
+// bit-for-bit: nearest-neighbour sampling flips a pixel on a last-ulp change, so
+// any rounding difference shows up in real renders.
+func TestMatrixInvert_FiniteDeterminantMatchesPlainFormula(t *testing.T) {
+	plain := func(m matrix) matrix {
+		det := m[0]*m[3] - m[1]*m[2]
+		ia, ib, ic, id := m[3]/det, -m[1]/det, -m[2]/det, m[0]/det
+		return matrix{ia, ib, ic, id, -(m[4]*ia + m[5]*ic), -(m[4]*ib + m[5]*id)}
+	}
+	for i, m := range []matrix{
+		{2, 0, 0, 3, 5, 7},
+		{1, 0, 0, -1, 0, 100},
+		{0.5, 0.2, -0.3, 0.9, 10, -4},
+		{50, 0, 0, -50, 0, 100},
+		{1.0 / 3, 0, 0, -1.0 / 7, 0.1, 1},                          // image sample->device at odd sizes
+		{208.33333333333334, 0, 0, 208.33333333333334, 37.5, 12.5}, // 150 DPI scale
+		{0.7071067811865476, 0.7071067811865475, -0.7071067811865475, 0.7071067811865476, 3, 9},
+		{1e150, 0, 0, 1e150, -3e149, 2e149}, // large but det (1e300) still finite
+	} {
+		got, ok := m.invert()
+		if !ok {
+			t.Fatalf("case %d: invert reported singular", i)
+		}
+		want := plain(m)
+		for k := range got {
+			if math.Float64bits(got[k]) != math.Float64bits(want[k]) {
+				t.Errorf("case %d: inv[%d] = %v, want %v (bit-for-bit)", i, k, got[k], want[k])
+			}
+		}
+	}
+}
+
+// TestDrawImage_HugeScaleSamplesCorrectly places a 2×2 image scaled by 1e200 so
+// the 4×4 canvas sees only a sliver inside sample (1,1), which is black; the
+// others are white. With the overflowed inverse every pixel sampled (0,0) and
+// drew white.
+func TestDrawImage_HugeScaleSamplesCorrectly(t *testing.T) {
+	white, black := color.RGBA{0xff, 0xff, 0xff, 0xff}, color.RGBA{0, 0, 0, 0xff}
+	img := &decodedImage{w: 2, h: 2, pix: []color.RGBA{white, white, white, black}}
+	// Unit-square (u, v) lands on the canvas at u = 0.75, v = 0.25: column 1,
+	// and row 1 (row 0 is the top, v = 1).
+	ctm := matrix{1e200, 0, 0, 1e200, -0.75e200, -0.25e200}
+	rs := newRaster(4, 4)
+	drawImage(rs, ctm, img)
+	for i := 0; i < len(rs.img.Pix); i += 4 {
+		if rs.img.Pix[i] != 0 {
+			t.Fatalf("pixel %d = %v, want black (sample (1,1))", i/4, rs.img.Pix[i:i+4])
+		}
+	}
+}
+
+// TestImageInt_ClampsIntegerBeforeNarrowing pins that an Integer image value is
+// bounded in int64 before conversion to int, like a Real, so a /Width of 2^32+1
+// cannot wrap to 1 on a 32-bit int and slip past the size checks.
+func TestImageInt_ClampsIntegerBeforeNarrowing(t *testing.T) {
+	tests := []struct {
+		name string
+		v    parse.Object
+		want int
+	}{
+		{"in range", parse.Integer(640), 640},
+		{"2^32+1", parse.Integer(1<<32 + 1), math.MaxInt32},
+		{"MaxInt64", parse.Integer(math.MaxInt64), math.MaxInt32},
+		{"-(2^32)-1", parse.Integer(-(1 << 32) - 1), math.MinInt32},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := imageInt(nil, parse.Dict{"Width": tc.v}, "Width", "W")
+			if !ok || got != tc.want {
+				t.Errorf("imageInt = (%d, %v), want (%d, true)", got, ok, tc.want)
+			}
+		})
+	}
+}
+
 // --- unit: imageFilters normalization ---
 
 func TestImageFilters_Normalization(t *testing.T) {

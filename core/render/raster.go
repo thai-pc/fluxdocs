@@ -34,22 +34,49 @@ func (m matrix) apply(x, y float64) (float64, float64) {
 
 // invert returns the inverse of the affine transform m. ok is false when the
 // determinant is near zero (a degenerate/singular transform, e.g. a zero-area
-// image placement), so callers can skip rather than divide by ~0.
+// image placement) or the transform or its inverse is not finite, so callers
+// can skip rather than divide by ~0 or sample with a meaningless inverse.
+//
+// Whenever the determinant is finite this is the plain adjugate formula,
+// bit-for-bit, so ordinary renders are unchanged. Only when it overflows (a
+// placement scaled by 1e200 has a determinant of 1e400 = ±Inf, which collapsed
+// the inverse to zeros, so every pixel sampled the image's corner) is the 2×2
+// part divided by its largest magnitude k first and the inverse divided by k
+// afterwards (inv(M) = inv(M/k)/k). The singularity threshold applies to the
+// true determinant either way.
 func (m matrix) invert() (matrix, bool) {
-	det := m[0]*m[3] - m[1]*m[2]
-	if math.Abs(det) < 1e-12 {
+	if det := m[0]*m[3] - m[1]*m[2]; !math.IsInf(det, 0) && !math.IsNaN(det) {
+		if math.Abs(det) < 1e-12 {
+			return matrix{}, false
+		}
+		ia, ib, ic, id := m[3]/det, -m[1]/det, -m[2]/det, m[0]/det
+		return finiteInverse(matrix{ia, ib, ic, id, -(m[4]*ia + m[5]*ic), -(m[4]*ib + m[5]*id)})
+	}
+
+	k := math.Max(math.Max(math.Abs(m[0]), math.Abs(m[1])), math.Max(math.Abs(m[2]), math.Abs(m[3])))
+	if k == 0 || math.IsInf(k, 0) || math.IsNaN(k) {
 		return matrix{}, false
 	}
-	ia := m[3] / det
-	ib := -m[1] / det
-	ic := -m[2] / det
-	id := m[0] / det
-	return matrix{
-		ia, ib,
-		ic, id,
-		-(m[4]*ia + m[5]*ic),
-		-(m[4]*ib + m[5]*id),
-	}, true
+	a, b, c, d := m[0]/k, m[1]/k, m[2]/k, m[3]/k
+	det := a*d - b*c // determinant of m/k; m's is det·k², which overflowed
+	if math.Abs(det)*k*k < 1e-12 {
+		return matrix{}, false
+	}
+	ia := d / det / k
+	ib := -b / det / k
+	ic := -c / det / k
+	id := a / det / k
+	return finiteInverse(matrix{ia, ib, ic, id, -(m[4]*ia + m[5]*ic), -(m[4]*ib + m[5]*id)})
+}
+
+// finiteInverse returns inv, true when every entry is finite, else ok=false.
+func finiteInverse(inv matrix) (matrix, bool) {
+	for _, v := range inv {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return matrix{}, false
+		}
+	}
+	return inv, true
 }
 
 // scaleFactor is the average axis scale of m, used to turn a user-space line
