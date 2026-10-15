@@ -9,9 +9,15 @@ import (
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
-// maxImageBytes bounds the decoded raw-sample buffer of a single image, a
-// backstop to the maxCanvasPixels area check (SECURITY.md §2–3). parse.DecodeStream
+// maxImageBytes bounds the decoded raw-sample buffer of a single image, and the
+// estimated working set of the JPEG decoder (jpegDecodeCost), a backstop to the
+// maxCanvasPixels area check (SECURITY.md §2–3). parse.DecodeStream
 // independently caps Flate output; this pre-check avoids the work up front.
+// 256 MiB matches that Flate cap and the RGBA grid of an image at the pixel cap
+// (64 Mi px × 4 bytes), so no decoder costs more than the largest image the
+// renderer already accepts, while every baseline YCbCr or grayscale JPEG
+// within the pixel cap still decodes (≤ 3 bytes per pixel). RenderAllPages runs
+// up to NumCPU decodes at once, so the bound is per image, not per process.
 const maxImageBytes = 256 << 20
 
 // decodedImage is an image XObject after decoding: a row-major RGBA grid with
@@ -144,6 +150,26 @@ func decodeJPEG(st *parse.Stream) (*decodedImage, bool) {
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > maxCanvasPixels {
 		return nil, false
 	}
+	// The pixel cap alone is not enough: the decoder's working set grows with
+	// the component count and, for a progressive frame, with a coefficient
+	// buffer per component, so a 36-byte progressive CMYK header at 8192×8192
+	// cost over 1 GiB. Budget bytes, not pixels.
+	var nComp int
+	switch cfg.ColorModel {
+	case color.GrayModel:
+		nComp = 1
+	case color.YCbCrModel:
+		nComp = 3
+	case color.CMYKModel:
+		nComp = 4
+	default:
+		return nil, false // not a component count image/jpeg decodes
+	}
+	// Peak working set is this estimate plus the 4·W·H RGBA copy made below
+	// (bounded separately by the pixel cap), while the decoded image is live.
+	if jpegDecodeCost(cfg.Width, cfg.Height, nComp, jpegProgressive(st.Raw)) > maxImageBytes {
+		return nil, false
+	}
 	img, err := jpeg.Decode(bytes.NewReader(st.Raw))
 	if err != nil {
 		return nil, false
@@ -161,6 +187,65 @@ func decodeJPEG(st *parse.Stream) (*decodedImage, bool) {
 		}
 	}
 	return &decodedImage{w: w, h: h, pix: pix}, true
+}
+
+// jpegDecodeCost estimates, from the frame header alone, the bytes image/jpeg
+// allocates to decode a w×h frame of nComp components: one byte per sample for
+// each component plane (chroma planes may be subsampled, so this over-counts);
+// for a progressive frame, a 64×int32 coefficient block per 8×8 block of every
+// component, kept across scans (4 bytes per sample); and for CMYK, the 4-byte
+// interleaved image.CMYK built from the planes. Not counted: the 4-byte RGBA
+// copy of a rare untransformed (Adobe RGB) 3-component frame, which at most
+// raises a baseline frame's 3 bytes per pixel to 7. Sides are padded by 31
+// pixels, the most a 4×4-sampled MCU (32 pixels) rounds up. With sides ≤ 65535
+// and at most 24 bytes per pixel, the product fits an int64.
+func jpegDecodeCost(w, h, nComp int, progressive bool) int64 {
+	perPixel := int64(nComp)
+	if progressive {
+		perPixel += 4 * int64(nComp)
+	}
+	if nComp == 4 {
+		perPixel += 4
+	}
+	return (int64(w) + 31) * (int64(h) + 31) * perPixel
+}
+
+// jpegProgressive reports whether a JPEG's frame header is SOF2 (progressive
+// DCT, ITU T.81 §B.2.2). It walks the marker segments the way image/jpeg does —
+// skipping extraneous bytes, fill bytes (0xFF) and standalone markers, and
+// jumping over each segment by its length — and stops at the first SOFn, so a
+// marker-like byte pair inside another segment's payload is never mistaken for
+// a frame header. Input it cannot classify (no SOF before SOS/EOI or the end)
+// reports true, the costlier mode.
+func jpegProgressive(raw []byte) bool {
+	i := 2 // past SOI; DecodeConfig has already checked it
+	for i+1 < len(raw) {
+		if raw[i] != 0xFF {
+			i++ // extraneous data between segments: image/jpeg ignores it
+			continue
+		}
+		m := raw[i+1]
+		i += 2
+		for m == 0xFF && i < len(raw) { // fill bytes before a marker (§B.1.1.2)
+			m = raw[i]
+			i++
+		}
+		switch {
+		case m == 0x00, m >= 0xD0 && m <= 0xD7: // stuffed 0xFF / RSTn: no length
+			continue
+		case m == 0xC2:
+			return true
+		case m == 0xC0, m == 0xC1:
+			return false
+		case m == 0xD9, m == 0xDA: // EOI or SOS before any frame header
+			return true
+		}
+		if i+1 >= len(raw) {
+			break
+		}
+		i += int(raw[i])<<8 | int(raw[i+1]) // the length counts its own two bytes
+	}
+	return true
 }
 
 // decodeRawImage slices Flate-inflated (or unfiltered) 8-bit samples into an

@@ -480,3 +480,123 @@ func TestDecodeJPEG_HeaderSizeCheckedBeforeDecode(t *testing.T) {
 		t.Errorf("decodeJPEG allocated %d bytes for a rejected header, want < 16 MiB", got)
 	}
 }
+
+// jpegHeader returns a minimal JPEG — SOI, a SOFn frame header declaring a w×h
+// frame of nComp components at 1×1 sampling, and an SOS header — with no tables
+// or scan data. sof is 0xC0 (baseline) or 0xC2 (progressive); prefix is spliced
+// between SOI and the SOF (extra segments, fill bytes, junk). DecodeConfig
+// accepts it; a full decode allocates the frame, and for a progressive frame the
+// per-component coefficient buffers, at the first SOS before it fails on the
+// missing data.
+func jpegHeader(sof byte, w, h, nComp int, prefix ...byte) []byte {
+	b := []byte{0xFF, 0xD8}
+	b = append(b, prefix...)
+	b = append(b, 0xFF, sof, 0, byte(8+3*nComp), 8, byte(h>>8), byte(h), byte(w>>8), byte(w), byte(nComp))
+	for i := 1; i <= nComp; i++ {
+		b = append(b, byte(i), 0x11, 0)
+	}
+	b = append(b, 0xFF, 0xDA, 0, byte(6+2*nComp), byte(nComp))
+	for i := 1; i <= nComp; i++ {
+		b = append(b, byte(i), 0)
+	}
+	return append(b, 0, 0, 0)
+}
+
+// TestDecodeJPEG_DecoderBytesCheckedBeforeDecode pins that decodeJPEG budgets
+// the decoder's allocations, not just the pixel count. A 36-byte progressive
+// 4-component 8192×8192 header passed the pixel cap, but jpeg.Decode allocated
+// the frame plus 256 bytes of coefficients per 8×8 block of every component
+// (over 1 GiB) before failing — fatal when NumCPU pages do it at once. Each
+// header must be rejected having allocated almost nothing.
+func TestDecodeJPEG_DecoderBytesCheckedBeforeDecode(t *testing.T) {
+	app1 := []byte{0xFF, 0xE1, 0x00, 0x06, 0xFF, 0xC0, 0x00, 0x00} // APP1 whose payload looks like SOF0
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{"progressive CMYK 8192x8192", jpegHeader(0xC2, 8192, 8192, 4)},
+		{"progressive YCbCr 8192x8192", jpegHeader(0xC2, 8192, 8192, 3)},
+		{"progressive gray 8192x8192", jpegHeader(0xC2, 8192, 8192, 1)},
+		{"baseline CMYK 8192x8192", jpegHeader(0xC0, 8192, 8192, 4)},
+		{"progressive behind a fake SOF0 in APP1", jpegHeader(0xC2, 8192, 8192, 3, app1...)},
+		{"progressive behind fill bytes and junk", jpegHeader(0xC2, 8192, 8192, 3, 0x00, 0x13, 0xFF, 0xFF)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := jpeg.DecodeConfig(bytes.NewReader(tc.raw)); err != nil {
+				t.Fatalf("test header rejected by DecodeConfig: %v", err)
+			}
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			_, ok := decodeJPEG(&parse.Stream{Raw: tc.raw})
+			runtime.ReadMemStats(&after)
+			if ok {
+				t.Fatal("decodeJPEG accepted a header-only frame")
+			}
+			if got := after.TotalAlloc - before.TotalAlloc; got > 16<<20 {
+				t.Errorf("decodeJPEG allocated %d bytes for a rejected header, want < 16 MiB", got)
+			}
+		})
+	}
+}
+
+// TestJPEGDecodeCost pins the budget's arithmetic and that it keeps ordinary
+// photos decodable: baseline frames up to the pixel cap, and a 12 MP
+// progressive photo, stay within maxImageBytes.
+func TestJPEGDecodeCost(t *testing.T) {
+	tests := []struct {
+		name        string
+		w, h, nComp int
+		progressive bool
+		wantOK      bool
+	}{
+		{"baseline YCbCr at the pixel cap", 8192, 8192, 3, false, true},
+		{"baseline gray at the pixel cap", 8192, 8192, 1, false, true},
+		{"baseline YCbCr 24 MP", 6000, 4000, 3, false, true},
+		{"progressive YCbCr 12 MP", 4000, 3000, 3, true, true},
+		{"baseline CMYK 24 MP", 6000, 4000, 4, false, true},
+		{"progressive YCbCr 24 MP", 6000, 4000, 3, true, false},
+		{"progressive CMYK 8192x8192", 8192, 8192, 4, true, false},
+		{"baseline CMYK 8192x8192", 8192, 8192, 4, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cost := jpegDecodeCost(tc.w, tc.h, tc.nComp, tc.progressive)
+			if ok := cost <= maxImageBytes; ok != tc.wantOK {
+				t.Errorf("jpegDecodeCost = %d (budget %d), within budget = %v, want %v", cost, maxImageBytes, ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestJPEGProgressive pins the marker scan: SOF2 is found only as a real
+// segment marker, so a look-alike inside another segment's payload neither hides
+// nor fakes it, and fill bytes / extraneous data are skipped as image/jpeg
+// skips them.
+func TestJPEGProgressive(t *testing.T) {
+	var enc bytes.Buffer
+	if err := jpeg.Encode(&enc, image.NewRGBA(image.Rect(0, 0, 16, 16)), nil); err != nil {
+		t.Fatal(err)
+	}
+	fakeSOF2 := []byte{0xFF, 0xE1, 0x00, 0x06, 0xFF, 0xC2, 0x00, 0x00} // APP1 payload looks like SOF2
+	tests := []struct {
+		name string
+		raw  []byte
+		want bool
+	}{
+		{"encoder output (baseline)", enc.Bytes(), false},
+		{"SOF0", jpegHeader(0xC0, 8, 8, 1), false},
+		{"SOF2", jpegHeader(0xC2, 8, 8, 1), true},
+		{"SOF0 behind a fake SOF2 in APP1", jpegHeader(0xC0, 8, 8, 1, fakeSOF2...), false},
+		{"SOF2 behind fill bytes", jpegHeader(0xC2, 8, 8, 1, 0xFF, 0xFF), true},
+		{"no SOF at all", []byte{0xFF, 0xD8, 0xFF, 0xD9}, true}, // undecodable: assume the costlier mode
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jpegProgressive(tc.raw); got != tc.want {
+				t.Errorf("jpegProgressive = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
