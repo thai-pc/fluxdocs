@@ -12,6 +12,8 @@ package fuzz
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/thai-pc/fluxdocs/core"
@@ -25,6 +27,30 @@ const minimalPDF = "%PDF-1.7\n" +
 	"4 0 obj\n<< /Length 40 >>\nstream\nBT /F1 12 Tf 20 100 Td (Seed) Tj ET\nendstream\nendobj\n" +
 	"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n" +
 	"trailer\n<< /Size 6 /Root 1 0 R >>\n"
+
+// mediaBoxPDF builds a well-formed one-page PDF (classic xref, so it opens and
+// reaches the rasterizer) whose page tree carries the given /MediaBox array.
+func mediaBoxPDF(mediaBox string) []byte {
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox " + mediaBox + " >>",
+		"<< /Type /Page /Parent 2 0 R >>",
+	}
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	off := make([]int, len(objs))
+	for i, o := range objs {
+		off[i] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	x := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
+	for _, o := range off {
+		fmt.Fprintf(&b, "%010d 00000 n \n", o)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, x)
+	return b.Bytes()
+}
 
 // seeds returns a spread of inputs: valid, empty, header-only, and various
 // truncations/corruptions that should exercise the lenient recovery paths.
@@ -40,6 +66,49 @@ func seeds() [][]byte {
 		bytes.ReplaceAll(full, []byte("obj"), []byte("")),                  // remove object markers
 		bytes.Repeat([]byte("<< /Kids [2 0 R] >>"), 64),                    // nested-ish junk
 		[]byte("2 0 obj << /Type /Pages /Kids [2 0 R] /Count 1 >> endobj"), // cyclic fragment
+		// Hostile MediaBoxes: at the DPI 36 used by exercise, 2^33 pt is a
+		// 2^32 x 2^32 canvas whose int64 area wraps to 0 and slipped past the
+		// cap, so the rasterizer panicked; 1e18 pt overflows the float→int
+		// conversion. Both must return the canvas-too-large error.
+		mediaBoxPDF("[0 0 8589934592 8589934592]"),
+		mediaBoxPDF("[0 0 1000000000000000000 1000000000000000000]"),
+		// Same overflow reached through corner order/sign (Width/Height take
+		// the absolute extent), a one-sided sliver, and lexer edge cases: an
+		// int64-overflowing integer (lexed leniently as 0) and an over-long
+		// real.
+		mediaBoxPDF("[8589934592 8589934592 0 0]"),
+		mediaBoxPDF("[-8589934592 -8589934592 0 0]"),
+		mediaBoxPDF("[0 0 1 1000000000000000000]"),
+		mediaBoxPDF("[0 0 99999999999999999999 10]"),
+		mediaBoxPDF("[0 0 " + strings.Repeat("9", 400) + ".0 10]"),
+	}
+}
+
+// hostileMediaBoxes are the seeds above that open as one-page documents whose
+// canvas must be rejected by the renderer's cap at the DPI exercise uses.
+var hostileMediaBoxes = []string{
+	"[0 0 8589934592 8589934592]",
+	"[0 0 1000000000000000000 1000000000000000000]",
+	"[8589934592 8589934592 0 0]",
+	"[-8589934592 -8589934592 0 0]",
+	"[0 0 1 1000000000000000000]",
+}
+
+// TestHostileMediaBoxSeedsReturnError makes the seeds' contract explicit:
+// exercise only proves "no panic", but each hostile MediaBox must also come back
+// as an error from RenderPage, never as an image.
+func TestHostileMediaBoxSeedsReturnError(t *testing.T) {
+	for _, mb := range hostileMediaBoxes {
+		t.Run(mb, func(t *testing.T) {
+			doc, err := core.OpenBytes(mediaBoxPDF(mb))
+			if err != nil {
+				t.Fatalf("OpenBytes: %v (seed must reach the renderer)", err)
+			}
+			img, err := doc.RenderPage(0, core.RenderOptions{DPI: 36, Format: "png"})
+			if err == nil {
+				t.Fatalf("RenderPage returned %d bytes, want canvas-too-large error", len(img))
+			}
+		})
 	}
 }
 

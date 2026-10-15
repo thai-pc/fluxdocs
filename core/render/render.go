@@ -26,7 +26,7 @@ import (
 var ErrUnsupportedFormat = errors.New("render: unsupported format")
 
 // maxCanvasPixels bounds the output bitmap area to guard against a hostile
-// MediaBox or DPI blowing up memory (SECURITY.md §3). 64 megapixels covers an
+// MediaBox or DPI blowing up memory (SECURITY.md §2). 64 megapixels covers an
 // A0 page at 300 DPI with margin.
 const maxCanvasPixels = 64 << 20
 
@@ -114,6 +114,15 @@ func deviceMatrix(mb parse.Rectangle, rotate int, s float64) (matrix, int, int, 
 		pxWf, pxHf = w*s, h*s
 	}
 
+	// Bound each side in float64 before converting: a hostile MediaBox (e.g.
+	// 1e18 pt) makes the float→int conversion implementation-defined (it
+	// saturates under js/wasm) and the int64 area product below overflow. NaN
+	// fails the `>= 0` test, +Inf the upper bound; an underflow to 0 is kept
+	// and clamped to 1px below. With both sides ≤ maxCanvasPixels the int64
+	// product cannot overflow.
+	if !(pxWf >= 0 && pxHf >= 0) || pxWf > maxCanvasPixels || pxHf > maxCanvasPixels {
+		return matrix{}, 0, 0, fmt.Errorf("render: canvas %gx%g exceeds %d pixels", pxWf, pxHf, maxCanvasPixels)
+	}
 	pxW := int(math.Ceil(pxWf))
 	pxH := int(math.Ceil(pxHf))
 	if pxW < 1 {
