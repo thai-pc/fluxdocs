@@ -22,7 +22,8 @@ import (
 // This adds the structural PDF/A markers only; it does not embed fonts or
 // flatten transparency (see the docops/pdfa scope note). Returns ErrInvalidPDF
 // if the document was not opened from bytes.
-func (d *Document) ConvertToPDFA() (*Document, error) {
+func (d *Document) ConvertToPDFA() (_ *Document, err error) {
+	defer guard("ConvertToPDFA", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
 	}
@@ -58,7 +59,8 @@ func (d *Document) ConvertToPDFA() (*Document, error) {
 // not a certified validation.
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes.
-func (d *Document) ValidatePDFA() (*PDFAReport, error) {
+func (d *Document) ValidatePDFA() (_ *PDFAReport, err error) {
+	defer guard("ValidatePDFA", -1, &err)
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
 	}

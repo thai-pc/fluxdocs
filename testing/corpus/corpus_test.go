@@ -7,6 +7,7 @@ package corpus
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,7 +93,17 @@ func TestCorpusMalformed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The API recovers a panic into ErrInternal; that error is the panic
+			// this test exists to catch, never a clean rejection.
+			noPanic := func(err error) {
+				t.Helper()
+				var ie *core.InternalError
+				if errors.As(err, &ie) {
+					t.Fatalf("recovered panic: %v\n%s", err, ie.Stack)
+				}
+			}
 			doc, err := core.OpenBytes(data)
+			noPanic(err)
 			if err != nil {
 				return // rejected cleanly — acceptable
 			}
@@ -100,10 +111,13 @@ func TestCorpusMalformed(t *testing.T) {
 			n := doc.GetPageCount()
 			for i := 0; i < n && i < 8; i++ {
 				doc.GetPage(i)
-				doc.ExtractTextByPage(i, core.ExtractOptions{})
-				doc.RenderPage(i, core.RenderOptions{DPI: 36, Format: "png"})
+				_, err = doc.ExtractTextByPage(i, core.ExtractOptions{})
+				noPanic(err)
+				_, err = doc.RenderPage(i, core.RenderOptions{DPI: 36, Format: "png"})
+				noPanic(err)
 			}
-			doc.ExtractText(core.ExtractOptions{})
+			_, err = doc.ExtractText(core.ExtractOptions{})
+			noPanic(err)
 		})
 	}
 }

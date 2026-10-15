@@ -34,7 +34,9 @@ func PIIKindsFromStrings(names []string) []PIIKind { return pii.KindsFromStrings
 // were marked per kind. Nothing is removed until RedactAndFlatten. The document
 // text never leaves the process.
 //
-// Returns ErrInvalidPDF if the document was not opened from bytes.
+// Returns ErrInvalidPDF if the document was not opened from bytes, or the first
+// marking failure; in that case pages already marked stay marked and the plan
+// is flagged incomplete, so RedactAndFlatten refuses to run (fail closed).
 func (d *Document) AutoRedactPII(kinds ...PIIKind) (map[PIIKind]int, error) {
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
@@ -51,6 +53,9 @@ func (d *Document) AutoRedactPII(kinds ...PIIKind) (map[PIIKind]int, error) {
 		for p := range d.Pages {
 			rects, err := d.RedactText(p, pattern)
 			if err != nil {
+				// RedactText already flags its own failures; flag here too so
+				// a partial pass can never be flattened whatever the cause.
+				d.failRedactionPlan(err)
 				return nil, err
 			}
 			counts[k] += len(rects)

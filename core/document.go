@@ -54,15 +54,33 @@ func (d *Document) GetPage(index int) (*Page, error) {
 // overlay on top of the content (§9); set opts.SkipAnnotations to render the
 // bare page. The source PDF is never modified.
 //
-// Returns the encoded image bytes, ErrPageNotFound if index is out of range, or
-// a render error.
+// Returns the encoded image bytes, ErrPageNotFound if index is out of range, a
+// render error, or ErrInternal (an *InternalError carrying the page index) if
+// rendering panicked. The OnPageRendered callback runs after rendering, outside
+// that recovery: a panic in the caller's callback propagates to the caller.
 func (d *Document) RenderPage(index int, opts RenderOptions) ([]byte, error) {
+	img, err := d.renderPage(index, opts)
+	if err != nil {
+		return nil, err
+	}
+	if d.onPageRendered != nil {
+		d.onPageRendered(index, img)
+	}
+	return img, nil
+}
+
+// renderPage is RenderPage without the OnPageRendered callback: the guarded
+// render of one page, so a recovered panic is attributed to FluxDocs only when
+// FluxDocs code raised it.
+func (d *Document) renderPage(index int, opts RenderOptions) (_ []byte, err error) {
+	defer guard("RenderPage", index, &err)
 	if index < 0 || index >= len(d.Pages) {
 		return nil, ErrPageNotFound
 	}
 	if d.resolver == nil || index >= len(d.pageInfos) {
 		return nil, errNotImplemented
 	}
+	injectTestPanic("RenderPage", index)
 	var overlay []render.Annotation
 	if !opts.SkipAnnotations {
 		if anns, err := d.GetAnnotations(d.Pages[index].ID); err == nil {
@@ -77,9 +95,6 @@ func (d *Document) RenderPage(index int, opts RenderOptions) ([]byte, error) {
 	})
 	if err != nil {
 		return nil, err
-	}
-	if d.onPageRendered != nil {
-		d.onPageRendered(index, img)
 	}
 	return img, nil
 }
@@ -123,13 +138,23 @@ func renderAnnotations(anns []Annotation) []render.Annotation {
 // runtime.NumCPU() (§13.3). Each page is independent — a natural advantage of
 // Go over single-threaded JS.
 //
-// Returns one buffer per page in order, or the first error encountered.
+// Returns one buffer per page in order, or the first error encountered in page
+// order. A page whose rendering panics fails with ErrInternal (an
+// *InternalError carrying its index) like any other page error; the other
+// workers and the process are unaffected. OnPageRendered runs on the worker
+// goroutines; if it panics, the first such panic is re-raised on the calling
+// goroutine once every worker has finished, so a caller bug surfaces where the
+// caller can recover it instead of killing the process from a worker.
 func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 	results := make([][]byte, d.PageCount)
 	errs := make([]error, d.PageCount)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, runtime.NumCPU())
+	var (
+		cbOnce  sync.Once
+		cbPanic any // first OnPageRendered panic; read only after wg.Wait
+	)
 
 	for i := 0; i < d.PageCount; i++ {
 		wg.Add(1)
@@ -137,13 +162,30 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			// Runs first (defers are LIFO), so the page's error is recorded
+			// before the slot is released and Wait returns.
+			defer guard("RenderAllPages", idx, &errs[idx])
+			injectTestPanic("RenderAllPages", idx)
 
-			img, err := d.RenderPage(idx, opts)
+			img, err := d.renderPage(idx, opts)
 			results[idx] = img
 			errs[idx] = err
+			if err == nil && d.onPageRendered != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cbOnce.Do(func() { cbPanic = r })
+						}
+					}()
+					d.onPageRendered(idx, img)
+				}()
+			}
 		}(i)
 	}
 	wg.Wait()
+	if cbPanic != nil {
+		panic(cbPanic) // the caller's callback panicked: re-raise on its goroutine
+	}
 
 	for _, err := range errs {
 		if err != nil {
@@ -167,7 +209,8 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 // Returns ErrInvalidPDF if either document was not opened from bytes/a file
 // (a resolver-less, test-constructed Document cannot be serialized), or if the
 // serialize/re-open round-trip fails.
-func (d *Document) Merge(other *Document) (*Document, error) {
+func (d *Document) Merge(other *Document) (_ *Document, err error) {
+	defer guard("Merge", -1, &err)
 	if other == nil || d.resolver == nil || other.resolver == nil {
 		return nil, ErrInvalidPDF
 	}
@@ -196,7 +239,8 @@ func (d *Document) Merge(other *Document) (*Document, error) {
 // start < 0, end < start, or end >= PageCount returns ErrPageNotFound (a range
 // referencing a non-existent page). Returns ErrInvalidPDF if d was not opened
 // from bytes/a file, or if a build fails.
-func (d *Document) Split(pageRanges [][2]int) ([]*Document, error) {
+func (d *Document) Split(pageRanges [][2]int) (_ []*Document, err error) {
+	defer guard("Split", -1, &err)
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
 	}
@@ -258,7 +302,8 @@ func (d *Document) Save(path string) error {
 // Returns ErrInvalidPDF if the document was not opened from bytes/a file (a
 // resolver-less, test-constructed Document cannot be serialized), or the writer
 // error from w.
-func (d *Document) SaveTo(w io.Writer) error {
+func (d *Document) SaveTo(w io.Writer) (err error) {
+	defer guard("SaveTo", -1, &err)
 	if d.resolver == nil {
 		return ErrInvalidPDF
 	}
@@ -369,7 +414,8 @@ func (d *Document) Close() error {
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes, or an error
 // if the certificate/key cannot be parsed or signing fails.
-func (d *Document) SignDocument(opts SignatureOptions) (*Document, error) {
+func (d *Document) SignDocument(opts SignatureOptions) (_ *Document, err error) {
+	defer guard("SignDocument", -1, &err)
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
 	}
@@ -411,13 +457,15 @@ func (d *Document) ExtractText(opts ExtractOptions) (string, error) {
 // ExtractTextByPage extracts the text of a single page in reading order.
 //
 // Returns ErrPageNotFound if pageIndex is out of range.
-func (d *Document) ExtractTextByPage(pageIndex int, opts ExtractOptions) (string, error) {
+func (d *Document) ExtractTextByPage(pageIndex int, opts ExtractOptions) (_ string, err error) {
+	defer guard("ExtractTextByPage", pageIndex, &err)
 	if pageIndex < 0 || pageIndex >= len(d.Pages) {
 		return "", ErrPageNotFound
 	}
 	if d.resolver == nil || pageIndex >= len(d.pageInfos) {
 		return "", errNotImplemented
 	}
+	injectTestPanic("ExtractTextByPage", pageIndex)
 	return extract.PageText(d.resolver, d.pageInfos[pageIndex], extract.Options{
 		PreserveLayout: opts.PreserveLayout,
 	})
@@ -432,7 +480,8 @@ func (d *Document) ExtractTextByPage(pageIndex int, opts ExtractOptions) (string
 //
 // Returns ErrPageNotFound if pageIndex is out of range, ErrInvalidPDF if the
 // document was not opened from bytes.
-func (d *Document) ExtractTables(pageIndex int) ([]Table, error) {
+func (d *Document) ExtractTables(pageIndex int) (_ []Table, err error) {
+	defer guard("ExtractTables", pageIndex, &err)
 	if pageIndex < 0 || pageIndex >= len(d.Pages) {
 		return nil, ErrPageNotFound
 	}

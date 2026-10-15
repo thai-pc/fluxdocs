@@ -2,6 +2,7 @@ package redaction
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -35,16 +36,20 @@ func FuzzRedact(f *testing.F) {
 		if err := doc.RedactArea(0, core.Rect{X: 90, Y: 692, Width: 160, Height: 24}); err != nil {
 			t.Fatalf("fixed RedactArea failed: %v", err)
 		}
-		// Fuzzed additions — errors are fine, panics are not.
-		_, _ = doc.RedactText(0, pattern)
+		// Fuzzed additions — errors are fine, panics are not. The API recovers
+		// a panic into ErrInternal, so that error counts as one.
+		_, err = doc.RedactText(0, pattern)
+		failOnInternal(t, err)
 		_ = doc.RedactArea(0, core.Rect{X: x, Y: y, Width: w, Height: h})
 
 		out, err := doc.RedactAndFlatten()
+		failOnInternal(t, err)
 		if err != nil {
 			return // a graceful failure is acceptable; a panic is not
 		}
 
 		text, err := out.ExtractText(core.ExtractOptions{})
+		failOnInternal(t, err)
 		if err != nil {
 			return
 		}
@@ -66,6 +71,18 @@ func FuzzRedact(f *testing.F) {
 			if bytes.Contains(buf.Bytes(), []byte("SECRET-1234")) {
 				t.Fatalf("LEAK: secret bytes remain after re-save (pattern=%q)", pattern)
 			}
+		} else {
+			failOnInternal(t, err)
 		}
 	})
+}
+
+// failOnInternal fails the test, with the recovered stack, when err is
+// ErrInternal: a panic recovered by the public API is still a redaction bug.
+func failOnInternal(t *testing.T, err error) {
+	t.Helper()
+	var ie *core.InternalError
+	if errors.As(err, &ie) {
+		t.Fatalf("recovered panic (a bug, not an input error): %v\n%s", err, ie.Stack)
+	}
 }

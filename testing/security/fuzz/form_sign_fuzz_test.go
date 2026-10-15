@@ -55,16 +55,18 @@ func FuzzFormFields(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, fieldBody string) {
 		doc, err := core.OpenBytes(formPDF(fieldBody))
+		failOnInternal(t, err)
 		if err != nil {
 			return
 		}
 		fields, err := doc.GetFormFields()
+		failOnInternal(t, err)
 		if err != nil {
 			return
 		}
 		// Filling each discovered field must also be panic-free.
 		for _, fld := range fields {
-			_ = doc.SetFormFieldValue(fld.Name, "fuzz")
+			failOnInternal(t, doc.SetFormFieldValue(fld.Name, "fuzz"))
 		}
 	})
 }
@@ -101,6 +103,7 @@ func FuzzSign(f *testing.F) {
 			t.Skip()
 		}
 		out, err := doc.SignDocument(core.SignatureOptions{CertPEM: certPEM, KeyPEM: keyPEM})
+		failOnInternal(t, err)
 		if err != nil {
 			return // garbage cert/key -> graceful error, never a panic
 		}

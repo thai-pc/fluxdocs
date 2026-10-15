@@ -20,7 +20,8 @@ const flattenFontName = "FdFF"
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes. A document
 // with no interactive form returns an empty slice.
-func (d *Document) GetFormFields() ([]FormField, error) {
+func (d *Document) GetFormFields() (_ []FormField, err error) {
+	defer guard("GetFormFields", -1, &err)
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
 	}
@@ -61,7 +62,8 @@ func (d *Document) GetFormFields() ([]FormField, error) {
 // Returns ErrInvalidPDF if the document was not opened from bytes,
 // ErrFormFieldNotFound if no field has that name, or ErrReadOnly if the field is
 // read-only or a signature field (which cannot be filled with a value).
-func (d *Document) SetFormFieldValue(name string, value string) error {
+func (d *Document) SetFormFieldValue(name string, value string) (err error) {
+	defer guard("SetFormFieldValue", -1, &err)
 	if d.resolver == nil {
 		return ErrInvalidPDF
 	}
@@ -105,7 +107,8 @@ func (d *Document) SetFormFieldValue(name string, value string) error {
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes, or a
 // build/re-open error.
-func (d *Document) FlattenForm() (*Document, error) {
+func (d *Document) FlattenForm() (_ *Document, err error) {
+	defer guard("FlattenForm", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
 	}

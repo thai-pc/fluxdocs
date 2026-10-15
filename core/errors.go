@@ -4,7 +4,11 @@
 // build tags.
 package core
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"runtime"
+)
 
 // Sentinel errors for common cases. Callers test them with errors.Is, e.g.:
 //
@@ -66,4 +70,54 @@ var (
 	// ErrFeatureRequiresCloud — a Cloud feature (AI extraction, document Q&A)
 	// was called without a configured Cloud backend.
 	ErrFeatureRequiresCloud = errors.New("fluxdocs: feature requires the Cloud tier")
+
+	// ErrInternal — FluxDocs recovered a recoverable panic while processing the
+	// document. It signals a FluxDocs bug, not a caller error: the input should
+	// have been rejected with a specific error such as ErrInvalidPDF. Only that
+	// one call fails; the process stays up. Fatal runtime errors (stack
+	// overflow, out of memory, concurrent map writes) cannot be recovered and
+	// still terminate the process. The concrete error is an
+	// *InternalError naming the operation (errors.As). Every entry point that
+	// parses, renders, extracts from, or rebuilds a document reports panics this
+	// way: OpenBytes/OpenDocument, RenderPage, RenderAllPages, the extraction,
+	// form, redaction, flatten, watermark, PDF/A, signing, and Merge/Split/Save
+	// operations.
+	ErrInternal = errors.New("fluxdocs: internal error")
 )
+
+// InternalError is returned by a public entry point that recovered a
+// recoverable panic from the parser, renderer, or another layer working on the
+// document (fatal runtime errors are not recoverable), so a hostile
+// file fails one call instead of crashing the process (SECURITY.md §2). It
+// matches ErrInternal with errors.Is.
+//
+// Error() names the operation and, when it is page-scoped, the page index, and
+// never includes document bytes: the panic value is shown only when it is a Go
+// runtime error (text the runtime generates — index, slice bounds, nil
+// dereference, makeslice); any other panic value is reported by its type alone.
+// Value and Stack are diagnostics for the caller to log deliberately; Value may
+// hold arbitrary data and Stack holds raw argument words. Only Error() is
+// filtered: formatting the struct with %#v (or %+v) still shows Value and
+// Stack.
+type InternalError struct {
+	Op    string // the public operation, e.g. "RenderPage"
+	Page  int    // 0-based page index, or -1 when the operation is not page-scoped
+	Value any    // the recovered panic value
+	Stack []byte // the panicking goroutine's stack (runtime/debug.Stack)
+}
+
+// Error returns "fluxdocs: internal error in <Op>[ (page N)]: <runtime error or
+// panic value type>".
+func (e *InternalError) Error() string {
+	msg := "fluxdocs: internal error in " + e.Op
+	if e.Page >= 0 {
+		msg += fmt.Sprintf(" (page %d)", e.Page)
+	}
+	if re, ok := e.Value.(runtime.Error); ok {
+		return msg + ": " + re.Error()
+	}
+	return msg + fmt.Sprintf(": panic value of type %T", e.Value)
+}
+
+// Unwrap returns ErrInternal, so errors.Is(err, ErrInternal) matches.
+func (e *InternalError) Unwrap() error { return ErrInternal }

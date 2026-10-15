@@ -27,6 +27,9 @@ and copyable. Many governments and organizations have leaked information this wa
   for display only — NOT the primary security mechanism.
 - `RedactAndFlatten()` is an **irreversible** operation — document this clearly
   in the API.
+- **Fail closed:** if a marking call (`RedactText`, `AutoRedactPII`) fails after
+  accepting its arguments, the plan is sticky-failed and `RedactAndFlatten()`
+  refuses to run, so a page is never saved without the regions asked for.
 
 **Test gate (non-negotiable):**
 - After any redaction, re-run `ExtractText()` and attempt copy-paste over the
@@ -52,6 +55,12 @@ Every PDF file is potentially hostile input. Mandatory defenses:
   stay within resource limits.
 - **Fuzzing:** seeds in `testing/security/fuzz/`. Run `go test -fuzz` for the
   parser/tokenizer in CI periodically.
+
+- **Recover-to-error is the last line of defense:** public entry points turn a
+  recoverable panic into `ErrInternal` (an `*InternalError` with `Op`, `Page`,
+  `Value`, `Stack`; its message never includes document bytes). It is still a
+  bug — fuzz targets fail on it — and fatal runtime errors (stack overflow, OOM)
+  cannot be recovered, so recursion and allocation must be bounded up front.
 
 Goal: a malicious file fails a single parse; it must NOT crash the process, OOM,
 or leak memory.

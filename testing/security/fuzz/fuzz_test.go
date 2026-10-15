@@ -263,6 +263,7 @@ func TestHostileMediaBoxSeedsReturnError(t *testing.T) {
 				t.Fatalf("OpenBytes: %v (seed must reach the renderer)", err)
 			}
 			img, err := doc.RenderPage(0, core.RenderOptions{DPI: 36, Format: "png"})
+			failOnInternal(t, err)
 			if err == nil {
 				t.Fatalf("RenderPage returned %d bytes, want canvas-too-large error", len(img))
 			}
@@ -309,16 +310,38 @@ func TestHostileHeaderSeedsReturnError(t *testing.T) {
 	}
 }
 
-// exercise runs the read-side pipeline on one input. It must never panic.
-func exercise(data []byte) {
+// failOnInternal fails the test, with the recovered stack, when err is
+// ErrInternal. The public API turns a panic into ErrInternal instead of
+// crashing, so to the harness that error IS the crash: recover-to-error must
+// never hide a parser/renderer panic from the fuzzer.
+func failOnInternal(t *testing.T, err error) {
+	t.Helper()
+	if errors.Is(err, core.ErrInternal) {
+		var stack []byte
+		var ie *core.InternalError
+		if errors.As(err, &ie) {
+			stack = ie.Stack
+		}
+		t.Fatalf("recovered panic (a bug, not an input error): %v\n%s", err, stack)
+	}
+}
+
+// exercise runs the read-side pipeline on one input. Each step may reject the
+// input with an error, but must never panic — including a panic recovered into
+// ErrInternal.
+func exercise(t *testing.T, data []byte) {
+	t.Helper()
 	doc, err := core.OpenBytes(data)
+	failOnInternal(t, err)
 	if err != nil {
 		return
 	}
 	_ = doc.GetPageCount()
 	if _, err := doc.GetPage(0); err == nil {
-		doc.ExtractTextByPage(0, core.ExtractOptions{})
-		doc.RenderPage(0, core.RenderOptions{DPI: 36, Format: "png"})
+		_, err = doc.ExtractTextByPage(0, core.ExtractOptions{})
+		failOnInternal(t, err)
+		_, err = doc.RenderPage(0, core.RenderOptions{DPI: 36, Format: "png"})
+		failOnInternal(t, err)
 	}
 }
 
@@ -329,7 +352,7 @@ func FuzzOpenBytes(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		exercise(data)
+		exercise(t, data)
 	})
 }
 
@@ -341,14 +364,16 @@ func FuzzOpenSaveReopen(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		doc, err := core.OpenBytes(data)
+		failOnInternal(t, err)
 		if err != nil {
 			return
 		}
 		var buf bytes.Buffer
 		if err := doc.SaveTo(&buf); err != nil {
+			failOnInternal(t, err)
 			return
 		}
 		// The re-opened document must also be safe to handle.
-		exercise(buf.Bytes())
+		exercise(t, buf.Bytes())
 	})
 }

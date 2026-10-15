@@ -37,9 +37,14 @@ func OpenDocument(path string) (*Document, error) {
 // OpenBytes parses an in-memory PDF. It is the WASM/client-friendly entry point
 // (no filesystem access), and OpenDocument delegates to it.
 //
-// Returns the opened *Document, ErrInvalidPDF on a structural parse failure, or
-// ErrEncryptedDocument if the file is encrypted.
-func OpenBytes(data []byte) (*Document, error) {
+// Returns the opened *Document, ErrInvalidPDF on a structural parse failure,
+// ErrEncryptedDocument if the file is encrypted, or ErrInternal (an
+// *InternalError) if parsing panicked — a FluxDocs bug, reported instead of
+// crashing the process.
+func OpenBytes(data []byte) (_ *Document, err error) {
+	defer guard("OpenBytes", -1, &err)
+	injectTestPanic("OpenBytes", -1)
+
 	if headerOffset(data) < 0 {
 		return nil, ErrInvalidPDF
 	}

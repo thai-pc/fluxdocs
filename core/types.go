@@ -57,6 +57,13 @@ type Document struct {
 	// RedactAndFlatten. Guarded by mu.
 	redactions map[int][]Rect
 
+	// redactErr, once set, marks the redaction plan as incomplete: a marking
+	// call (RedactText, AutoRedactPII) failed after its arguments were accepted,
+	// so regions the caller asked for may be missing. RedactAndFlatten refuses
+	// to run while it is set (fail closed, SECURITY.md §1). Sticky; guarded by
+	// mu.
+	redactErr error
+
 	// formValues holds pending AcroForm field fills (field name -> value) set via
 	// SetFormFieldValue and reflected by GetFormFields. Guarded by mu.
 	formValues map[string]string

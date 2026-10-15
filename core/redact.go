@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"regexp"
 
 	"github.com/thai-pc/fluxdocs/core/docops/redact"
@@ -19,8 +20,19 @@ import (
 // until RedactAndFlatten.
 //
 // Returns ErrPageNotFound if pageIndex is out of range, ErrInvalidPDF if the
-// document was not opened from bytes, or a regexp compile error.
-func (d *Document) RedactText(pageIndex int, pattern string) ([]Rect, error) {
+// document was not opened from bytes, or a regexp compile error — argument
+// errors that leave the plan untouched. Any later failure (reading the page,
+// or ErrInternal) also marks the plan incomplete, so RedactAndFlatten refuses
+// to run rather than save the page without the regions asked for.
+func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err error) {
+	accepted := false
+	// Deferred before guard so it runs after guard has turned a panic into err.
+	defer func() {
+		if err != nil && accepted {
+			d.failRedactionPlan(err)
+		}
+	}()
+	defer guard("RedactText", pageIndex, &err)
 	if pageIndex < 0 || pageIndex >= len(d.Pages) {
 		return nil, ErrPageNotFound
 	}
@@ -31,6 +43,8 @@ func (d *Document) RedactText(pageIndex int, pattern string) ([]Rect, error) {
 	if err != nil {
 		return nil, err
 	}
+	accepted = true
+	injectTestPanic("RedactText", pageIndex)
 	content, err := d.resolver.PageContent(d.pageInfos[pageIndex])
 	if err != nil {
 		return nil, err
@@ -42,9 +56,11 @@ func (d *Document) RedactText(pageIndex int, pattern string) ([]Rect, error) {
 		rects[i] = Rect{X: r.X, Y: r.Y, Width: r.Width, Height: r.Height}
 	}
 
-	d.mu.Lock()
-	d.addRedactionsLocked(pageIndex, rects)
-	d.mu.Unlock()
+	func() {
+		d.mu.Lock()
+		defer d.mu.Unlock() // released even on a panic, so failRedactionPlan can lock
+		d.addRedactionsLocked(pageIndex, rects)
+	}()
 	return rects, nil
 }
 
@@ -69,14 +85,23 @@ func (d *Document) RedactArea(pageIndex int, rect Rect) error {
 // layer (it is re-opened from the redacted bytes). This is IRREVERSIBLE: the
 // removed text does not exist in the output.
 //
-// Returns ErrInvalidPDF if the document was not opened from bytes, or a
+// Returns ErrInvalidPDF if the document was not opened from bytes, a
+// "redaction plan incomplete" error wrapping the first failure if any earlier
+// RedactText/AutoRedactPII call failed after accepting its arguments (the plan
+// may be missing regions; re-open the source and redact again), or a
 // build/re-open error. With no pending redactions it returns a faithful copy.
-func (d *Document) RedactAndFlatten() (*Document, error) {
+func (d *Document) RedactAndFlatten() (_ *Document, err error) {
+	defer guard("RedactAndFlatten", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
 	}
 
 	d.mu.Lock()
+	if d.redactErr != nil {
+		planErr := d.redactErr
+		d.mu.Unlock()
+		return nil, fmt.Errorf("redaction plan incomplete: %w", planErr)
+	}
 	plan := make(map[int][]Rect, len(d.redactions))
 	for i, rs := range d.redactions {
 		plan[i] = append([]Rect(nil), rs...)
@@ -102,6 +127,16 @@ func (d *Document) RedactAndFlatten() (*Document, error) {
 		return nil, err
 	}
 	return OpenBytes(built)
+}
+
+// failRedactionPlan records the first failure that left the redaction plan
+// incomplete (see redactErr). Later failures keep the first one.
+func (d *Document) failRedactionPlan(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.redactErr == nil {
+		d.redactErr = err
+	}
 }
 
 // addRedactionsLocked appends regions to the plan for a page. Called under mu.

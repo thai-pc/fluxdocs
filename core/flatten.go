@@ -36,7 +36,8 @@ const maxFlattenPoints = 100000
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes/a file (a
 // resolver-less document cannot be serialized), or a build/re-open error.
-func (d *Document) FlattenAnnotations() (*Document, error) {
+func (d *Document) FlattenAnnotations() (_ *Document, err error) {
+	defer guard("FlattenAnnotations", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
 	}

@@ -10,8 +10,11 @@ import "github.com/thai-pc/fluxdocs/core/docops/compare"
 // revision). Pages are aligned by index; a page present in only one document is
 // reported as all-inserted or all-deleted. Neither document is modified.
 //
-// Returns ErrInvalidPDF if either document was not opened from bytes.
-func (d *Document) Compare(other *Document) (*CompareResult, error) {
+// Returns ErrInvalidPDF if either document was not opened from bytes, or the
+// error from extracting a page's text (including ErrInternal): a page whose
+// text cannot be read is not reported as identical to another.
+func (d *Document) Compare(other *Document) (_ *CompareResult, err error) {
+	defer guard("Compare", -1, &err)
 	if other == nil || d.resolver == nil || other.resolver == nil {
 		return nil, ErrInvalidPDF
 	}
@@ -23,7 +26,15 @@ func (d *Document) Compare(other *Document) (*CompareResult, error) {
 
 	result := &CompareResult{Identical: true, Pages: make([]PageDiff, pages)}
 	for i := 0; i < pages; i++ {
-		segs := compare.Words(pageText(d, i), pageText(other, i))
+		a, err := pageText(d, i)
+		if err != nil {
+			return nil, err
+		}
+		b, err := pageText(other, i)
+		if err != nil {
+			return nil, err
+		}
+		segs := compare.Words(a, b)
 		pd := PageDiff{PageIndex: i, Identical: true}
 		for _, s := range segs {
 			op := DiffEqual
@@ -45,14 +56,11 @@ func (d *Document) Compare(other *Document) (*CompareResult, error) {
 	return result, nil
 }
 
-// pageText extracts one page's text, or "" if the page is out of range or fails.
-func pageText(d *Document, i int) string {
+// pageText returns page i's extracted text, or "" (no error) when i is past
+// the document's last page (that side of the diff is all inserted/deleted).
+func pageText(d *Document, i int) (string, error) {
 	if i < 0 || i >= d.PageCount {
-		return ""
+		return "", nil
 	}
-	t, err := d.ExtractTextByPage(i, ExtractOptions{})
-	if err != nil {
-		return ""
-	}
-	return t
+	return d.ExtractTextByPage(i, ExtractOptions{})
 }

@@ -30,7 +30,8 @@ const (
 // Returns ErrInvalidPDF if the document was not opened from bytes,
 // ErrInvalidArgument if the text is empty, ErrPageNotFound if a page index is
 // out of range, or a build/re-open error.
-func (d *Document) Watermark(opts WatermarkOptions) (*Document, error) {
+func (d *Document) Watermark(opts WatermarkOptions) (_ *Document, err error) {
+	defer guard("Watermark", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
 	}
