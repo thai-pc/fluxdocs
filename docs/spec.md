@@ -833,11 +833,21 @@ Prefer:
   --fd-fg:               #18181b;
   --fd-fg-muted:         #71717a;
   --fd-border:           #e5e7eb;
+  --fd-danger:           #b91c1c;   /* error text; 6.20:1 on --fd-bg */
 
   /* Dark theme */
   --fd-bg-dark:          #0a0a0a;
   --fd-bg-canvas-dark:   #18181b;
   --fd-fg-dark:          #fafafa;
+  --fd-fg-muted-dark:    #a1a1aa;   /* 7.73:1 on --fd-bg-dark */
+  --fd-border-dark:      #27272a;
+  --fd-page-border-dark: #3f3f46;
+  --fd-danger-dark:      #f87171;   /* 7.15:1 on --fd-bg-dark */
+
+  /* Interaction (shared by both themes) */
+  --fd-primary:          #6366f1;
+  --fd-focus-ring:       var(--fd-primary);  /* >= 3.6:1 on every bg above */
+  --fd-control-size:     32px;      /* toolbar button; 44px on pointer: coarse */
 
   /* Annotation colors */
   --fd-highlight-yellow: #fde047;
@@ -857,6 +867,38 @@ Prefer:
   --fd-transition-default:  150ms ease-out;
 }
 ```
+
+**Light/dark pairs.** Components consume only the base (light) names. Dark
+mode re-points each base name to its `-dark` sibling on `.fd-viewer`; tokens
+without a dark sibling are shared by both themes.
+
+| Base token | Light | Dark sibling | Dark |
+|---|---|---|---|
+| `--fd-bg` | `#fafafa` | `--fd-bg-dark` | `#0a0a0a` |
+| `--fd-bg-canvas` | `#e5e7eb` | `--fd-bg-canvas-dark` | `#18181b` |
+| `--fd-fg` | `#18181b` | `--fd-fg-dark` | `#fafafa` |
+| `--fd-fg-muted` | `#71717a` | `--fd-fg-muted-dark` | `#a1a1aa` |
+| `--fd-border` | `#e5e7eb` | `--fd-border-dark` | `#27272a` |
+| `--fd-page-border` | `#d4d4d8` | `--fd-page-border-dark` | `#3f3f46` |
+| `--fd-danger` | `#b91c1c` | `--fd-danger-dark` | `#f87171` |
+
+`--fd-fg-muted` must not be used on `--fd-bg-canvas` in the light theme
+(3.90:1, below WCAG AA). `--fd-draw-default` (`#ef4444`) is an annotation
+color, not a text color (3.61:1 on `--fd-bg`); error text uses `--fd-danger`.
+
+**Theme activation.** The stylesheet ships as `@fluxdocs/core/styles.css`.
+
+- Default (auto): the dark theme applies when the user agent reports
+  `prefers-color-scheme: dark`, otherwise light.
+- Explicit: a `data-fd-theme="light"` or `data-fd-theme="dark"` attribute on
+  `<html>` or any ancestor of the viewer (or on the viewer root itself) forces
+  that theme and overrides `prefers-color-scheme`. Set it once; nested
+  conflicting `data-fd-theme` ancestors are not supported.
+- Hosts restyle by overriding tokens at `:root` or an ancestor: the base name
+  for light (e.g. `--fd-bg`), the `-dark` sibling for dark (e.g.
+  `--fd-bg-dark`).
+- The rendered PDF page is never inverted or filtered in dark mode; only the
+  surrounding chrome changes.
 
 ### 8.3 Layout
 
@@ -897,12 +939,27 @@ Prefer:
 
 | Key | Action |
 |---|---|
-| Arrow Up/Down | Change page |
+| Arrow Up/Down | Change page (edge rule below) |
 | Cmd/Ctrl + F | Open search within the document |
 | Cmd/Ctrl + +/- | Zoom in/out |
+| Cmd/Ctrl + 0 | Reset zoom to 100% |
 | Cmd/Ctrl + S | Save (flatten annotations if needed) |
 | Escape | Exit annotate mode, back to view mode |
 | Delete | Delete the selected annotation |
+
+Shortcuts apply only while focus is inside the viewer (they are bound to the
+viewer root, not the window), and never while focus is in a text input,
+textarea, select, or contenteditable element. Cmd/Ctrl zoom shortcuts always
+suppress the browser's own page zoom while focus is in the viewer.
+
+**Arrow-key edge rule.** When the page is zoomed so that the viewport scrolls,
+Arrow Up/Down first scroll the viewport natively. Arrow Down changes to the
+next page only when the viewport is already scrolled to the bottom (or does not
+scroll) and shows the new page from its top; Arrow Up changes to the previous
+page only when it is at the top and shows the previous page from its bottom, so
+holding either key reads continuously. With focus on a toolbar button, Arrow
+Up/Down always change page (from the top). Arrow keys with
+any modifier are left to the browser.
 
 ### 8.5 Accessibility
 
