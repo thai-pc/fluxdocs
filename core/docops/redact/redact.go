@@ -6,10 +6,19 @@
 // recoverable by extraction or copy-paste.
 //
 // The removal is byte-exact: the content stream is scanned into operator spans
-// (parse.ScanContentSpans), the spans that intersect a region are cut out of the
-// original bytes, and every other byte is preserved verbatim. A conservative
-// (over-estimated) text bounding box is used so a run that reaches into a region
-// is always removed — the engine may over-remove, never under-remove.
+// (parse.ScanContentSpansStrict), the spans that intersect a region are cut out
+// of the original bytes, and every other byte is preserved verbatim. A
+// conservative (over-estimated) text bounding box is used so a run that reaches
+// into a region is always removed — the engine may over-remove, never
+// under-remove.
+//
+// Redaction fails closed on content it cannot read: if the strict scan finds
+// input that was discarded or that a viewer could pair with operators
+// differently (a syntax error, a stray closer, a malformed inline image,
+// operands that do not match their operator), RedactContent and FindTextRects
+// return an error instead of a result that may miss text other viewers render.
+// Rendering and text extraction stay lenient. Text drawn through a Form
+// XObject is not rewritten yet; CheckFormXObjects refuses such pages.
 //
 // Wave-2 scope: text-showing operators. Vector/image content inside a region is
 // covered by the black rectangle but not stripped from the stream; glyph-level
@@ -63,11 +72,17 @@ type textRun struct {
 // returns the rewritten content stream, byte-spliced from the original so all
 // non-removed bytes are preserved exactly. If rects is empty it returns the
 // content unchanged (plus no fills).
-func RedactContent(content []byte, rects []Rect) []byte {
+//
+// Returns a wrapped parse error, and no content, if the stream cannot be
+// scanned without discarding input (see the package comment).
+func RedactContent(content []byte, rects []Rect) ([]byte, error) {
 	if len(rects) == 0 {
-		return content
+		return content, nil
 	}
-	runs := scanRuns(content)
+	runs, err := scanRuns(content)
+	if err != nil {
+		return nil, err
+	}
 
 	// Collect the byte ranges of runs that intersect a region.
 	type span struct{ start, end int }
@@ -97,20 +112,27 @@ func RedactContent(content []byte, rects []Rect) []byte {
 	for _, r := range rects {
 		writeBlackRect(&b, r)
 	}
-	return []byte(b.String())
+	return []byte(b.String()), nil
 }
 
 // FindTextRects returns the page-space bounding boxes of text runs whose decoded
 // text matches pattern. Matching is per-run (a match spanning two runs is not
 // detected — a documented Wave-2 limitation).
-func FindTextRects(content []byte, pattern *regexp.Regexp) []Rect {
+//
+// Returns a wrapped parse error, and no rects, if the stream cannot be scanned
+// without discarding input (see the package comment).
+func FindTextRects(content []byte, pattern *regexp.Regexp) ([]Rect, error) {
+	runs, err := scanRuns(content)
+	if err != nil {
+		return nil, err
+	}
 	var out []Rect
-	for _, r := range scanRuns(content) {
+	for _, r := range runs {
 		if r.text != "" && pattern.MatchString(r.text) {
 			out = append(out, Rect{X: r.minX, Y: r.minY, Width: r.maxX - r.minX, Height: r.maxY - r.minY})
 		}
 	}
-	return out
+	return out, nil
 }
 
 func intersectsAny(r textRun, rects []Rect) bool {
@@ -142,9 +164,13 @@ type gstate struct {
 }
 
 // scanRuns walks the content stream and returns every text-showing operator as a
-// textRun with its conservative page-space bounding box.
-func scanRuns(content []byte) []textRun {
-	spans := parse.ScanContentSpans(content)
+// textRun with its conservative page-space bounding box, or the strict scanner's
+// error if any input would have been discarded.
+func scanRuns(content []byte) ([]textRun, error) {
+	spans, err := parse.ScanContentSpansStrict(content)
+	if err != nil {
+		return nil, err
+	}
 	var runs []textRun
 
 	gs := gstate{ctm: identity(), hScale: 1}
@@ -237,7 +263,7 @@ func scanRuns(content []byte) []textRun {
 			}
 		}
 	}
-	return runs
+	return runs, nil
 }
 
 // lastArray returns the last Array operand (the TJ array), or nil.

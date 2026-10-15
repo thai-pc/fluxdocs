@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 
@@ -22,8 +23,12 @@ import (
 // Returns ErrPageNotFound if pageIndex is out of range, ErrInvalidPDF if the
 // document was not opened from bytes, or a regexp compile error — argument
 // errors that leave the plan untouched. Any later failure (reading the page,
-// or ErrInternal) also marks the plan incomplete, so RedactAndFlatten refuses
-// to run rather than save the page without the regions asked for.
+// ErrInternal, ErrInvalidPDF for page content the strict scanner cannot read —
+// operands it would discard or that a viewer could pair differently, which
+// could hide matching text — or an error matching redact.ErrFormXObjectText if
+// the page draws text through a Form XObject) also marks the plan incomplete,
+// so RedactAndFlatten refuses to run rather than save the page without the
+// regions asked for.
 func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err error) {
 	accepted := false
 	// Deferred before guard so it runs after guard has turned a panic into err.
@@ -50,7 +55,13 @@ func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err erro
 		return nil, err
 	}
 
-	found := redact.FindTextRects(content, re)
+	if err := redact.CheckFormXObjects(d.resolver, d.pageInfos[pageIndex].Resources, content); err != nil {
+		return nil, redactionScanError(pageIndex, err)
+	}
+	found, err := redact.FindTextRects(content, re)
+	if err != nil {
+		return nil, redactionScanError(pageIndex, err)
+	}
 	rects := make([]Rect, len(found))
 	for i, r := range found {
 		rects[i] = Rect{X: r.X, Y: r.Y, Width: r.Width, Height: r.Height}
@@ -88,7 +99,11 @@ func (d *Document) RedactArea(pageIndex int, rect Rect) error {
 // Returns ErrInvalidPDF if the document was not opened from bytes, a
 // "redaction plan incomplete" error wrapping the first failure if any earlier
 // RedactText/AutoRedactPII call failed after accepting its arguments (the plan
-// may be missing regions; re-open the source and redact again), or a
+// may be missing regions; re-open the source and redact again), ErrInvalidPDF
+// if a page with marked regions has content the strict scanner cannot read, an
+// error matching redact.ErrFormXObjectText if such a page draws text through a
+// Form XObject (redaction fails closed rather than miss text other viewers
+// render; ExtractText and RenderPage stay lenient on such content), or a
 // build/re-open error. With no pending redactions it returns a faithful copy.
 func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 	defer guard("RedactAndFlatten", -1, &err)
@@ -116,7 +131,14 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 			if err != nil {
 				return nil, err
 			}
-			src.ReplaceContent = redact.RedactContent(content, toRedactRects(rects))
+			if err := redact.CheckFormXObjects(d.resolver, d.pageInfos[i].Resources, content); err != nil {
+				return nil, redactionScanError(i, err)
+			}
+			redacted, err := redact.RedactContent(content, toRedactRects(rects))
+			if err != nil {
+				return nil, redactionScanError(i, err)
+			}
+			src.ReplaceContent = redacted
 			src.DropAnnots = true // annotation objects may carry the removed text
 		}
 		sources[i] = src
@@ -127,6 +149,18 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 		return nil, err
 	}
 	return OpenBytes(built)
+}
+
+// redactionScanError wraps a failure to read a page's content safely for
+// redaction. Text drawn through a Form XObject is reported as is ("page N draws
+// text through form XObject /Fm1; redaction of form XObjects is not supported
+// yet", matching redact.ErrFormXObjectText); content the strict scanner cannot
+// read is ErrInvalidPDF.
+func redactionScanError(page int, err error) error {
+	if errors.Is(err, redact.ErrFormXObjectText) {
+		return fmt.Errorf("page %d %w", page, err)
+	}
+	return fmt.Errorf("%w: page %d content cannot be scanned safely for redaction: %v", ErrInvalidPDF, page, err)
 }
 
 // failRedactionPlan records the first failure that left the redaction plan

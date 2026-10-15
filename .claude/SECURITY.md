@@ -30,6 +30,12 @@ and copyable. Many governments and organizations have leaked information this wa
 - **Fail closed:** if a marking call (`RedactText`, `AutoRedactPII`) fails after
   accepting its arguments, the plan is sticky-failed and `RedactAndFlatten()`
   refuses to run, so a page is never saved without the regions asked for.
+- **Strict content scan:** redaction reads page content with
+  `parse.ScanContentSpansStrict`; a syntax error, dropped operands, or operands
+  that do not match their operator (ISO 32000-1 Annex A) fail the call instead
+  of guessing what a viewer draws. Known limitation: a page that draws text
+  through a Form XObject is refused (`redact.ErrFormXObjectText`) until forms
+  are rewritten too (tracked follow-up).
 
 **Test gate (non-negotiable):**
 - After any redaction, re-run `ExtractText()` and attempt copy-paste over the

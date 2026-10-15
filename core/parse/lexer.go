@@ -10,6 +10,12 @@ import (
 // ErrInvalidPDF when building the object model fails.
 var errLex = errors.New("parse: lexer error")
 
+// errTruncated is the errLex for a token that runs to end of input (an
+// unterminated literal or hex string). A caller that resyncs after a token
+// error must not retry from the next byte on it: every retry would lex to the
+// end again, which is quadratic in the input size.
+var errTruncated = fmt.Errorf("%w: input ends inside a token", errLex)
+
 type tokenKind int
 
 const (
@@ -226,7 +232,7 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 		case '\\':
 			i++
 			if i >= n {
-				return nil, i, fmt.Errorf("%w: literal string ended abruptly", errLex)
+				return nil, i, fmt.Errorf("%w: literal string ended abruptly", errTruncated)
 			}
 			e := data[i]
 			switch e {
@@ -277,7 +283,7 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 			i++
 		}
 	}
-	return nil, i, fmt.Errorf("%w: unterminated literal string (missing ')')", errLex)
+	return nil, i, fmt.Errorf("%w: unterminated literal string (missing ')')", errTruncated)
 }
 
 func lexHexString(data []byte, i int) ([]byte, int, error) {
@@ -307,7 +313,7 @@ func lexHexString(data []byte, i int) ([]byte, int, error) {
 		nibbles = append(nibbles, hexVal(c))
 		i++
 	}
-	return nil, i, fmt.Errorf("%w: unterminated hex string (missing '>')", errLex)
+	return nil, i, fmt.Errorf("%w: unterminated hex string (missing '>')", errTruncated)
 }
 
 func isHex(c byte) bool {

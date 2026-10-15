@@ -10,11 +10,12 @@ import (
 
 // The tests in this file pin redaction against operands nested past the
 // parser's depth bound (SECURITY.md §1). Other viewers render a string in a
-// TJ/Tj operand list even when a sibling operand is over-deep, so the content
+// TJ array even when a sibling element is over-deep, so the content
 // scanner must keep that string visible (the over-deep part becomes one Null)
 // for redaction to find and remove it. Before, the depth error discarded the
 // whole operand list, so the secret was invisible to RedactText and survived a
-// full-page RedactArea in the output bytes.
+// full-page RedactArea in the output bytes. (A Tj with an over-deep sibling
+// operand has surplus operands and fails closed: malformed_content_test.go.)
 
 const secret = "SECRET-1234"
 
@@ -83,10 +84,6 @@ func TestRedact_OverDeepSiblingOperand(t *testing.T) {
 			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + deepMixed(overDeep) + " ] TJ ET"},
 		{"TJ, deep elements on both sides",
 			"BT /F1 24 Tf 72 700 Td [ " + deepDicts(overDeep) + " (" + secret + ") " + deepArrays(overDeep) + " ] TJ ET"},
-		{"Tj, deep array after the string",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") " + deepArrays(overDeep) + " Tj ET"},
-		{"Tj, deep array before the string",
-			"BT /F1 24 Tf 72 700 Td " + deepArrays(overDeep) + " (" + secret + ") Tj ET"},
 		{"TJ, brackets inside strings in the deep subtree do not count",
 			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + strings.Repeat("[ (]]>>) <5d5d> % ]]\n", overDeep) +
 				strings.Repeat("]", overDeep) + " ] TJ ET"},

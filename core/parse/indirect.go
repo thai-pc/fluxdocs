@@ -20,6 +20,11 @@ type iparser struct {
 	// — which would discard sibling operands such as the strings of a TJ array
 	// that other viewers still render. Object parsing (xref, objstm, indirect
 	// objects) leaves it false and rejects over-deep values.
+	//
+	// In this mode a dictionary is never followed by stream data: streams are
+	// always indirect objects (ISO 32000-1 §7.3.8.1) and cannot occur inside a
+	// content stream, so `<< >> stream … endstream` there is a dictionary and
+	// unknown operators, not opaque bytes that would hide the operators within.
 	lenient bool
 }
 
@@ -187,8 +192,9 @@ func (p *iparser) parseArray() (Object, error) {
 }
 
 // parseDictOrStream parses a dictionary; if a `stream` keyword follows the
-// closing '>>', it reads the raw stream data and returns a *Stream. Assumes the
-// opening '<<' was already consumed. Nesting is bounded like parseArray.
+// closing '>>', it reads the raw stream data and returns a *Stream (never in
+// lenient, content-stream mode). Assumes the opening '<<' was already consumed.
+// Nesting is bounded like parseArray.
 func (p *iparser) parseDictOrStream() (Object, error) {
 	if err := p.enter(); err != nil {
 		if p.lenient {
@@ -206,6 +212,9 @@ func (p *iparser) parseDictOrStream() (Object, error) {
 		switch t.kind {
 		case tokDictClose:
 			p.pos = ni
+			if p.lenient {
+				return d, nil // no streams inside a content stream; see iparser.lenient
+			}
 			return p.maybeStream(d)
 		case tokName:
 			p.pos = ni

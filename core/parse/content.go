@@ -1,6 +1,10 @@
 package parse
 
-import "bytes"
+import (
+	"bytes"
+	"errors"
+	"fmt"
+)
 
 // This file exposes a content-stream scanner. A PDF content stream (ISO 32000-1
 // §7.8.2) is a sequence of operands followed by operators, e.g.
@@ -35,10 +39,10 @@ type ContentOpSpan struct {
 // ScanContent tokenizes a decoded content stream into a flat list of operators
 // with their operands. It is lenient by design: content streams in the wild are
 // frequently malformed, so a token error skips a byte rather than aborting, an
-// array or dictionary nested past maxNestingDepth becomes one Null (see
-// iparser.lenient), and inline images are skipped whole. It never returns an
-// error — a hostile or broken stream yields whatever operators could be
-// recovered.
+// array or dictionary nested past maxNestingDepth becomes one Null operand, and
+// inline images are skipped whole. It never returns an error — a hostile or
+// broken stream yields whatever operators could be recovered. Rendering and
+// text extraction use it; redaction must use ScanContentSpansStrict.
 func ScanContent(data []byte) []ContentOp {
 	spans := ScanContentSpans(data)
 	ops := make([]ContentOp, len(spans))
@@ -49,11 +53,64 @@ func ScanContent(data []byte) []ContentOp {
 }
 
 // ScanContentSpans is ScanContent with each operator's byte range recorded (see
-// ContentOpSpan). It is the single implementation; ScanContent projects away the
-// spans.
+// ContentOpSpan).
 func ScanContentSpans(data []byte) []ContentOpSpan {
+	ops, _ := scanContent(data, false)
+	return ops
+}
+
+// ScanContentSpansStrict is ScanContentSpans for redaction, which must fail
+// closed (SECURITY.md §1). The lenient scanner recovers from a syntax error by
+// dropping the pending operands and resyncing, and it pairs operands with
+// operators however they fall; a viewer may pair them differently, so a string
+// it renders — e.g. in a TJ array next to a malformed element, or left over
+// from an operator with surplus operands — can be invisible to the scan and
+// escape redaction. Strict mode scans the same way but reports the first place
+// where the scan and an interpreter could disagree instead of hiding it.
+//
+// Returns the spans, or nil and a wrapped errLex naming the first offset where
+// input was discarded or could be read differently: a token error, an operand
+// array/dictionary that failed to parse (including an over-deep one that never
+// closes or holds a keyword), a stray ']' or '>>', operands pending at an
+// inline image or at the end of the stream, an inline image whose dictionary
+// is malformed or that has no ID/EI, or an operator whose operands do not
+// match ISO 32000-1 Annex A (operandsFit; any operand on an unknown operator).
+func ScanContentSpansStrict(data []byte) ([]ContentOpSpan, error) {
+	ops, err := scanContent(data, true)
+	if err != nil {
+		return nil, err
+	}
+	return ops, nil
+}
+
+// scanContent is the single scanner implementation. It returns every operator
+// it could recover plus, when it had to discard input to do so, a wrapped
+// errLex describing the first discard (nil for a well-formed stream). strict
+// adds the operand checks against Annex A, which lenient callers do not need.
+func scanContent(data []byte, strict bool) ([]ContentOpSpan, error) {
 	var ops []ContentOpSpan
 	var operands []Object
+	var lossErr error // first discarded input; see ScanContentSpansStrict
+	loss := func(off int, what string, cause error) {
+		if lossErr != nil {
+			return
+		}
+		if cause != nil {
+			lossErr = fmt.Errorf("%w: content stream: %s at offset %d: %v", errLex, what, off, cause)
+		} else {
+			lossErr = fmt.Errorf("%w: content stream: %s at offset %d", errLex, what, off)
+		}
+	}
+	// resync is where scanning resumes after a parse error at start that left
+	// the parser at pos: past a token that ran to end of input there is nothing
+	// left to recover, and re-lexing it from each later offset would be
+	// quadratic.
+	resync := func(err error, pos int) int {
+		if errors.Is(err, errTruncated) {
+			return len(data)
+		}
+		return pos
+	}
 	opStart := -1 // byte offset of the current op group's first token
 	p := &iparser{data: data, pos: 0, lenient: true}
 
@@ -61,7 +118,8 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 		start := p.pos
 		t, ni, err := nextToken(data, p.pos)
 		if err != nil {
-			p.pos = start + 1 // lenient: skip the offending byte
+			loss(start, "token error", err)
+			p.pos = resync(err, start+1) // lenient: skip the offending byte
 			operands = nil
 			opStart = -1
 			continue
@@ -72,7 +130,8 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 
 		switch t.kind {
 		case tokEOF:
-			return ops
+			p.pos = len(data)
+			continue
 
 		case tokInt:
 			operands = append(operands, Integer(t.int))
@@ -91,6 +150,8 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 			p.pos = ni // parseArray expects '[' already consumed
 			arr, err := p.parseArray()
 			if err != nil {
+				loss(start, "unreadable array operand", err)
+				p.pos = resync(err, p.pos)
 				operands = nil
 				opStart = -1
 				break
@@ -100,6 +161,8 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 			p.pos = ni // parseDictOrStream expects '<<' already consumed
 			obj, err := p.parseDictOrStream()
 			if err != nil {
+				loss(start, "unreadable dictionary operand", err)
+				p.pos = resync(err, p.pos)
 				operands = nil
 				opStart = -1
 				break
@@ -116,12 +179,23 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 				operands = append(operands, Null{})
 			case "BI":
 				// Inline image: its dictionary + binary data is not token-safe.
-				// Skip everything through the closing EI and drop pending operands.
-				p.pos = skipInlineImage(data, ni)
+				// Skip everything through the closing EI and drop pending operands
+				// (BI takes none; an interpreter may keep them for a later operator).
+				if len(operands) > 0 {
+					loss(start, "operands pending before inline image", nil)
+				}
+				next, ok := skipInlineImage(data, ni)
+				if !ok {
+					loss(start, "malformed inline image", nil)
+				}
+				p.pos = next
 				operands = nil
 				opStart = -1
 				continue
 			default: // any other keyword is an operator
+				if strict && lossErr == nil && !operandsFit(t.kw, operands) {
+					loss(opStart, "operands do not match their operator", nil)
+				}
 				ops = append(ops, ContentOpSpan{
 					ContentOp: ContentOp{Op: t.kw, Operands: operands},
 					Start:     opStart,
@@ -133,6 +207,7 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 			p.pos = ni
 
 		default: // stray ] or >> — resync
+			loss(start, "stray closing delimiter", nil)
 			operands = nil
 			opStart = -1
 			p.pos = ni
@@ -143,22 +218,32 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 			p.pos = start + 1
 		}
 	}
-	return ops
+	if len(operands) > 0 {
+		loss(opStart, "operands pending at end of stream", nil)
+	}
+	return ops, lossErr
 }
 
 // skipInlineImage advances past an inline image body. i points just after the
 // BI operator. It scans forward to the ID operator, then treats the bytes that
-// follow as opaque until a whitespace-delimited EI is found. Returns the offset
-// just past EI (or end of data if EI is missing).
-func skipInlineImage(data []byte, i int) int {
+// follow as opaque until a whitespace-delimited EI is found.
+//
+// Returns the offset just past EI and true; or, when the image dictionary has a
+// token error or ID/EI is missing, the offset where scanning should resume (one
+// byte past the error, or end of data — also after a token that runs to end of
+// data, which must not be re-lexed) and false.
+func skipInlineImage(data []byte, i int) (int, bool) {
 	// Walk tokens (the image dictionary) until the ID operator.
 	for i < len(data) {
 		t, ni, err := nextToken(data, i)
 		if err != nil {
-			return i + 1
+			if errors.Is(err, errTruncated) {
+				return len(data), false
+			}
+			return i + 1, false
 		}
 		if t.kind == tokEOF {
-			return len(data)
+			return len(data), false
 		}
 		i = ni
 		if t.kind == tokKeyword && t.kw == "ID" {
@@ -173,7 +258,7 @@ func skipInlineImage(data []byte, i int) int {
 	for i < len(data) {
 		j := bytes.IndexByte(data[i:], 'E')
 		if j < 0 {
-			return len(data)
+			return len(data), false
 		}
 		i += j
 		if i+1 < len(data) && data[i+1] == 'I' {
@@ -181,12 +266,12 @@ func skipInlineImage(data []byte, i int) int {
 			after := i + 2
 			nextOK := after >= len(data) || isWhitespace(data[after]) || isDelimiter(data[after])
 			if prevWS && nextOK {
-				return after
+				return after, true
 			}
 		}
 		i++
 	}
-	return len(data)
+	return len(data), false
 }
 
 // PageContent resolves a page's /Contents (a single stream, an array of
