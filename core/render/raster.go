@@ -263,25 +263,202 @@ func (r *raster) strokePath(subpaths [][]point, closed []bool, col color.RGBA, w
 	}
 }
 
-// line draws a thick line between a and b by sampling along its length and
-// stamping a square of side width at each sample.
+// line draws a thick line between a and b: the union of axis-aligned squares of
+// side width (≥ 1, see strokePath) centred on steps+1 evenly spaced samples,
+// steps = ⌈length⌉+1, so consecutive samples are under 1px apart.
+//
+// Coordinates and width come from an untrusted content stream (SECURITY.md §2),
+// so the work is bounded by the canvas, never by the input:
+//   - non-finite input is dropped before any float→int conversion (those are
+//     implementation-defined and saturate under js/wasm);
+//   - the segment is clipped to the paintable box grown by half+1, the only
+//     region where a sample's square can reach a pixel;
+//   - the union is painted row by row instead of stamp by stamp. The samples
+//     whose square reaches a row form one contiguous index range (cy is
+//     monotonic in the sample index), found by bisection, and their squares
+//     overlap along x (samples <1px apart; width ≥1 makes each square's pixel
+//     footprint floor(c−h)..ceil(c+h) span ≥2 pixels), so the row's ink
+//     is the single span between the first and last such sample.
+//
+// Work per segment is O(rows × (log steps + span)) ≤ O(canvas pixels), whatever
+// the segment length, coordinate magnitude or line width. Each pixel is
+// composited once per segment; for opaque color the result is pixel-identical
+// to stamping every sample.
 func (r *raster) line(a, b point, col color.RGBA, width float64) {
+	if !isFinite(a.X) || !isFinite(a.Y) || !isFinite(b.X) || !isFinite(b.Y) || !isFinite(width) {
+		return // e.g. an overflowing cm: such a point has no place on the canvas
+	}
+	box := r.clip.intersect(fullClip(r.w, r.h))
+	if box.empty() {
+		return
+	}
+	half := width / 2
+	// A sample's square spans pixels floor(c−half)..ceil(c+half), so it reaches
+	// box only when c lies in (x0−1−half, x1+half), likewise for y.
+	a, b, ok := clipSegment(a, b,
+		float64(box.x0)-1-half, float64(box.y0)-1-half,
+		float64(box.x1)+half, float64(box.y1)+half)
+	if !ok {
+		return
+	}
 	dx := b.X - a.X
 	dy := b.Y - a.Y
-	length := math.Hypot(dx, dy)
-	half := width / 2
-	steps := int(math.Ceil(length)) + 1
-	for s := 0; s <= steps; s++ {
-		t := float64(s) / float64(steps)
-		cx := a.X + t*dx
-		cy := a.Y + t*dy
-		for oy := int(math.Floor(cy - half)); oy <= int(math.Ceil(cy+half)); oy++ {
-			for ox := int(math.Floor(cx - half)); ox <= int(math.Ceil(cx+half)); ox++ {
-				r.blend(ox, oy, col)
-			}
+	// steps is an integer-valued float64: after clipping it is bounded by the
+	// box size plus the width, but may still exceed the int range for an
+	// absurd width. Only a width near MaxFloat64 can overflow it.
+	steps := math.Ceil(math.Hypot(dx, dy)) + 1
+	if math.IsInf(steps, 0) {
+		return
+	}
+	cx := func(s float64) float64 { return a.X + s/steps*dx }
+	cy := func(s float64) float64 { return a.Y + s/steps*dy }
+
+	// Rows any sample can reach, clamped in float64 first: when yLo ≤ yHi both
+	// lie inside box, so the int conversions are exact on every platform.
+	yLo := math.Max(math.Floor(math.Min(a.Y, b.Y)-half), float64(box.y0))
+	yHi := math.Min(math.Ceil(math.Max(a.Y, b.Y)+half), float64(box.y1-1))
+	if yLo > yHi {
+		return
+	}
+	for oy := int(yLo); oy <= int(yHi); oy++ {
+		fy := float64(oy)
+		// A sample's square reaches row oy iff it starts at or above the row
+		// (above) and ends at or below it (below). As cy moves monotonically one
+		// predicate turns true and the other false along the segment (both are
+		// constant when dy == 0).
+		above := func(s float64) bool { return math.Floor(cy(s)-half) <= fy }
+		below := func(s float64) bool { return fy <= math.Ceil(cy(s)+half) }
+		var lo, hi float64
+		if dy >= 0 {
+			lo, ok = firstTrue(steps, below)
+			hi = lastTrue(steps, above)
+		} else {
+			lo, ok = firstTrue(steps, above)
+			hi = lastTrue(steps, below)
+		}
+		if !ok || hi < lo || !above(lo) || !below(lo) {
+			continue
+		}
+		x0, x1 := cx(lo), cx(hi)
+		xLo := math.Max(math.Floor(math.Min(x0, x1)-half), float64(box.x0))
+		xHi := math.Min(math.Ceil(math.Max(x0, x1)+half), float64(box.x1-1))
+		if xLo > xHi {
+			continue
+		}
+		for ox := int(xLo); ox <= int(xHi); ox++ {
+			r.blend(ox, oy, col)
 		}
 	}
 }
+
+// firstTrue returns the smallest integer-valued s in [0, n] for which pred
+// holds, given pred is monotonic (false…false true…true) over that range; ok is
+// false when pred(n) is false. It bisects, so it costs O(log n) calls even when
+// n exceeds the int range.
+func firstTrue(n float64, pred func(float64) bool) (s float64, ok bool) {
+	if !pred(n) {
+		return 0, false
+	}
+	if pred(0) {
+		return 0, true
+	}
+	lo, hi := 0.0, n // pred(lo) false, pred(hi) true
+	for hi-lo > 1 {
+		mid := math.Floor(lo + (hi-lo)/2)
+		if mid <= lo || mid >= hi {
+			break // no integer-valued float64 strictly between lo and hi
+		}
+		if pred(mid) {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return hi, true
+}
+
+// lastTrue returns the largest integer-valued s in [0, n] for which pred holds,
+// given pred is monotonic (true…true false…false); it returns -1 when pred(0) is
+// false. Like firstTrue it bisects.
+func lastTrue(n float64, pred func(float64) bool) float64 {
+	s, ok := firstTrue(n, func(s float64) bool { return !pred(s) })
+	if !ok {
+		return n // pred holds everywhere
+	}
+	if s == 0 {
+		return -1
+	}
+	return s - 1
+}
+
+// clipSegment clips segment ab to the closed rectangle [x0,x1]×[y0,y1]
+// (Liang–Barsky); ok is false when no part of it lies inside. An endpoint that
+// is already inside is returned bit-for-bit, so a segment that needs no
+// clipping rasterizes exactly as before. A moved endpoint is snapped onto the
+// edge it was clipped at and clamped into the rectangle, so float rounding at
+// huge magnitudes cannot carry it off the canvas.
+func clipSegment(a, b point, x0, y0, x1, y1 float64) (point, point, bool) {
+	dx := b.X - a.X
+	dy := b.Y - a.Y
+	if !isFinite(dx) || !isFinite(dy) {
+		return a, b, false // extent overflows float64: no pixel-accurate position
+	}
+	t0, t1 := 0.0, 1.0
+	e0, e1 := -1, -1 // edge that set t0 / t1
+	pq := [4][2]float64{{-dx, a.X - x0}, {dx, x1 - a.X}, {-dy, a.Y - y0}, {dy, y1 - a.Y}}
+	for i, e := range pq {
+		p, q := e[0], e[1]
+		if p == 0 {
+			if q < 0 {
+				return a, b, false // parallel to this edge and outside it
+			}
+			continue
+		}
+		t := q / p
+		if p < 0 {
+			if t > t1 {
+				return a, b, false
+			}
+			if t > t0 {
+				t0, e0 = t, i
+			}
+		} else {
+			if t < t0 {
+				return a, b, false
+			}
+			if t < t1 {
+				t1, e1 = t, i
+			}
+		}
+	}
+	at := func(t float64, edge int) point {
+		p := point{a.X + t*dx, a.Y + t*dy}
+		switch edge {
+		case 0:
+			p.X = x0
+		case 1:
+			p.X = x1
+		case 2:
+			p.Y = y0
+		case 3:
+			p.Y = y1
+		}
+		p.X = math.Min(math.Max(p.X, x0), x1)
+		p.Y = math.Min(math.Max(p.Y, y0), y1)
+		return p
+	}
+	na, nb := a, b
+	if e0 >= 0 {
+		na = at(t0, e0)
+	}
+	if e1 >= 0 {
+		nb = at(t1, e1)
+	}
+	return na, nb, true
+}
+
+// isFinite reports whether v is neither NaN nor ±Inf.
+func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 // flattenCubic appends a polyline approximation of the cubic Bézier from p0
 // through control points p1, p2 to p3 (all device space) to dst. The endpoint

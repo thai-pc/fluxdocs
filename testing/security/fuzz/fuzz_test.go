@@ -31,11 +31,28 @@ const minimalPDF = "%PDF-1.7\n" +
 // mediaBoxPDF builds a well-formed one-page PDF (classic xref, so it opens and
 // reaches the rasterizer) whose page tree carries the given /MediaBox array.
 func mediaBoxPDF(mediaBox string) []byte {
-	objs := []string{
+	return classicPDF([]string{
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox " + mediaBox + " >>",
 		"<< /Type /Page /Parent 2 0 R >>",
-	}
+	})
+}
+
+// contentPDF builds a well-formed one-page PDF (100x100pt) whose page content
+// stream is content, so the seed reaches the content-stream interpreter and the
+// rasterizer.
+func contentPDF(content string) []byte {
+	return classicPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+	})
+}
+
+// classicPDF serializes objs as objects 1..n with a classic xref table and a
+// trailer whose /Root is object 1.
+func classicPDF(objs []string) []byte {
 	var b bytes.Buffer
 	b.WriteString("%PDF-1.7\n")
 	off := make([]int, len(objs))
@@ -81,8 +98,28 @@ func seeds() [][]byte {
 		mediaBoxPDF("[0 0 1 1000000000000000000]"),
 		mediaBoxPDF("[0 0 99999999999999999999 10]"),
 		mediaBoxPDF("[0 0 " + strings.Repeat("9", 400) + ".0 10]"),
+		// Hostile strokes: segment length, coordinate magnitude and line width
+		// are unbounded in the content stream, and the stroke rasterizer once
+		// did work proportional to length × width² (a hang). The lexer has no
+		// exponent syntax, so big magnitudes are spelled out; the cm cases
+		// overflow the CTM to Inf and then NaN.
+		contentPDF("0 0 m 1000000000 0 l S"),
+		contentPDF("100000 w 50 50 m 51 50 l S"),
+		contentPDF("0 50 m " + bigReal + " 50 l S"),
+		contentPDF(bigReal + " w 50 50 m 51 50 l S"),
+		contentPDF("-" + bigReal + " 50 m " + bigReal + " 50 l S"),
+		contentPDF("-" + bigReal + " " + bigReal + " m " + bigReal + " -" + bigReal + " l S"),
+		contentPDF("100000 w -1000000000 -1000000000 2000000000 2000000000 re S"),
+		contentPDF(hugeReal + " 0 0 " + hugeReal + " 0 0 cm " + hugeReal + " 0 0 " + hugeReal + " 0 0 cm 0 0 m 1 1 l S"),
 	}
 }
+
+// bigReal (1e30) and hugeReal (~1e308, still finite) are spelled-out reals for
+// the hostile-stroke seeds.
+var (
+	bigReal  = "1" + strings.Repeat("0", 30) + ".0"
+	hugeReal = "1" + strings.Repeat("0", 308) + ".0"
+)
 
 // hostileMediaBoxes are the seeds above that open as one-page documents whose
 // canvas must be rejected by the renderer's cap at the DPI exercise uses.

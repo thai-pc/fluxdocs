@@ -113,12 +113,18 @@ assert(fluxdocs.version().version === "0.1.0", "runtime survives a recovered pan
 
 // A hostile MediaBox (2^33 pt at 36 DPI = 2^32 x 2^32 px, whose int64 area wraps
 // to 0) must be rejected by the canvas cap, not crash the runtime.
-function onePagePDF(mediaBox) {
+// With content, the page also gets a content stream.
+function onePagePDF(mediaBox, content) {
   const objs = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     `<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox ${mediaBox} >>`,
-    "<< /Type /Page /Parent 2 0 R >>",
+    content === undefined
+      ? "<< /Type /Page /Parent 2 0 R >>"
+      : "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
   ];
+  if (content !== undefined) {
+    objs.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+  }
   let out = "%PDF-1.7\n";
   const offs = objs.map((o, i) => {
     const off = out.length;
@@ -146,6 +152,22 @@ const hugerRender = fluxdocs.renderPage(huger.handle, 0, { dpi: 1, format: "png"
 assert(/exceeds/.test(hugerRender.error), `1e18 MediaBox render -> canvas error: ${hugerRender.error}`);
 assert(hugerRender.image === undefined, "rejected render carries no image");
 fluxdocs.close(huger.handle);
+
+// Hostile strokes (SECURITY.md §2): a 1e9-long segment, a 1e5-wide stroke and a
+// segment crossing the page from ±1e30. The stroke rasterizer once did work
+// proportional to length × width², and under js/wasm the float→int conversion
+// saturates, so 1e30 would loop "forever" and freeze the tab. The render must
+// come back promptly with an image.
+const big = "1" + "0".repeat(30) + ".0"; // 1e30; the lexer has no exponent syntax
+const strokes = fluxdocs.open(onePagePDF("[0 0 100 100]",
+  `0 0 m 1000000000 0 l S 100000 w 50 50 m 51 50 l S 1 w -${big} 50 m ${big} 50 l S`));
+assert(strokes.error === "", `open hostile strokes: ${strokes.error}`);
+const strokeStart = Date.now();
+const strokeRender = fluxdocs.renderPage(strokes.handle, 0, { dpi: 72, format: "png" });
+const strokeMs = Date.now() - strokeStart;
+assert(strokeRender.error === "" && strokeRender.image[0] === 0x89, `hostile strokes render: ${strokeRender.error}`);
+assert(strokeMs < 5000, `hostile strokes render took ${strokeMs}ms, want < 5000ms`);
+fluxdocs.close(strokes.handle);
 
 // After a recovered panic and two rejected renders, the real pipeline must still
 // produce output: recover() must not swallow happy-path results.
