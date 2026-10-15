@@ -10,8 +10,80 @@ import (
 // contain binary streams because it stops exactly at the `stream` keyword and
 // then slices the raw bytes itself.
 type iparser struct {
-	data []byte
-	pos  int
+	data  []byte
+	pos   int
+	depth int // arrays/dictionaries currently open; bounded by maxNestingDepth
+
+	// lenient is set only by the content-stream scanner. A container nested
+	// past maxNestingDepth is then skipped without recursion and parsed as one
+	// Null placeholder (skipOverDeep), instead of failing the enclosing operand
+	// — which would discard sibling operands such as the strings of a TJ array
+	// that other viewers still render. Object parsing (xref, objstm, indirect
+	// objects) leaves it false and rejects over-deep values.
+	lenient bool
+}
+
+// maxNestingDepth bounds how deeply arrays and dictionaries may nest in one
+// parsed value (SECURITY.md §2), as maxCopyDepth does for the copier. Parsing
+// recurses once per level, and a stack overflow is a fatal runtime error that
+// no recover can catch: 3,000,000 nested '[' (3 MB) killed the process from
+// OpenBytes. Real files nest a handful of levels; 256 is generous.
+const maxNestingDepth = 256
+
+// enter opens one nesting level, or returns a wrapped errLex past
+// maxNestingDepth. Callers defer p.leave() after a successful enter.
+func (p *iparser) enter() error {
+	if p.depth >= maxNestingDepth {
+		return fmt.Errorf("%w: arrays/dictionaries nested deeper than %d", errLex, maxNestingDepth)
+	}
+	p.depth++
+	return nil
+}
+
+func (p *iparser) leave() { p.depth-- }
+
+// skipOverDeep consumes the rest of a container whose opener (open: '[' or
+// '<<') was already read, iteratively: it tracks the open containers on an
+// explicit byte stack until the opener is closed, so its cost is linear and its
+// Go stack use constant however deep the input nests. Strings, hex strings,
+// names and comments are lexed whole, so brackets inside them do not count.
+//
+// It accepts only what parseValue would: a closer must match the innermost
+// opener, and the only keywords are true, false, null and R. Anything else —
+// an operator, BI (whose binary data is not token-safe), stream, '{' — is an
+// error rather than skipped, so a skipped subtree can never hide operators
+// that an interpreter running inside arrays would execute.
+//
+// Returns Null{} with pos just past the matching closer, or a wrapped errLex at
+// end of input, on a token error, or on an unexpected token (pos at the
+// offending token).
+func (p *iparser) skipOverDeep(open tokenKind) (Object, error) {
+	isDict := []bool{open == tokDictOpen} // explicit stack: one byte per open level
+	for len(isDict) > 0 {
+		t, ni, err := nextToken(p.data, p.pos)
+		if err != nil {
+			return nil, err
+		}
+		switch t.kind {
+		case tokEOF:
+			return nil, fmt.Errorf("%w: unterminated array or dictionary nested deeper than %d", errLex, maxNestingDepth)
+		case tokArrayOpen, tokDictOpen:
+			isDict = append(isDict, t.kind == tokDictOpen)
+		case tokArrayClose, tokDictClose:
+			if isDict[len(isDict)-1] != (t.kind == tokDictClose) {
+				return nil, fmt.Errorf("%w: mismatched closing delimiter at offset %d", errLex, p.pos)
+			}
+			isDict = isDict[:len(isDict)-1]
+		case tokKeyword:
+			switch t.kw {
+			case "true", "false", "null", "R":
+			default:
+				return nil, fmt.Errorf("%w: unexpected keyword %q", errLex, t.kw)
+			}
+		}
+		p.pos = ni
+	}
+	return Null{}, nil
 }
 
 // tryReference matches the pattern "int int R" at the current position. It
@@ -81,8 +153,17 @@ func (p *iparser) parseValue() (Object, error) {
 }
 
 // parseArray parses elements until ']'. Assumes the opening '[' was already
-// consumed.
+// consumed. Nesting is bounded (maxNestingDepth) here rather than in
+// parseValue, because the content-stream scanner calls it directly; past the
+// bound a lenient parser skips the array as Null (skipOverDeep).
 func (p *iparser) parseArray() (Object, error) {
+	if err := p.enter(); err != nil {
+		if p.lenient {
+			return p.skipOverDeep(tokArrayOpen)
+		}
+		return nil, err
+	}
+	defer p.leave()
 	arr := Array{}
 	for {
 		t, ni, err := nextToken(p.data, p.pos)
@@ -107,8 +188,15 @@ func (p *iparser) parseArray() (Object, error) {
 
 // parseDictOrStream parses a dictionary; if a `stream` keyword follows the
 // closing '>>', it reads the raw stream data and returns a *Stream. Assumes the
-// opening '<<' was already consumed.
+// opening '<<' was already consumed. Nesting is bounded like parseArray.
 func (p *iparser) parseDictOrStream() (Object, error) {
+	if err := p.enter(); err != nil {
+		if p.lenient {
+			return p.skipOverDeep(tokDictOpen)
+		}
+		return nil, err
+	}
+	defer p.leave()
 	d := Dict{}
 	for {
 		t, ni, err := nextToken(p.data, p.pos)

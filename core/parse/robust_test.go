@@ -3,7 +3,9 @@ package parse
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 // These tests pin down hostile-input robustness (SECURITY.md §2): the parser
@@ -236,5 +238,197 @@ func TestNewDecryptor_R2KeyIsFiveBytes(t *testing.T) {
 				t.Errorf("decrypted content = %q, want %q", obj, plain)
 			}
 		})
+	}
+}
+
+// nested returns depth copies of open, a leaf, then depth copies of close.
+func nested(open, leaf, close string, depth int) string {
+	return strings.Repeat(open, depth) + leaf + strings.Repeat(close, depth)
+}
+
+// TestParse_NestingDepthLimit pins the recursion bound on arrays and
+// dictionaries (SECURITY.md §2). The parser recursed once per level with no
+// limit, so 3,000,000 nested '[' (3 MB) overflowed the goroutine stack — a
+// fatal error that no recover catches — from OpenBytes. maxNestingDepth levels
+// still parse; one more is a lexer error, and so is a 100,000-deep value (deep
+// enough to prove the bound, shallow enough not to overflow an unbounded
+// parser, so a regression fails this test instead of killing the binary).
+func TestParse_NestingDepthLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{"arrays at the limit", nested("[", "1", "]", maxNestingDepth), false},
+		{"arrays one past the limit", nested("[", "1", "]", maxNestingDepth+1), true},
+		{"dicts at the limit", nested("<< /A ", "1", " >>", maxNestingDepth), false},
+		{"dicts one past the limit", nested("<< /A ", "1", " >>", maxNestingDepth+1), true},
+		{"mixed one past the limit", nested("[ << /A ", "1", " >> ]", maxNestingDepth/2+1), true},
+		{"100k arrays, unterminated", strings.Repeat("[", 100_000), true},
+		{"100k dicts, unterminated", strings.Repeat("<< /A ", 100_000), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseObject([]byte(tc.in))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ParseObject err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "nested deeper than") {
+				t.Errorf("err = %v, want the nesting-depth error", err)
+			}
+		})
+	}
+}
+
+// innermost follows the first element of each nested array (or /A of each
+// nested dictionary) down to the leaf, iteratively.
+func innermost(o Object) Object {
+	for {
+		switch v := o.(type) {
+		case Array:
+			if len(v) == 0 {
+				return v
+			}
+			o = v[0]
+		case Dict:
+			o = v["A"]
+		default:
+			return o
+		}
+	}
+}
+
+// TestScanContent_DeepNestingIsBounded drives the content-stream scanner, which
+// calls parseArray/parseDictOrStream directly (not through parseValue). Past
+// maxNestingDepth the scanner is lenient without recursing: the over-deep part
+// is skipped as one Null placeholder, so the enclosing operand — and the other
+// operands next to it, e.g. the strings of a TJ array that redaction must see —
+// survive. An unterminated over-deep subtree is dropped.
+func TestScanContent_DeepNestingIsBounded(t *testing.T) {
+	for _, deep := range []string{
+		nested("[", "1", "]", 100_000),
+		nested("<< /A ", "1", " >>", 100_000),
+		nested("[ << /A ", "1", " >> ]", 50_000),
+	} {
+		ops := ScanContent([]byte(deep + " 1 0 0 1 5 7 cm"))
+		if len(ops) != 1 || ops[0].Op != "cm" || len(ops[0].Operands) != 7 {
+			t.Fatalf("ops = %d %.200v, want one cm with the deep operand + 6 numbers", len(ops), ops)
+		}
+		if _, ok := innermost(ops[0].Operands[0]).(Null); !ok {
+			t.Errorf("innermost of the deep operand = %v, want the Null placeholder", innermost(ops[0].Operands[0]))
+		}
+	}
+
+	for _, deep := range []string{strings.Repeat("[", 100_000), strings.Repeat("<< /A ", 100_000)} {
+		// The skip stops at the cm keyword (an operator never belongs inside an
+		// operand), so cm is recovered without the operands the skip consumed.
+		ops := ScanContent([]byte("(keep) Tj " + deep + " 1 0 0 1 5 7 cm"))
+		if len(ops) != 2 || ops[0].Op != "Tj" || ops[1].Op != "cm" || len(ops[1].Operands) != 0 {
+			t.Errorf("unterminated: ops = %.200v, want Tj then a bare cm", ops)
+		}
+	}
+
+	// At the boundary: a maxNestingDepth-deep operand parses whole; one level
+	// more keeps the operand with a Null where the over-deep level was.
+	for _, tc := range []struct {
+		depth int
+		leaf  Object
+	}{
+		{maxNestingDepth, Integer(1)},
+		{maxNestingDepth + 1, Null{}},
+	} {
+		ops := ScanContent([]byte(nested("[", "1", "]", tc.depth) + " 1 0 0 1 5 7 cm"))
+		if len(ops) != 1 || ops[0].Op != "cm" || len(ops[0].Operands) != 7 {
+			t.Fatalf("depth %d: ops = %.200v, want one cm with 7 operands", tc.depth, ops)
+		}
+		if got := innermost(ops[0].Operands[0]); got != tc.leaf {
+			t.Errorf("depth %d: innermost = %v, want %v", tc.depth, got, tc.leaf)
+		}
+	}
+}
+
+// TestSkipOverDeep_AcceptsOnlyWhatParseValueAccepts: the lenient skip of an
+// over-deep subtree must not swallow anything the bounded parser would reject —
+// an operator (an interpreter that runs operators inside arrays would draw a
+// Tj there), an inline image, a stream keyword, a procedure brace, or a closer
+// of the wrong kind — or brackets would be counted inside inline-image data.
+func TestSkipOverDeep_AcceptsOnlyWhatParseValueAccepts(t *testing.T) {
+	deep := maxNestingDepth + 44
+	tests := []struct {
+		name    string
+		in      string // parsed after an already-consumed '['
+		wantErr bool
+	}{
+		{"numbers, strings, names, booleans, null, refs",
+			nested("[", "1 2.5 (s]) <5d> /N true false null 3 0 R << /K [] >>", "]", deep) + "]", false},
+		{"brackets in strings and comments", nested("[", "(]]>>) % ]]\n", "]", deep) + "]", false},
+		{"operator inside", nested("[", "(SECRET) Tj", "]", deep) + "]", true},
+		{"inline image inside", nested("[", "BI /W 1 ID\n( EI", "]", deep) + "]", true},
+		{"stream keyword inside", nested("[", "<< >> stream\nx\nendstream", "]", deep) + "]", true},
+		{"procedure brace inside", nested("[", "{ 1 }", "]", deep) + "]", true},
+		{"array closed by '>>'", strings.Repeat("[", deep) + "1" + strings.Repeat("]", deep-1) + ">>]", true},
+		{"dictionary closed by ']'", strings.Repeat("<< /A ", deep) + "1" + strings.Repeat(" >>", deep-1) + "]]", true},
+		{"unterminated", strings.Repeat("[", deep), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &iparser{data: []byte(tc.in), lenient: true}
+			obj, err := p.parseArray()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseArray = (%.80v, %v), wantErr %v", obj, err, tc.wantErr)
+			}
+			if err == nil {
+				if _, ok := innermost(obj).(Null); !ok {
+					t.Errorf("innermost = %v, want the Null placeholder", innermost(obj))
+				}
+				if p.pos != len(tc.in) {
+					t.Errorf("pos = %d, want %d (just past the closing ']')", p.pos, len(tc.in))
+				}
+			}
+		})
+	}
+}
+
+// timingScale stretches wall-clock bounds under -race and on the WASM target
+// (race_test.go, wasm_test.go).
+var timingScale time.Duration = 1
+
+// TestScanContent_HugeDeepOperandIsLinear: the over-deep skip is iterative, so
+// the 3,000,000-level operand that used to overflow the stack scans in linear
+// time with constant stack. The 2s bound (scaled under -race) is several times
+// the measured time; it catches recursion or a quadratic rescan.
+func TestScanContent_HugeDeepOperandIsLinear(t *testing.T) {
+	const depth = 3_000_000
+	for _, tc := range []struct{ name, open, close string }{
+		{"arrays", "[", "]"},
+		{"dicts", "<< /A ", " >>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []byte("[ (keep) " + nested(tc.open, "1", tc.close, depth) + " ] TJ")
+			begin := time.Now()
+			spans := ScanContentSpans(in)
+			if elapsed, limit := time.Since(begin), 2*time.Second*timingScale; elapsed > limit {
+				t.Errorf("scan of a %d-deep operand took %v, want < %v", depth, elapsed, limit)
+			}
+			if len(spans) != 1 || spans[0].Op != "TJ" {
+				t.Fatalf("spans = %d, want one TJ", len(spans))
+			}
+			arr, ok := spans[0].Operands[0].(Array)
+			if !ok || len(arr) != 2 {
+				t.Fatalf("TJ operand = %T len %d, want a 2-element array", spans[0].Operands[0], len(arr))
+			}
+			if s, ok := arr[0].(String); !ok || string(s.Value) != "keep" {
+				t.Errorf("TJ string = %v, want (keep)", arr[0])
+			}
+		})
+	}
+}
+
+// TestParse_ObjectModeStaysStrictOnDeepNesting: only the content scanner is
+// lenient; an over-deep value in an indirect object is still an error.
+func TestParse_ObjectModeStaysStrictOnDeepNesting(t *testing.T) {
+	in := []byte("1 0 obj [ (x) " + nested("[", "1", "]", maxNestingDepth+10) + " ] endobj")
+	if _, _, _, next, err := ParseIndirectObjectAt(in, 0); err == nil || next != 0 {
+		t.Errorf("ParseIndirectObjectAt err = %v next = %d, want the nesting-depth error at offset 0", err, next)
 	}
 }

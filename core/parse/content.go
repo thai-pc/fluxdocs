@@ -34,9 +34,11 @@ type ContentOpSpan struct {
 
 // ScanContent tokenizes a decoded content stream into a flat list of operators
 // with their operands. It is lenient by design: content streams in the wild are
-// frequently malformed, so a token error skips a byte rather than aborting, and
-// inline images are skipped whole. It never returns an error — a hostile or
-// broken stream yields whatever operators could be recovered.
+// frequently malformed, so a token error skips a byte rather than aborting, an
+// array or dictionary nested past maxNestingDepth becomes one Null (see
+// iparser.lenient), and inline images are skipped whole. It never returns an
+// error — a hostile or broken stream yields whatever operators could be
+// recovered.
 func ScanContent(data []byte) []ContentOp {
 	spans := ScanContentSpans(data)
 	ops := make([]ContentOp, len(spans))
@@ -53,7 +55,7 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 	var ops []ContentOpSpan
 	var operands []Object
 	opStart := -1 // byte offset of the current op group's first token
-	p := &iparser{data: data, pos: 0}
+	p := &iparser{data: data, pos: 0, lenient: true}
 
 	for p.pos < len(data) {
 		start := p.pos

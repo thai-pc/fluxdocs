@@ -150,7 +150,7 @@ func classicPDFTrailer(objs []string, trailerExtra string) []byte {
 // truncations/corruptions that should exercise the lenient recovery paths.
 func seeds() [][]byte {
 	full := []byte(minimalPDF)
-	return [][]byte{
+	return append([][]byte{
 		full,
 		nil,
 		[]byte(""),
@@ -232,6 +232,62 @@ func seeds() [][]byte {
 			"<< /Type /Page /Parent 2 0 R >>",
 			"<< /Filter /Standard /V 2 /R 3 /Length 256 /P -44 /O <" + strings.Repeat("AB", 32) + "> /U <" + strings.Repeat("CD", 32) + "> >>",
 		}, "/Encrypt 4 0 R /ID [<00112233445566778899AABBCCDDEEFF> <00112233445566778899AABBCCDDEEFF>] "),
+	}, deepNestingSeeds()...)
+}
+
+// deepNestingDepth is deep enough to cross the parser's nesting bound many
+// times over while keeping the seeds small (the 3,000,000-level stack overflow
+// they guard against is not something the fuzzer needs to rebuild each time).
+const deepNestingDepth = 10_000
+
+// deepNestingSeeds nest arrays and dictionaries far past the parser's bound in
+// an object (reached on open), in a page content stream (the scanner calls the
+// container parsers directly), and in an inline-image dictionary. Unbounded,
+// the recursion overflowed the stack: a fatal error, not a recoverable panic.
+func deepNestingSeeds() [][]byte {
+	arrays := strings.Repeat("[", deepNestingDepth)
+	dicts := strings.Repeat("<< /A ", deepNestingDepth)
+	closed := arrays + strings.Repeat("]", deepNestingDepth)
+	return [][]byte{
+		deepCatalogPDF(arrays),
+		deepCatalogPDF(dicts),
+		contentPDF(closed + " 1 0 0 1 0 0 cm"),
+		contentPDF(dicts + " 0 0 m 10 10 l S"),
+		contentPDF("BT /F1 12 Tf " + closed + " TJ ET"),
+		contentPDF("BI /W 1 /H 1 /D " + closed + " ID \x00 EI"),
+	}
+}
+
+// deepCatalogPDF is a one-page PDF whose catalog carries /Deep deep, so the
+// nesting is parsed while OpenBytes resolves the catalog.
+func deepCatalogPDF(deep string) []byte {
+	return classicPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R /Deep " + deep + " >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		"<< /Type /Page /Parent 2 0 R >>",
+	})
+}
+
+// TestDeepNestingSeedsHandled pins the deep-nesting seeds through the public
+// API: a deep catalog is rejected as ErrInvalidPDF, and deep content-stream
+// operands leave the page openable, extractable and renderable — never a
+// stack overflow or a recovered panic.
+func TestDeepNestingSeedsHandled(t *testing.T) {
+	for _, deep := range []string{strings.Repeat("[", deepNestingDepth), strings.Repeat("<< /A ", deepNestingDepth)} {
+		if _, err := core.OpenBytes(deepCatalogPDF(deep)); !errors.Is(err, core.ErrInvalidPDF) {
+			t.Errorf("deep catalog: OpenBytes err = %v, want ErrInvalidPDF", err)
+		}
+	}
+	for i, seed := range deepNestingSeeds()[2:] {
+		doc, err := core.OpenBytes(seed)
+		if err != nil {
+			t.Fatalf("content seed %d: OpenBytes: %v", i, err)
+		}
+		_, err = doc.ExtractTextByPage(0, core.ExtractOptions{})
+		failOnInternal(t, err)
+		if _, err := doc.RenderPage(0, core.RenderOptions{DPI: 36, Format: "png"}); err != nil {
+			t.Errorf("content seed %d: RenderPage: %v", i, err)
+		}
 	}
 }
 
