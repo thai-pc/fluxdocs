@@ -1,4 +1,4 @@
-import type { Annotation, FluxDoc, FluxDocs } from "@fluxdocs/core";
+import type { Annotation, FluxDoc, FluxDocs, PageSize, RenderOptions } from "@fluxdocs/core";
 
 // A minimal in-memory stand-in for the WASM runtime, so the React glue can be
 // tested without building/loading the core. The real core is tested in
@@ -15,6 +15,17 @@ export interface MockOptions {
   openError?: string;
   /** When set, renderPage() throws this message. */
   renderError?: string;
+  /** Every renderPage() call is appended here (page index + options). */
+  renderCalls?: RenderCall[];
+  /** Overrides the page geometry (default 200x300 pt, no rotation). */
+  pageSize?: PageSize;
+  /** When set, pageSize() throws this message. */
+  pageSizeError?: string;
+}
+
+export interface RenderCall {
+  index: number;
+  opts: RenderOptions | undefined;
 }
 
 export function mockRuntime(opts: MockOptions = {}): FluxDocs {
@@ -23,10 +34,14 @@ export function mockRuntime(opts: MockOptions = {}): FluxDocs {
 
   const doc = {
     pageCount,
-    pageSize: (i: number) => ({ width: 200, height: 300, rotation: 0, _i: i }),
+    pageSize: (i: number) => {
+      if (opts.pageSizeError) throw new Error(opts.pageSizeError);
+      return { ...(opts.pageSize ?? { width: 200, height: 300, rotation: 0 }), _i: i };
+    },
     extractText: () => "text",
     extractTextByPage: (i: number) => `page ${i}`,
-    renderPage: (i: number) => {
+    renderPage: (i: number, o?: RenderOptions) => {
+      opts.renderCalls?.push({ index: i, opts: o });
       if (opts.renderError) throw new Error(opts.renderError);
       return fakePNG(i);
     },

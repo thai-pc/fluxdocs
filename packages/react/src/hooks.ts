@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FluxDoc, FluxDocs, RenderOptions } from "@fluxdocs/core";
 
 import { bytesToDataURL, mimeFor } from "./dataurl.js";
@@ -37,29 +37,71 @@ export function useFluxDoc(
   return { doc, error };
 }
 
+// useLayoutEffect warns during server rendering; fall back to useEffect where
+// there is no window (no render happens server-side either way).
+export const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+type PageImage = { src: string | null; error: Error | null };
+
+const NO_IMAGE: PageImage = { src: null, error: null };
+
+/** One completed render: its inputs and its result. */
+interface Rendered {
+  doc: FluxDoc;
+  pageIndex: number;
+  optsKey: string;
+  result: PageImage;
+}
+
 /**
  * usePageImage renders one page of `doc` to a data URL suitable for an <img>
  * src. It re-renders when the document, page index, or options change. Returns
  * null src when there is no document, and surfaces a render failure via `error`.
+ *
+ * The render runs in a layout effect, not during render, so React StrictMode's
+ * double render cannot rasterize a page twice; a ref remembers the last
+ * (doc, page, options) rendered so StrictMode's effect re-run reuses it too.
+ * The layout effect commits the new image before the browser paints. Until a
+ * render for the current document has completed, src is null.
  */
 export function usePageImage(
   doc: FluxDoc | null,
   pageIndex: number,
   opts?: RenderOptions,
-): { src: string | null; error: Error | null } {
-  // Serialize opts so the memo is stable across equal-but-new objects.
+): PageImage {
+  // Serialize opts so equal-but-new objects do not trigger another render.
   const optsKey = JSON.stringify(opts ?? {});
-  return useMemo(() => {
+  const last = useRef<Rendered | null>(null);
+  const [rendered, setRendered] = useState<Rendered | null>(null);
+
+  useIsoLayoutEffect(() => {
     if (!doc) {
-      return { src: null, error: null };
+      return;
     }
+    const prev = last.current;
+    if (prev && prev.doc === doc && prev.pageIndex === pageIndex && prev.optsKey === optsKey) {
+      setRendered(prev); // StrictMode effect re-run: same inputs, reuse
+      return;
+    }
+    let result: PageImage;
     try {
       const bytes = doc.renderPage(pageIndex, opts);
-      return { src: bytesToDataURL(bytes, mimeFor(opts)), error: null };
+      result = { src: bytesToDataURL(bytes, mimeFor(opts)), error: null };
     } catch (e) {
-      return { src: null, error: e as Error };
+      result = { src: null, error: e as Error };
     }
+    const next = { doc, pageIndex, optsKey, result };
+    last.current = next;
+    setRendered(next);
     // opts is captured via optsKey; pageIndex and doc are the other deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc, pageIndex, optsKey]);
+
+  // A result from another document is never shown. A result for an earlier
+  // page/options of the same document is kept for the one commit before the
+  // layout effect above replaces it (not painted).
+  if (!doc || !rendered || rendered.doc !== doc) {
+    return NO_IMAGE;
+  }
+  return rendered.result;
 }
