@@ -1,0 +1,329 @@
+/*
+ * @fluxdocs/core/styles.css — base styles for the FluxDocs viewer DOM contract
+ * (React, Vue, and future wrappers share the same `fd-` classes).
+ *
+ *   import "@fluxdocs/core/styles.css";
+ *
+ * Rules (docs/design/viewer-chrome.md §2):
+ * - Single `fd-` class selectors (optionally + attribute/pseudo-class); no
+ *   element or ID selectors, no !important, no @layer. Override by setting the
+ *   `--fd-*` tokens at :root or any ancestor, or with a same-specificity rule
+ *   loaded later.
+ * - Privacy: no @import, no @font-face, no url(). This file never causes a
+ *   network request; Inter / JetBrains Mono apply only if the host provides them.
+ * - Theme: light by default, dark under prefers-color-scheme: dark, and
+ *   data-fd-theme="light|dark" on <html>, an ancestor, or the viewer root forces
+ *   one. The rendered PDF page is never inverted or filtered.
+ */
+
+/* Design tokens — spec §8.2 verbatim. Keep in sync with docs/spec.md. */
+:root {
+  /* Typography */
+  --fd-font-sans:        'Inter', system-ui, sans-serif;
+  --fd-font-mono:        'JetBrains Mono', ui-monospace, monospace;
+  --fd-font-size-xs:     11px;
+  --fd-font-size-sm:     12px;
+  --fd-font-size-base:   13px;
+
+  /* Light theme */
+  --fd-bg:               #fafafa;
+  --fd-bg-canvas:        #e5e7eb;
+  --fd-fg:               #18181b;
+  --fd-fg-muted:         #71717a;
+  --fd-border:           #e5e7eb;
+  --fd-danger:           #b91c1c;
+
+  /* Dark theme */
+  --fd-bg-dark:          #0a0a0a;
+  --fd-bg-canvas-dark:   #18181b;
+  --fd-fg-dark:          #fafafa;
+  --fd-fg-muted-dark:    #a1a1aa;
+  --fd-border-dark:      #27272a;
+  --fd-page-border-dark: #3f3f46;
+  --fd-danger-dark:      #f87171;
+
+  /* Interaction (shared by both themes) */
+  --fd-primary:          #6366f1;
+  --fd-focus-ring:       var(--fd-primary);
+  --fd-control-size:     32px;
+
+  /* Annotation colors */
+  --fd-highlight-yellow: #fde047;
+  --fd-highlight-green:  #86efac;
+  --fd-highlight-blue:   #93c5fd;
+  --fd-highlight-pink:   #f9a8d4;
+  --fd-note-bg:          #f59e0b;
+  --fd-draw-default:     #ef4444;
+  --fd-redact-fill:      #18181b;
+
+  /* Page chrome */
+  --fd-page-shadow:      0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.08);
+  --fd-page-border:      #d4d4d8;
+
+  /* Animations */
+  --fd-transition-fast:     100ms ease-out;
+  --fd-transition-default:  150ms ease-out;
+}
+
+/* Touch input: 44px targets (keyed on pointer type, not width, so a narrow
+   desktop window keeps the dense 32px controls). */
+@media (pointer: coarse) {
+  :root {
+    --fd-control-size: 44px;
+  }
+}
+
+/* ---- Root ------------------------------------------------------------- */
+
+/* Inline-size containment (needed for the @container breakpoint) sizes the
+   box as if it were empty. width: 100% fills a container of definite width;
+   in a shrink-to-fit host (flex item without a width, inline-block, float,
+   abs-pos) the percentage cannot resolve, so contain-intrinsic-inline-size
+   gives a 320 px intrinsic width instead of collapsing to 0 px. */
+.fd-viewer {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  container: fd-viewer / inline-size;
+  contain-intrinsic-inline-size: auto 320px;
+  font: var(--fd-font-size-base)/1.4 var(--fd-font-sans);
+  color: var(--fd-fg);
+  background: var(--fd-bg);
+  color-scheme: light;
+}
+
+.fd-viewer *,
+.fd-viewer *::before,
+.fd-viewer *::after {
+  box-sizing: border-box;
+}
+
+/* ---- Dark theme: re-point the semantic tokens to their -dark siblings --- */
+
+@media (prefers-color-scheme: dark) {
+  .fd-viewer:not([data-fd-theme="light"], [data-fd-theme="light"] *) {
+    --fd-bg: var(--fd-bg-dark);
+    --fd-bg-canvas: var(--fd-bg-canvas-dark);
+    --fd-fg: var(--fd-fg-dark);
+    --fd-fg-muted: var(--fd-fg-muted-dark);
+    --fd-border: var(--fd-border-dark);
+    --fd-page-border: var(--fd-page-border-dark);
+    --fd-danger: var(--fd-danger-dark);
+    color-scheme: dark;
+  }
+}
+
+[data-fd-theme="dark"] .fd-viewer,
+.fd-viewer[data-fd-theme="dark"] {
+  --fd-bg: var(--fd-bg-dark);
+  --fd-bg-canvas: var(--fd-bg-canvas-dark);
+  --fd-fg: var(--fd-fg-dark);
+  --fd-fg-muted: var(--fd-fg-muted-dark);
+  --fd-border: var(--fd-border-dark);
+  --fd-page-border: var(--fd-page-border-dark);
+  --fd-danger: var(--fd-danger-dark);
+  color-scheme: dark;
+}
+
+/* data-fd-theme="light" on the root beats a dark ancestor (e.g. <html
+   data-fd-theme="dark">): same specificity as the rule above and later, it
+   takes the light tokens back from the parent (the dark remap only ever
+   applies to .fd-viewer elements, so the parent still holds the light ones). */
+.fd-viewer[data-fd-theme="light"] {
+  --fd-bg: inherit;
+  --fd-bg-canvas: inherit;
+  --fd-fg: inherit;
+  --fd-fg-muted: inherit;
+  --fd-border: inherit;
+  --fd-page-border: inherit;
+  --fd-danger: inherit;
+  color-scheme: light;
+}
+
+/* ---- Toolbar ---------------------------------------------------------- */
+
+.fd-viewer__toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--fd-border);
+  background: var(--fd-bg);
+}
+
+.fd-viewer__group {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.fd-viewer__btn {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--fd-control-size);
+  min-height: var(--fd-control-size);
+  margin: 0;
+  padding: 0 8px;
+  font: inherit;
+  line-height: 1;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--fd-transition-fast);
+}
+
+.fd-viewer__btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fd-fg) 8%, transparent);
+}
+
+.fd-viewer__btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--fd-fg) 12%, transparent);
+}
+
+.fd-viewer__btn:focus-visible {
+  outline: 2px solid var(--fd-focus-ring);
+  outline-offset: 2px;
+}
+
+.fd-viewer__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Glyph buttons (‹ › − +) read better a little larger than the 13px base. */
+.fd-viewer__nav,
+.fd-viewer__zoom {
+  font-size: 16px;
+}
+
+.fd-viewer__zoom--fit {
+  font-size: var(--fd-font-size-base);
+}
+
+.fd-viewer__page-info,
+.fd-viewer__zoom-level {
+  padding: 0 4px;
+  color: var(--fd-fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fd-viewer__zoom-level {
+  min-width: 4.5ch;
+  text-align: center;
+}
+
+/* ---- Document area ---------------------------------------------------- */
+
+/* Scroll container and keyboard focus target. Block layout on purpose: flex
+   centering would make overflow on the start side unreachable when zoomed. */
+/* scrollbar-gutter: stable reserves the classic-scrollbar gutter up front, so
+   fit-to-width (computed from clientWidth) does not overshoot when the taller
+   fitted page makes the vertical scrollbar appear. */
+.fd-viewer__viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  padding: 16px;
+  background: var(--fd-bg-canvas);
+}
+
+.fd-viewer__viewport:focus-visible {
+  outline: 2px solid var(--fd-focus-ring);
+  outline-offset: -2px;
+}
+
+/* The sized page box (width/height set inline from zoom); future annotation
+   overlays are positioned inside it. Always white: the PDF page is never
+   themed. The edge is an outline, not a border: under border-box a border
+   would shrink the bitmap to (W-2)x(H-2), and outside the box it takes no
+   layout space, so fit-to-width stays exact. Kept separate from
+   --fd-page-shadow so a host setting that token to `none` keeps the edge. */
+.fd-viewer__page {
+  position: relative;
+  margin: 16px auto;
+  background: #fff;
+  outline: 1px solid var(--fd-page-border);
+  box-shadow: var(--fd-page-shadow);
+}
+
+/* Fills the page box. max-width/height defend against host resets such as
+   `img { max-width: 100%; height: auto }`, which would cancel zoom. */
+.fd-viewer__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+}
+
+/* Page geometry unavailable: show the bitmap at its natural size. */
+.fd-viewer__page--natural {
+  width: fit-content;
+}
+
+.fd-viewer__canvas--natural {
+  width: auto;
+  height: auto;
+}
+
+/* ---- States ----------------------------------------------------------- */
+
+.fd-viewer__error {
+  margin: 0;
+  padding: 12px 16px;
+  color: var(--fd-danger);
+}
+
+/* Sits on the canvas color, so it uses --fd-fg (muted text fails AA there). */
+.fd-viewer__empty {
+  margin: 0;
+  padding: 16px;
+  color: var(--fd-fg);
+  background: var(--fd-bg-canvas);
+}
+
+/* ---- Narrow containers (container query, not viewport width) ----------- */
+
+@container fd-viewer (max-width: 479px) {
+  .fd-viewer__group {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  .fd-viewer__viewport {
+    padding: 8px;
+  }
+
+  .fd-viewer__page {
+    margin: 8px auto;
+  }
+}
+
+/* ---- Reduced motion ---------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .fd-viewer,
+  .fd-viewer *,
+  .fd-viewer *::before,
+  .fd-viewer *::after {
+    transition-duration: 0s;
+    animation-duration: 0s;
+    scroll-behavior: auto;
+  }
+}

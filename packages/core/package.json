@@ -10,11 +10,16 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./styles.css": "./styles.css"
   },
+  "sideEffects": [
+    "*.css"
+  ],
   "files": [
     "dist",
-    "src"
+    "src",
+    "styles.css"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

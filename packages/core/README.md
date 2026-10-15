@@ -54,9 +54,36 @@ result envelope, which the wrapper unwraps).
   `renderPage(i, opts?)`, `addAnnotation(a)`, `getAnnotations(i)`,
   `exportAnnotations()`, `save()`, `close()`.
 
+## Styles
+
+`@fluxdocs/core/styles.css` is the base stylesheet for the viewer DOM shared by
+`@fluxdocs/react` and `@fluxdocs/vue` (`.fd-viewer`, `.fd-viewer__toolbar`, …).
+Import it once in the host app; the components never import it themselves, so
+they stay usable (unstyled) under SSR and in test runners:
+
+```ts
+import "@fluxdocs/core/styles.css";
+```
+
+- Plain CSS, no build step. It never triggers a network request: no `@import`,
+  no `@font-face`, no `url()`. Inter / JetBrains Mono are used only if the host
+  already loads them; otherwise `system-ui`.
+- Theming is done with the `--fd-*` tokens (spec §8.2): override the base name
+  for light (`--fd-bg`) and the `-dark` sibling for dark (`--fd-bg-dark`) at
+  `:root` or any ancestor of the viewer.
+- Light by default, dark under `prefers-color-scheme: dark`. Force a theme with
+  `data-fd-theme="light"` or `data-fd-theme="dark"` on `<html>` or any ancestor.
+  The rendered PDF page itself is never inverted.
+- Selectors are single `fd-` classes (no `@layer`, no `!important`), so common
+  host resets such as `button { all: unset }` or `img { max-width: 100% }` do
+  not break the viewer.
+- The viewer fills its container's width. In a shrink-to-fit container (a flex
+  item without a width, `inline-block`, a float, an absolutely positioned box)
+  it falls back to 320 px wide; give such containers an explicit width.
+
 ## Develop
 
 ```bash
 pnpm build   # tsc -> dist/
-pnpm test    # build, then drive the real WASM core under Node (needs a Go toolchain)
+pnpm test    # build, lint styles.css, then drive the real WASM core under Node (needs a Go toolchain)
 ```
