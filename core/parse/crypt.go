@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"fmt"
+	"math"
 )
 
 // crypt.go implements the PDF Standard Security Handler (ISO 32000 §7.6.3) for
@@ -53,7 +54,7 @@ func newDecryptor(enc Dict, id, password []byte) (*decryptor, error) {
 
 	length := 40
 	if l, ok := enc.GetInt("Length"); ok && l > 0 {
-		length = int(l)
+		length = keyBits(l)
 	}
 
 	method := methodRC4
@@ -64,7 +65,18 @@ func newDecryptor(enc Dict, id, password []byte) (*decryptor, error) {
 			return nil, err
 		}
 	}
-	keyLen := length / 8
+	// Algorithm 2 step (h) (§7.6.3.3): an R2 key is always 5 bytes, whatever
+	// /Length says. R3–R4 keys are /Length bits, 40–128 (§7.6.3.2, Table 20);
+	// the key is cut from a 16-byte MD5 sum, so a hostile /Length 256 sliced it
+	// to [:32] and panicked on open (SECURITY.md §2): reject out-of-range
+	// lengths as unsupported.
+	keyLen := 5
+	if r >= 3 {
+		if length < 40 || length > 128 {
+			return nil, fmt.Errorf("%w: unsupported key /Length %d", errLex, length)
+		}
+		keyLen = length / 8
+	}
 
 	encMeta := true
 	if b, ok := enc["EncryptMetadata"].(Boolean); ok {
@@ -85,7 +97,7 @@ func readCryptFilter(enc Dict) (cryptMethod, int, error) {
 	case "V2":
 		length := 128
 		if l, ok := std.GetInt("Length"); ok && l > 0 {
-			length = normalizeLen(int(l))
+			length = normalizeLen(keyBits(l))
 		}
 		return methodRC4, length, nil
 	case "AESV2":
@@ -93,6 +105,16 @@ func readCryptFilter(enc Dict) (cryptMethod, int, error) {
 	default:
 		return 0, 0, fmt.Errorf("%w: unsupported crypt filter method %q", errLex, cfm)
 	}
+}
+
+// keyBits narrows a positive /Length to int, clamping it in int64 first so a
+// hostile value cannot wrap on a 32-bit int into the accepted 40–128 range
+// (2^32+64 would become 64); the clamped value is rejected by the range check.
+func keyBits(l Integer) int {
+	if l > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(l)
 }
 
 // normalizeLen accepts a crypt-filter /Length given either in bytes or bits.

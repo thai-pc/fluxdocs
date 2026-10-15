@@ -13,6 +13,7 @@ package fuzz
 import (
 	"bytes"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -81,9 +82,54 @@ func flatePDF(decodeParms string) []byte {
 	})
 }
 
+// objStmPDF builds a PDF 1.5 file whose page (object 3) is compressed in an
+// object stream (object 4) whose dictionary declares /N n, indexed by an xref
+// stream (object 5) declaring /W w. The packed rows always use widths [1 4 2],
+// so a hostile n or w reaches the ObjStm / xref-stream header checks on open.
+func objStmPDF(n, w string) []byte {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.5\n")
+	off := make([]int, 6)
+	for i, o := range []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+	} {
+		off[i+1] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	const header = "3 0 "
+	body := header + "<< /Type /Page /Parent 2 0 R >>"
+	off[4] = b.Len()
+	fmt.Fprintf(&b, "4 0 obj\n<< /Type /ObjStm /N %s /First %d /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		n, len(header), len(body), body)
+
+	off[5] = b.Len()
+	var rows []byte
+	for i, typ := range []byte{0, 1, 1, 2, 1, 1} {
+		f2, f3 := uint32(off[i]), uint16(0)
+		switch {
+		case i == 0:
+			f3 = 65535
+		case typ == 2:
+			f2 = 4 // obj 3 lives in ObjStm 4 at index 0
+		}
+		rows = append(rows, typ, byte(f2>>24), byte(f2>>16), byte(f2>>8), byte(f2), byte(f3>>8), byte(f3))
+	}
+	fmt.Fprintf(&b, "5 0 obj\n<< /Type /XRef /Size 6 /Root 1 0 R /W %s /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		w, len(rows), rows)
+	fmt.Fprintf(&b, "startxref\n%d\n%%%%EOF\n", off[5])
+	return b.Bytes()
+}
+
 // classicPDF serializes objs as objects 1..n with a classic xref table and a
 // trailer whose /Root is object 1.
 func classicPDF(objs []string) []byte {
+	return classicPDFTrailer(objs, "")
+}
+
+// classicPDFTrailer is classicPDF with extra trailer entries (e.g. /Encrypt and
+// /ID) appended inside the trailer dictionary.
+func classicPDFTrailer(objs []string, trailerExtra string) []byte {
 	var b bytes.Buffer
 	b.WriteString("%PDF-1.7\n")
 	off := make([]int, len(objs))
@@ -96,7 +142,7 @@ func classicPDF(objs []string) []byte {
 	for _, o := range off {
 		fmt.Fprintf(&b, "%010d 00000 n \n", o)
 	}
-	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, x)
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R %s>>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, trailerExtra, x)
 	return b.Bytes()
 }
 
@@ -164,6 +210,28 @@ func seeds() [][]byte {
 			"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
 			"<< /Type /Page /Parent 2 0 R /Rotate " + bigReal + " >>",
 		}),
+		// Hostile header integers that sized an allocation or a slice on open
+		// (a native crash from OpenBytes): ObjStm /N 2^60 reached makeslice;
+		// xref-stream /W widths of 2^62 wrapped the row length negative.
+		objStmPDF("1", "[1 4 2]"), // valid control: the page resolves via the ObjStm
+		objStmPDF("1152921504606846976", "[1 4 2]"),
+		objStmPDF("9223372036854775807", "[1 4 2]"),
+		objStmPDF("1", "[4611686018427387904 4611686018427387904 4611686018427387904]"),
+		objStmPDF("1", "[1 9223372036854775807 1]"),
+		// A direct stream /Length of MaxInt64 wrapped start+length negative.
+		classicPDF([]string{
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+			"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+			"<< /Length 9223372036854775807 >>\nstream\n0 0 m 10 10 l S\nendstream",
+		}),
+		// An /Encrypt key /Length of 256 bits sliced the 16-byte MD5 sum to [:32].
+		classicPDFTrailer([]string{
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+			"<< /Type /Page /Parent 2 0 R >>",
+			"<< /Filter /Standard /V 2 /R 3 /Length 256 /P -44 /O <" + strings.Repeat("AB", 32) + "> /U <" + strings.Repeat("CD", 32) + "> >>",
+		}, "/Encrypt 4 0 R /ID [<00112233445566778899AABBCCDDEEFF> <00112233445566778899AABBCCDDEEFF>] "),
 	}
 }
 
@@ -197,6 +265,45 @@ func TestHostileMediaBoxSeedsReturnError(t *testing.T) {
 			img, err := doc.RenderPage(0, core.RenderOptions{DPI: 36, Format: "png"})
 			if err == nil {
 				t.Fatalf("RenderPage returned %d bytes, want canvas-too-large error", len(img))
+			}
+		})
+	}
+}
+
+// TestHostileHeaderSeedsReturnError pins the header-integer seeds: the valid
+// ObjStm control must open (so the builder really reaches the ObjStm path), and
+// each hostile variant must come back from OpenBytes as ErrInvalidPDF (or
+// ErrEncryptedDocument for the /Encrypt key length), never as a crash.
+func TestHostileHeaderSeedsReturnError(t *testing.T) {
+	doc, err := core.OpenBytes(objStmPDF("1", "[1 4 2]"))
+	if err != nil {
+		t.Fatalf("valid ObjStm control: OpenBytes: %v", err)
+	}
+	if doc.GetPageCount() != 1 {
+		t.Fatalf("valid ObjStm control: %d pages, want 1", doc.GetPageCount())
+	}
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{"ObjStm /N 2^60", objStmPDF("1152921504606846976", "[1 4 2]"), core.ErrInvalidPDF},
+		{"ObjStm /N MaxInt64", objStmPDF("9223372036854775807", "[1 4 2]"), core.ErrInvalidPDF},
+		{"xref /W 3x2^62", objStmPDF("1", "[4611686018427387904 4611686018427387904 4611686018427387904]"), core.ErrInvalidPDF},
+		{"xref /W MaxInt64 middle", objStmPDF("1", "[1 9223372036854775807 1]"), core.ErrInvalidPDF},
+		{"Encrypt /Length 256", classicPDFTrailer([]string{
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+			"<< /Type /Page /Parent 2 0 R >>",
+			"<< /Filter /Standard /V 2 /R 3 /Length 256 /P -44 /O <" + strings.Repeat("AB", 32) + "> /U <" + strings.Repeat("CD", 32) + "> >>",
+		}, "/Encrypt 4 0 R /ID [<00112233445566778899AABBCCDDEEFF> <00112233445566778899AABBCCDDEEFF>] "),
+			core.ErrEncryptedDocument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := core.OpenBytes(tc.data)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("OpenBytes err = %v, want %v", err, tc.want)
 			}
 		})
 	}

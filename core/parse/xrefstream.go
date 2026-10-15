@@ -24,10 +24,14 @@ func parseXrefStreamAt(data []byte, off int) (map[int]XrefEntry, Dict, int, erro
 	if !ok || len(w) < 3 {
 		return nil, nil, -1, fmt.Errorf("%w: xref stream missing /W widths", errLex)
 	}
+	// Bound each width before summing (SECURITY.md §2): unbounded, three widths
+	// of 2^62 wrap the row length negative, which slips past the truncation
+	// check below and slices far beyond the data. A field wider than maxDecoded
+	// cannot fit in any decoded stream, and three such bounds cannot overflow.
 	var width [3]int
 	for i := 0; i < 3; i++ {
 		n, ok := w[i].(Integer)
-		if !ok || n < 0 {
+		if !ok || n < 0 || n > maxDecoded {
 			return nil, nil, -1, fmt.Errorf("%w: invalid /W entry", errLex)
 		}
 		width[i] = int(n)

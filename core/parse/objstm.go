@@ -85,8 +85,18 @@ func (r *Resolver) loadObjStm(streamNum int) (*objStm, error) {
 	if err != nil {
 		return nil, err
 	}
-	if int(first) > len(decoded) {
+	// Compare in int64: /First and /N are attacker-controlled and must be
+	// bounded by the decoded data before either is narrowed to int or sizes an
+	// allocation (SECURITY.md §2).
+	if int64(first) > int64(len(decoded)) {
 		return nil, fmt.Errorf("%w: ObjStm %d /First past end", errLex, streamNum)
+	}
+	// Each of the N objects needs its "objNum offset" pair (≥ 3 bytes plus a
+	// separator) and a body of ≥ 1 byte, so a well-formed stream holds at least
+	// 4N bytes. A larger /N cannot be satisfied; rejecting it here keeps a
+	// hostile /N 2^60 from reaching makeslice.
+	if int64(n) > int64(len(decoded))/4 {
+		return nil, fmt.Errorf("%w: ObjStm %d /N %d exceeds its data", errLex, streamNum, n)
 	}
 
 	// Header: N pairs of integers "objNum offset" before /First.

@@ -149,15 +149,16 @@ func (p *iparser) maybeStream(d Dict) (Object, error) {
 	start := skipStreamEOL(p.data, ni)
 
 	end := -1
-	if length, ok := d.GetInt("Length"); ok && int(length) >= 0 {
+	// Bound /Length by the remaining input in int64 before adding: a hostile
+	// MaxInt64 wrapped start+length negative and indexed data[-n] (SECURITY.md
+	// §2). An over-long /Length falls back to the endstream scan below.
+	if length, ok := d.GetInt("Length"); ok && length >= 0 && int64(length) <= int64(len(p.data)-start) {
 		cand := start + int(length)
-		if cand <= len(p.data) {
-			// Validate: after Length bytes (skipping EOL) must come 'endstream'.
-			probe := skipStreamEOL(p.data, cand)
-			if bytes.HasPrefix(p.data[probe:], []byte("endstream")) {
-				end = cand
-				p.pos = probe + len("endstream")
-			}
+		// Validate: after Length bytes (skipping EOL) must come 'endstream'.
+		probe := skipStreamEOL(p.data, cand)
+		if bytes.HasPrefix(p.data[probe:], []byte("endstream")) {
+			end = cand
+			p.pos = probe + len("endstream")
 		}
 	}
 
