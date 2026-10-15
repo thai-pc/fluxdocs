@@ -104,4 +104,62 @@ assert(fluxdocs.pageCount(9999).error !== "", "unknown handle -> error");
 fluxdocs.close(h);
 assert(fluxdocs.pageCount(h).error !== "", "closed handle -> error");
 
+// A Go panic inside an export (here: a non-numeric handle, which makes
+// js.Value.Int panic) must come back as an error envelope, and the runtime must
+// survive it — an uncaught panic would kill every later fluxdocs.* call.
+const bad = fluxdocs.pageCount("not-a-handle");
+assert(/^pageCount: internal error: /.test(bad.error), `panic -> envelope: ${JSON.stringify(bad)}`);
+assert(fluxdocs.version().version === "0.1.0", "runtime survives a recovered panic");
+
+// A hostile MediaBox (2^33 pt at 36 DPI = 2^32 x 2^32 px, whose int64 area wraps
+// to 0) must be rejected by the canvas cap, not crash the runtime.
+function onePagePDF(mediaBox) {
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox ${mediaBox} >>`,
+    "<< /Type /Page /Parent 2 0 R >>",
+  ];
+  let out = "%PDF-1.7\n";
+  const offs = objs.map((o, i) => {
+    const off = out.length;
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+    return off;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offs) out += `${String(off).padStart(10, "0")} 00000 n \n`;
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new TextEncoder().encode(out);
+}
+const huge = fluxdocs.open(onePagePDF("[0 0 8589934592 8589934592]"));
+assert(huge.error === "", `open hostile MediaBox: ${huge.error}`);
+const hugeRender = fluxdocs.renderPage(huge.handle, 0, { dpi: 36, format: "png" });
+assert(/exceeds/.test(hugeRender.error), `hostile MediaBox render -> canvas error: ${hugeRender.error}`);
+fluxdocs.close(huge.handle);
+assert(fluxdocs.version().version === "0.1.0", "runtime alive after hostile render");
+
+// 1e18 pt at DPI 1 is the case where the float→int conversion saturates under
+// js/wasm (the native int64 wrap differs), so it must be pinned here too.
+const huger = fluxdocs.open(onePagePDF("[0 0 1000000000000000000 1000000000000000000]"));
+assert(huger.error === "", `open 1e18 MediaBox: ${huger.error}`);
+const hugerRender = fluxdocs.renderPage(huger.handle, 0, { dpi: 1, format: "png" });
+assert(/exceeds/.test(hugerRender.error), `1e18 MediaBox render -> canvas error: ${hugerRender.error}`);
+assert(hugerRender.image === undefined, "rejected render carries no image");
+fluxdocs.close(huger.handle);
+
+// After a recovered panic and two rejected renders, the real pipeline must still
+// produce output: recover() must not swallow happy-path results.
+const again = fluxdocs.open(pdf);
+assert(again.error === "", `re-open after recovered panic: ${again.error}`);
+const pngAgain = fluxdocs.renderPage(again.handle, 0, { dpi: 72, format: "png" });
+assert(pngAgain.error === "" && pngAgain.image.length > 100, `render after recovered panic: ${pngAgain.error}`);
+assert(pngAgain.image[0] === 0x89 && pngAgain.image[1] === 0x50, "render after recovered panic returns PNG magic");
+
+// An absurd JS dpi (js.Value.Int on 1e300) must hit the canvas cap, not wrap
+// into a tiny or negative canvas.
+const absurdDPI = fluxdocs.renderPage(again.handle, 0, { dpi: 1e300, format: "png" });
+assert(/exceeds/.test(absurdDPI.error), `dpi 1e300 -> canvas error: ${absurdDPI.error}`);
+assert(fluxdocs.extractText(again.handle).text.includes("Hello WASM"), "extractText after rejected render");
+fluxdocs.close(again.handle);
+
 console.log(`OK — ${passed} assertions passed`);

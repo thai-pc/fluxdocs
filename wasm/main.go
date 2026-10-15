@@ -9,12 +9,14 @@
 // Every exported function returns a plain result object with an "error" string
 // field: "" on success (plus the result fields), or a message on failure. This
 // envelope is predictable and easy to consume from JS without try/catch around
-// Go panics.
+// Go panics: every export is wrapped by export(), which turns a panic into the
+// same error envelope.
 package main
 
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"syscall/js"
 
 	"github.com/thai-pc/fluxdocs/core"
@@ -29,18 +31,18 @@ var (
 
 func main() {
 	api := js.Global().Get("Object").New()
-	api.Set("version", js.FuncOf(version))
-	api.Set("open", js.FuncOf(open))
-	api.Set("close", js.FuncOf(closeDoc))
-	api.Set("pageCount", js.FuncOf(pageCount))
-	api.Set("pageSize", js.FuncOf(pageSize))
-	api.Set("extractText", js.FuncOf(extractText))
-	api.Set("extractTextByPage", js.FuncOf(extractTextByPage))
-	api.Set("renderPage", js.FuncOf(renderPage))
-	api.Set("save", js.FuncOf(save))
-	api.Set("addAnnotation", js.FuncOf(addAnnotation))
-	api.Set("getAnnotations", js.FuncOf(getAnnotations))
-	api.Set("exportAnnotations", js.FuncOf(exportAnnotations))
+	api.Set("version", export("version", version))
+	api.Set("open", export("open", open))
+	api.Set("close", export("close", closeDoc))
+	api.Set("pageCount", export("pageCount", pageCount))
+	api.Set("pageSize", export("pageSize", pageSize))
+	api.Set("extractText", export("extractText", extractText))
+	api.Set("extractTextByPage", export("extractTextByPage", extractTextByPage))
+	api.Set("renderPage", export("renderPage", renderPage))
+	api.Set("save", export("save", save))
+	api.Set("addAnnotation", export("addAnnotation", addAnnotation))
+	api.Set("getAnnotations", export("getAnnotations", getAnnotations))
+	api.Set("exportAnnotations", export("exportAnnotations", exportAnnotations))
 	js.Global().Set("fluxdocs", api)
 
 	// Keep the Go runtime alive so the exported functions stay callable.
@@ -61,6 +63,23 @@ func okResult() js.Value {
 	o := newObject()
 	o.Set("error", "")
 	return o
+}
+
+// export wraps fn as a JS function that never lets a Go panic escape. An
+// uncaught panic in a js.FuncOf callback kills the Go runtime, leaving every
+// fluxdocs.* call dead for the page's lifetime; instead the panic becomes the
+// usual error envelope ("<name>: internal error: ...") and the runtime stays up.
+// The parser/renderer must not panic on untrusted input (SECURITY.md §2) — this
+// is the last line of defense, not a substitute for bounding the input.
+func export(name string, fn func(js.Value, []js.Value) any) js.Func {
+	return js.FuncOf(func(this js.Value, args []js.Value) (result any) {
+		defer func() {
+			if r := recover(); r != nil {
+				result = errResult(fmt.Sprintf("%s: internal error: %v", name, r))
+			}
+		}()
+		return fn(this, args)
+	})
 }
 
 // toUint8Array copies b into a fresh JS Uint8Array.
