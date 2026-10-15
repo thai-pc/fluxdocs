@@ -1,6 +1,9 @@
 package parse
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 const (
 	maxPageTreeDepth = 50      // bound a deeply nested / malicious page tree
@@ -133,8 +136,8 @@ func (r *Resolver) applyInherited(inh inherited, d Dict) inherited {
 	if mb, ok := r.resolveRectangle(d["MediaBox"]); ok {
 		inh.mediaBox = &mb
 	}
-	if rot, ok := r.resolveInt(d["Rotate"]); ok {
-		inh.rotate = normalizeRotate(rot)
+	if rot, ok := r.resolveRotate(d["Rotate"]); ok {
+		inh.rotate = rot
 	}
 	return inh
 }
@@ -171,17 +174,28 @@ func (r *Resolver) resolveArray(obj Object) (Array, bool, error) {
 	return a, ok, nil
 }
 
-// resolveInt resolves obj to an int, accepting Integer (and truncating Real).
-func (r *Resolver) resolveInt(obj Object) (int, bool) {
+// resolveRotate resolves a /Rotate value (§7.7.3.3, a multiple of 90) to one of
+// 0/90/180/270, accepting Integer and truncating Real. The value is reduced
+// modulo 360 before it is converted to int — in int64 for an Integer, with
+// math.Mod (exact) for a Real — because an out-of-range float→int conversion is
+// implementation-defined: amd64 yields MinInt64 while js/wasm saturates, so
+// /Rotate 1e30 rendered at 270° natively and 0° in the browser. A non-finite
+// Real (not producible by the lexer) or a non-number yields ok=false, keeping
+// the inherited value.
+func (r *Resolver) resolveRotate(obj Object) (int, bool) {
 	resolved, err := r.Resolve(obj)
 	if err != nil {
 		return 0, false
 	}
 	switch v := resolved.(type) {
 	case Integer:
-		return int(v), true
+		return normalizeRotate(int(int64(v) % 360)), true
 	case Real:
-		return int(v), true
+		f := float64(v)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0, false
+		}
+		return normalizeRotate(int(math.Mod(math.Trunc(f), 360))), true
 	default:
 		return 0, false
 	}

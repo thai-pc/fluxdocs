@@ -127,15 +127,21 @@ func applyPredictor(data []byte, parms Dict) ([]byte, error) {
 	colors := parmInt(parms, "Colors", 1)
 	bpc := parmInt(parms, "BitsPerComponent", 8)
 	columns := parmInt(parms, "Columns", 1)
-	if colors < 1 || bpc < 1 || columns < 1 {
+	// Bound each parameter before multiplying (SECURITY.md §2): unbounded, the
+	// row-length product wraps (e.g. Colors 3 × BitsPerComponent 2^62 × Columns
+	// 3), and a hostile row length drives the allocations below. With every
+	// factor ≤ maxDecoded (2^28) and bpc ≤ 16 the product is ≤ 2^60, so it fits
+	// an int64, and a row longer than maxDecoded cannot decode anyway.
+	if colors < 1 || bpc < 1 || columns < 1 || colors > maxDecoded || bpc > 16 || columns > maxDecoded {
 		return nil, fmt.Errorf("%w: invalid predictor parameters", errLex)
 	}
 
-	bytesPerPixel := (colors*bpc + 7) / 8
-	rowLen := (colors*bpc*columns + 7) / 8
-	if rowLen <= 0 {
+	bytesPerPixel := int((int64(colors)*int64(bpc) + 7) / 8)
+	rowLen64 := (int64(colors)*int64(bpc)*int64(columns) + 7) / 8
+	if rowLen64 <= 0 || rowLen64 > maxDecoded {
 		return nil, fmt.Errorf("%w: invalid predictor row length", errLex)
 	}
+	rowLen := int(rowLen64)
 
 	if predictor == 2 {
 		return tiffPredictor(data, rowLen, bytesPerPixel), nil
@@ -151,6 +157,9 @@ func pngPredictor(data []byte, rowLen, bpp int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: PNG predictor data not a multiple of row length", errLex)
 	}
 	rows := len(data) / stride
+	if rows == 0 {
+		return []byte{}, nil // empty data: do not allocate a row from parameters alone
+	}
 	out := make([]byte, 0, rows*rowLen)
 	prev := make([]byte, rowLen)
 

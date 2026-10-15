@@ -3,6 +3,7 @@ package parse
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -182,5 +183,49 @@ func TestNormalizeRotate(t *testing.T) {
 		if got := normalizeRotate(tt.in); got != tt.want {
 			t.Errorf("normalizeRotate(%d) = %d, want %d", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestPages_RotateRealOutOfIntRange pins /Rotate for reals beyond the int range.
+// They are reduced modulo 360 in float64 (exactly) before converting; a direct
+// float→int conversion is implementation-defined (amd64 yields MinInt64 → 270°,
+// js/wasm saturates to MaxInt64 → 0°), so the same page rotated differently
+// natively and in the browser. Expected values are the exact float64 value of
+// the literal mod 360, floored to a quarter turn.
+func TestPages_RotateRealOutOfIntRange(t *testing.T) {
+	zeros := func(lead string, n int) string { return lead + strings.Repeat("0", n) + ".0" }
+	cases := []struct {
+		rotate string
+		want   int
+	}{
+		{"90.0", 90},
+		{"89.9", 0},
+		{"-90.0", 270},
+		{"450.5", 90},
+		{"9223372036854775807", 0}, // Integer MaxInt64 ≡ 7, reduced in int64
+		{zeros("1", 30), 0},        // 1e30 ≡ 16 (mod 360)
+		{zeros("3", 19), 90},       // 3e19 ≡ 120
+		{"-" + zeros("2", 19), 90}, // -2e19 ≡ 160
+		{zeros("1", 40), 90},       // 1e40 ≡ 112
+	}
+	for _, tc := range cases {
+		t.Run(tc.rotate, func(t *testing.T) {
+			pdf := buildPDF(map[int]string{
+				1: "<< /Type /Catalog /Pages 2 0 R >>",
+				2: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+				3: "<< /Type /Page /Parent 2 0 R /Rotate " + tc.rotate + " >>",
+			}, "<< /Size 4 /Root 1 0 R >>")
+			r, err := NewResolver(pdf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pages, err := r.Pages()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := pages[0].Rotate; got != tc.want {
+				t.Errorf("Rotate = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

@@ -161,3 +161,48 @@ func TestDecodeStream_PredictorBadRowLength(t *testing.T) {
 		t.Error("DecodeStream with ragged predictor data = nil error, want an error")
 	}
 }
+
+// TestDecodeStream_HostilePredictorParams feeds /DecodeParms whose row-length
+// arithmetic overflows or whose row length alone would drive a huge allocation
+// (SECURITY.md §2). With empty data these used to panic in makeslice (Columns
+// 2^52; Colors 3 × BitsPerComponent 2^62 × Columns 3 wraps to a positive 2^59
+// row) or allocate a 512 MiB row for nothing. Each must return an error.
+func TestDecodeStream_HostilePredictorParams(t *testing.T) {
+	cases := []struct {
+		name  string
+		parms Dict
+	}{
+		{"Columns 2^52", Dict{"Predictor": Integer(12), "Columns": Integer(1 << 52)}},
+		{"Columns 2^29 over maxDecoded", Dict{"Predictor": Integer(12), "Columns": Integer(1 << 29)}},
+		{"row length wraps positive", Dict{"Predictor": Integer(12), "Colors": Integer(3), "BitsPerComponent": Integer(1 << 62), "Columns": Integer(3)}},
+		{"Colors x Columns wraps", Dict{"Predictor": Integer(12), "Colors": Integer(1 << 33), "Columns": Integer(1 << 33)}},
+		{"TIFF, negative bytes per pixel", Dict{"Predictor": Integer(2), "Colors": Integer(1<<32 + 1), "BitsPerComponent": Integer(1 << 31), "Columns": Integer(2)}},
+		{"BitsPerComponent 32", Dict{"Predictor": Integer(12), "BitsPerComponent": Integer(32), "Columns": Integer(4)}},
+		{"Colors over maxDecoded", Dict{"Predictor": Integer(12), "Colors": Integer(maxDecoded + 1)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, raw := range [][]byte{nil, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}} {
+				st := &Stream{Dict: Dict{"Filter": Name("FlateDecode"), "DecodeParms": tc.parms}, Raw: zlibBytes(raw)}
+				if got, err := DecodeStream(st); err == nil {
+					t.Errorf("data %d bytes: DecodeStream = %d bytes, want an error", len(raw), len(got))
+				}
+			}
+		})
+	}
+}
+
+// TestDecodeStream_PredictorEmptyData keeps the lenient result for an empty
+// predicted stream with sane parameters: empty output, no error.
+func TestDecodeStream_PredictorEmptyData(t *testing.T) {
+	for _, pred := range []Integer{2, 12} {
+		st := &Stream{
+			Dict: Dict{"Filter": Name("FlateDecode"), "DecodeParms": Dict{"Predictor": pred, "Columns": Integer(4)}},
+			Raw:  zlibBytes(nil),
+		}
+		got, err := DecodeStream(st)
+		if err != nil || len(got) != 0 {
+			t.Errorf("Predictor %d: DecodeStream = %v, %v; want empty, nil", pred, got, err)
+		}
+	}
+}
