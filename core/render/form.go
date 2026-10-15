@@ -111,7 +111,7 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 
 	// --- intersect the clip with the form /BBox device rectangle (§5) ---
 	if bbox, ok := formBBox(in.res, st.Dict); ok {
-		in.gs.clip = in.gs.clip.intersect(deviceBounds(bbox, in.gs.ctm))
+		in.gs.clip = in.gs.clip.intersect(deviceBounds(bbox, in.gs.ctm, fullClip(in.rs.w, in.rs.h)))
 	}
 	in.syncClip()
 
@@ -193,18 +193,28 @@ func formBBox(res *parse.Resolver, d parse.Dict) (parse.Rectangle, bool) {
 // half-open). For a rotated or skewed /Matrix this box is a superset of the true
 // clip region, so a rotated form may mildly overpaint but never loses content
 // (design O3).
-func deviceBounds(r parse.Rectangle, ctm matrix) clipRect {
+//
+// The box is clamped to bounds (the canvas) in float64 before the int
+// conversion (see clampToInt), so a /BBox with huge extents clips to the canvas
+// on every target. A NaN corner (e.g. Inf×0 from an overflowing CTM) yields an
+// empty box, so the form paints nothing rather than the whole canvas.
+func deviceBounds(r parse.Rectangle, ctm matrix, bounds clipRect) clipRect {
 	minX, minY := math.Inf(1), math.Inf(1)
 	maxX, maxY := math.Inf(-1), math.Inf(-1)
 	for _, c := range [4][2]float64{{r.LLX, r.LLY}, {r.URX, r.LLY}, {r.URX, r.URY}, {r.LLX, r.URY}} {
 		dx, dy := ctm.apply(c[0], c[1])
+		if math.IsNaN(dx) || math.IsNaN(dy) {
+			return clipRect{} // explicit: math.Max(NaN, +Inf) is +Inf
+		}
 		minX, maxX = math.Min(minX, dx), math.Max(maxX, dx)
 		minY, maxY = math.Min(minY, dy), math.Max(maxY, dy)
 	}
+	bx0, by0 := float64(bounds.x0), float64(bounds.y0)
+	bx1, by1 := float64(bounds.x1), float64(bounds.y1)
 	return clipRect{
-		x0: int(math.Floor(minX)),
-		y0: int(math.Floor(minY)),
-		x1: int(math.Ceil(maxX)),
-		y1: int(math.Ceil(maxY)),
+		x0: clampToInt(math.Floor(minX), bx0, bx1),
+		y0: clampToInt(math.Floor(minY), by0, by1),
+		x1: clampToInt(math.Ceil(maxX), bx0, bx1),
+		y1: clampToInt(math.Ceil(maxY), by0, by1),
 	}
 }

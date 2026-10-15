@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"fmt"
+	"strings"
 )
 
 // buildRenderPDF assembles a PDF from indirect-object bodies (1-based, keyed by
@@ -34,4 +35,11 @@ func buildRenderPDF(objects map[int]string, trailer string) []byte {
 // streamObj builds an uncompressed content-stream object body.
 func streamObj(content string) string {
 	return fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)
+}
+
+// spelled returns lead followed by zeros zero digits and ".0": a large real
+// literal spelled in full, since the content-stream lexer has no exponent
+// syntax (spelled("1", 30) is 1e30; "1e30" would lex as 1 then an e30 operator).
+func spelled(lead string, zeros int) string {
+	return lead + strings.Repeat("0", zeros) + ".0"
 }

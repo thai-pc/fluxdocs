@@ -165,23 +165,26 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 	minY, maxY := math.Inf(1), math.Inf(-1)
 	for _, sp := range subpaths {
 		for _, p := range sp {
+			// A NaN point (e.g. Inf×0 from an overflowing CTM) has no place on
+			// the canvas, so the path's area is undefined: paint nothing. The
+			// check must be explicit, as math.Max(NaN, +Inf) is +Inf.
+			if math.IsNaN(p.X) || math.IsNaN(p.Y) {
+				return
+			}
 			minY = math.Min(minY, p.Y)
 			maxY = math.Max(maxY, p.Y)
 		}
 	}
-	y0 := int(math.Floor(minY))
-	y1 := int(math.Ceil(maxY))
-	if y0 < 0 {
-		y0 = 0
-	}
-	if y1 > r.h {
-		y1 = r.h
-	}
+	// Clamp in float64 before converting (see clampToInt), so a huge path
+	// covers the same rows on every target.
+	y0 := clampToInt(math.Floor(minY), 0, float64(r.h))
+	y1 := clampToInt(math.Ceil(maxY), 0, float64(r.h))
 
 	type edge struct{ x, dir float64 }
 	for y := y0; y < y1; y++ {
 		sy := float64(y) + 0.5
 		var xs []edge
+		located := true
 		for _, sp := range subpaths {
 			n := len(sp)
 			if n < 2 {
@@ -195,8 +198,17 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 				}
 				// Half-open [min,max) test avoids double-counting shared vertices.
 				if (sy >= a.Y && sy < b.Y) || (sy >= b.Y && sy < a.Y) {
-					t := (sy - a.Y) / (b.Y - a.Y)
-					x := a.X + t*(b.X-a.X)
+					// A vertical edge crosses at its own x. Taking it directly
+					// also keeps an edge at x=±Inf exact, where the general
+					// form computes Inf−Inf = NaN.
+					x := a.X
+					if b.X != a.X {
+						t := (sy - a.Y) / (b.Y - a.Y)
+						x = a.X + t*(b.X-a.X)
+					}
+					if math.IsNaN(x) {
+						located = false
+					}
 					dir := 1.0
 					if b.Y < a.Y {
 						dir = -1.0
@@ -205,7 +217,10 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 				}
 			}
 		}
-		if len(xs) < 2 {
+		// A crossing that cannot be located (NaN, e.g. from an Inf−Inf
+		// interpolation) would also break the sort order the pairing relies on:
+		// the row gets no ink rather than guessed spans.
+		if len(xs) < 2 || !located {
 			continue
 		}
 		sort.Slice(xs, func(i, j int) bool { return xs[i].x < xs[j].x })
@@ -226,20 +241,19 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 	}
 }
 
-// span fills a horizontal run of pixels [x0, x1) on row y. It clamps to both the
-// canvas and the active clip x-range for speed; blend re-checks each pixel.
+// span fills a horizontal run of pixels [x0, x1) on row y, bounds rounded to the
+// nearest pixel. It clamps to the active clip x-range for speed; blend re-checks
+// each pixel. A NaN bound has no position on the row and paints nothing.
 func (r *raster) span(x0, x1 float64, y int, col color.RGBA) {
 	if y < r.clip.y0 || y >= r.clip.y1 {
 		return
 	}
-	ix0 := int(math.Round(x0))
-	ix1 := int(math.Round(x1))
-	if ix0 < r.clip.x0 {
-		ix0 = r.clip.x0
+	if math.IsNaN(x0) || math.IsNaN(x1) {
+		return
 	}
-	if ix1 > r.clip.x1 {
-		ix1 = r.clip.x1
-	}
+	lo, hi := float64(r.clip.x0), float64(r.clip.x1)
+	ix0 := clampToInt(math.Round(x0), lo, hi)
+	ix1 := clampToInt(math.Round(x1), lo, hi)
 	for x := ix0; x < ix1; x++ {
 		r.blend(x, y, col)
 	}
@@ -459,6 +473,23 @@ func clipSegment(a, b point, x0, y0, x1, y1 float64) (point, point, bool) {
 
 // isFinite reports whether v is neither NaN nor ±Inf.
 func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// clampToInt converts v to an int clamped to [lo, hi], clamping in float64
+// first. Go leaves the conversion of an out-of-range float (including ±Inf and
+// NaN) implementation-defined: amd64 yields MinInt64 while js/wasm and arm64
+// saturate, so converting untrusted geometry directly makes native and
+// in-browser renders differ. NaN maps to lo, which callers use as "empty": a
+// bound pair that is NaN collapses to [lo, lo) and paints nothing. lo and hi
+// must be integer-valued and within the int range.
+func clampToInt(v, lo, hi float64) int {
+	if !(v > lo) { // also catches NaN
+		return int(lo)
+	}
+	if v > hi {
+		return int(hi)
+	}
+	return int(v)
+}
 
 // flattenCubic appends a polyline approximation of the cubic Bézier from p0
 // through control points p1, p2 to p3 (all device space) to dst. The endpoint

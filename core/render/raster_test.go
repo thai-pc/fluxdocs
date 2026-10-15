@@ -214,3 +214,137 @@ func TestStroke_MatchesSampledStamps(t *testing.T) {
 		}
 	}
 }
+
+// Float→int conversions of out-of-range values are implementation-defined in Go:
+// amd64 yields MinInt64 for ±Inf, NaN and anything beyond the int range, while
+// js/wasm and arm64 saturate (NaN → 0). The tests below pin one exact,
+// mathematically correct pixel count for huge, infinite and NaN geometry so the
+// native and in-browser renderers cannot diverge again. Run them under both
+// targets:
+//
+//	go test ./core/render/
+//	GOOS=js GOARCH=wasm go test -exec "$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./core/render/
+
+// TestFill_ExtremeCoordinates fills rectangles with huge, infinite and NaN device
+// coordinates on the 100x100pt page (1px/pt) and asserts the exact ink count:
+// the part of the rectangle that overlaps the page is painted, and a path whose
+// geometry is NaN paints nothing.
+func TestFill_ExtremeCoordinates(t *testing.T) {
+	big := spelled("1", 30)   // 1e30
+	big2 := spelled("2", 30)  // 2e30
+	huge := spelled("1", 308) // 1e308: ×4 by cm overflows to ±Inf
+	huge15 := spelled("15", 307)
+	cases := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"1e30 rect covering the page", "0 0 " + big + " " + big + " re f", 100 * 100},
+		{"1e30 rect covering the page, even-odd", "0 0 " + big + " " + big + " re f*", 100 * 100},
+		{"+-1e30 rect covering the page", "-" + big + " -" + big + " " + big2 + " " + big2 + " re f", 100 * 100},
+		{"1e30 rect over the right half", "50 0 " + big + " 100 re f", 50 * 100},
+		{"1e30 rect over the top half", "0 50 100 " + big + " re f", 100 * 50},
+		{"1e30 rect off the page", big + " " + big + " " + big + " " + big + " re f", 0},
+		{"-1e30 rect left of the page", "-" + big + " 0 " + big + " 100 re f", 0},
+		// 4 × 1e308 overflows: device corners at x=+Inf, and at x=±Inf, y=±Inf.
+		{"rect to +Inf", "4 0 0 4 0 0 cm 0 0 " + huge + " 25 re f", 100 * 100},
+		{"rect from -Inf to +Inf", "4 0 0 4 0 0 cm -" + huge + " -" + huge + " " + huge15 + " " + huge15 + " re f", 100 * 100},
+		{"rect from -Inf to 0", "4 0 0 4 0 0 cm -" + huge + " 0 " + huge + " 25 re f", 0},
+		// Inf×0 in the CTM makes the corners NaN.
+		{"NaN corners", huge + " 0 0 " + huge + " 0 0 cm " + huge + " 0 0 " + huge + " 0 0 cm 0 0 1 1 re f", 0},
+		// CTM [Inf 0 0 -1 0 100]: x is NaN at user x=0 and +Inf at x=1, y finite.
+		{"NaN x with finite y", huge + " 0 0 1 0 0 cm " + huge + " 0 0 1 0 0 cm 0 0 1 50 re f", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			img := renderWithin(t, tc.content, 2*time.Second)
+			if got := darkPixels(img); got != tc.want {
+				t.Errorf("dark pixels = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSpan_ExtremeBounds calls span directly on a 10x3 raster and counts the
+// pixels it paints on row 1, with and without a narrowed clip. Bounds are
+// rounded to the nearest pixel; a NaN bound paints nothing.
+func TestSpan_ExtremeBounds(t *testing.T) {
+	nan, inf := math.NaN(), math.Inf(1)
+	black := color.RGBA{0, 0, 0, 0xff}
+	full := fullClip(10, 3)
+	narrow := clipRect{3, 0, 7, 3}
+	cases := []struct {
+		name   string
+		x0, x1 float64
+		y      int
+		clip   clipRect
+		want   int
+	}{
+		{"ordinary", 2, 5, 1, full, 3},
+		{"rounded", 2.4, 4.6, 1, full, 3},
+		{"empty", 5, 5, 1, full, 0},
+		{"reversed", 6, 2, 1, full, 0},
+		{"+-1e30", -1e30, 1e30, 1, full, 10},
+		{"to 1e30", 5, 1e30, 1, full, 5},
+		{"from -1e30", -1e30, 4, 1, full, 4},
+		{"right of canvas", 1e30, 2e30, 1, full, 0},
+		{"left of canvas", -2e30, -1e30, 1, full, 0},
+		{"+-Inf", -inf, inf, 1, full, 10},
+		{"to +Inf", 5, inf, 1, full, 5},
+		{"+Inf to +Inf", inf, inf, 1, full, 0},
+		{"NaN start", nan, 5, 1, full, 0},
+		{"NaN end", 2, nan, 1, full, 0},
+		{"NaN both", nan, nan, 1, full, 0},
+		{"+-1e30 narrow clip", -1e30, 1e30, 1, narrow, 4},
+		{"+-Inf narrow clip", -inf, inf, 1, narrow, 4},
+		{"row outside clip", -1e30, 1e30, 1, clipRect{0, 2, 10, 3}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRaster(10, 3)
+			r.clip = tc.clip
+			r.span(tc.x0, tc.x1, tc.y, black)
+			got := 0
+			for i := 0; i < len(r.img.Pix); i += 4 {
+				if r.img.Pix[i] == 0 {
+					got++
+				}
+			}
+			if got != tc.want {
+				t.Errorf("span(%v, %v) painted %d pixels, want %d", tc.x0, tc.x1, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClampToInt pins the helper behind every float→int conversion of untrusted
+// geometry: in-range values truncate like int(v), everything else clamps, and
+// NaN maps to lo.
+func TestClampToInt(t *testing.T) {
+	nan, inf := math.NaN(), math.Inf(1)
+	cases := []struct {
+		v, lo, hi float64
+		want      int
+	}{
+		{5, 0, 10, 5},
+		{5.9, 0, 10, 5},
+		{-0.5, -1, 10, 0},
+		{0, 0, 10, 0},
+		{10, 0, 10, 10},
+		{-1, 0, 10, 0},
+		{11, 0, 10, 10},
+		{1e30, 0, 10, 10},
+		{-1e30, 0, 10, 0},
+		{inf, 0, 10, 10},
+		{-inf, 0, 10, 0},
+		{nan, 0, 10, 0},
+		{nan, -1, 10, -1},
+		{1e30, math.MinInt32, math.MaxInt32, math.MaxInt32},
+		{-1e30, math.MinInt32, math.MaxInt32, math.MinInt32},
+	}
+	for _, tc := range cases {
+		if got := clampToInt(tc.v, tc.lo, tc.hi); got != tc.want {
+			t.Errorf("clampToInt(%v, %v, %v) = %d, want %d", tc.v, tc.lo, tc.hi, got, tc.want)
+		}
+	}
+}

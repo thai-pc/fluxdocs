@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
@@ -316,5 +317,166 @@ func TestImageFilters_Normalization(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestImage_ExtremePlacement draws a 1x1 black image through CTMs with huge and
+// NaN extents and asserts the exact ink count, identically on native and js/wasm
+// targets (see TestFill_ExtremeCoordinates): the part of the placement that
+// overlaps the page is painted, a NaN placement paints nothing, and an absurd
+// /Width is rejected rather than overflowing the size checks.
+func TestImage_ExtremePlacement(t *testing.T) {
+	big := spelled("1", 30)   // 1e30
+	big2 := spelled("2", 30)  // 2e30
+	huge := spelled("1", 308) // 1e308
+	pixel := imageStreamObj("/Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", []byte{0})
+	cases := []struct {
+		name    string
+		content string
+		image   string
+		want    int
+	}{
+		{"1e30 placement covering the page", big + " 0 0 " + big + " 0 0 cm /Im Do", pixel, 100 * 100},
+		{"+-1e30 placement covering the page", big2 + " 0 0 " + big2 + " -" + big + " -" + big + " cm /Im Do", pixel, 100 * 100},
+		{"1e30 placement over the right half", big + " 0 0 " + big + " 50 0 cm /Im Do", pixel, 50 * 100},
+		{"1e30 placement off the page", big + " 0 0 " + big + " " + big + " " + big + " cm /Im Do", pixel, 0},
+		{"NaN placement", huge + " 0 0 " + huge + " 0 0 cm " + huge + " 0 0 " + huge + " 0 0 cm /Im Do", pixel, 0},
+		// A real /Width of 1e30 saturated to MaxInt64 under js/wasm, overflowing
+		// the int64 area check and panicking in makeslice.
+		{"1e30 real width", fillWholePage,
+			imageStreamObj("/Subtype /Image /Width "+big+" /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", []byte{0, 0}), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			img := renderImagePDF(t, tc.content, map[int]string{5: tc.image})
+			if got := darkPixels(img); got != tc.want {
+				t.Errorf("dark pixels = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDrawImage_NonFiniteCTM calls drawImage directly with transforms whose
+// unit-square corners mix NaN and ±Inf (math.Max(NaN, +Inf) is +Inf, so the
+// bounding box alone would span the canvas). The placement is undefined and must
+// paint nothing on every target.
+func TestDrawImage_NonFiniteCTM(t *testing.T) {
+	nan, inf := math.NaN(), math.Inf(1)
+	img := &decodedImage{w: 1, h: 1, pix: []color.RGBA{{0, 0, 0, 0xff}}}
+	for _, ctm := range []matrix{
+		{inf, 0, 0, inf, 0, 0},
+		{inf, 0, 0, -inf, 0, 100},
+		{-inf, 0, 0, -inf, 100, 100},
+		{nan, 0, 0, 1, 0, 0},
+		{1, 0, 0, 1, nan, 0},
+	} {
+		rs := newRaster(10, 10)
+		drawImage(rs, ctm, img)
+		for i := 0; i < len(rs.img.Pix); i += 4 {
+			if rs.img.Pix[i] != 0xff {
+				t.Errorf("ctm %v: pixel %d painted, want none", ctm, i/4)
+				break
+			}
+		}
+	}
+}
+
+// TestImage_HostileDimensions feeds /Width and /Height values that overflow the
+// size arithmetic (SECURITY.md §2) to every image decode path. 2^32 × 2^32 used
+// to wrap int64(w)*int64(h) to 0, slip past the pixel cap and panic indexing an
+// empty sample buffer, natively and under js/wasm. Each invalid image must be
+// skipped silently (no ink, no panic); an invalid /SMask only drops the mask, so
+// its base image is still drawn opaque.
+func TestImage_HostileDimensions(t *testing.T) {
+	var jbuf bytes.Buffer
+	if err := jpeg.Encode(&jbuf, image.NewGray(image.Rect(0, 0, 8, 8)), nil); err != nil {
+		t.Fatal(err)
+	}
+	dims := []struct{ name, w, h string }{
+		{"2^32 x 2^32", "4294967296", "4294967296"},
+		{"2^62 x 4", "4611686018427387904", "4"},
+		{"MaxInt64 x 2", "9223372036854775807", "2"},
+		{"2^31 x 2", "2147483648", "2"},
+		{"side over the pixel cap", "67108865", "1"},
+		{"negative width", "-1", "4"},
+		{"zero width", "0", "4"},
+		{"zero height", "4", "0"},
+	}
+	samples := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	kinds := []struct {
+		name    string
+		content string
+		objs    func(w, h string) map[int]string
+		want    int
+	}{
+		{"raw DeviceGray", fillWholePage, func(w, h string) map[int]string {
+			return map[int]string{5: imageStreamObj("/Subtype /Image /Width "+w+" /Height "+h+" /ColorSpace /DeviceGray /BitsPerComponent 8", samples)}
+		}, 0},
+		{"raw DeviceRGB", fillWholePage, func(w, h string) map[int]string {
+			return map[int]string{5: imageStreamObj("/Subtype /Image /Width "+w+" /Height "+h+" /ColorSpace /DeviceRGB /BitsPerComponent 8", samples)}
+		}, 0},
+		{"ImageMask", fillWholePage, func(w, h string) map[int]string {
+			return map[int]string{5: imageStreamObj("/Subtype /Image /Width "+w+" /Height "+h+" /ImageMask true", samples)}
+		}, 0},
+		{"DCTDecode", fillWholePage, func(w, h string) map[int]string {
+			return map[int]string{5: imageStreamObj("/Subtype /Image /Width "+w+" /Height "+h+" /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode", jbuf.Bytes())}
+		}, 0},
+		{"SMask", fillWholePage, func(w, h string) map[int]string {
+			return map[int]string{
+				5: imageStreamObj("/Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 6 0 R", []byte{0}),
+				6: imageStreamObj("/Subtype /Image /Width "+w+" /Height "+h+" /ColorSpace /DeviceGray /BitsPerComponent 8", samples),
+			}
+		}, 100 * 100},
+		// Inline images are skipped whole by the content scanner; pin that the
+		// hostile size never reaches a decoder. /Im stays defined but unused.
+		{"inline BI/ID/EI", "", func(w, h string) map[int]string {
+			return map[int]string{5: imageStreamObj("/Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", []byte{0})}
+		}, 0},
+	}
+	for _, k := range kinds {
+		for _, d := range dims {
+			t.Run(k.name+"/"+d.name, func(t *testing.T) {
+				content := k.content
+				if content == "" {
+					content = "q 100 0 0 100 0 0 cm BI /W " + d.w + " /H " + d.h + " /CS /G /BPC 8 ID \x00\x00\x00\x00 EI Q"
+				}
+				img := renderImagePDF(t, content, k.objs(d.w, d.h))
+				if got := darkPixels(img); got != k.want {
+					t.Errorf("dark pixels = %d, want %d", got, k.want)
+				}
+			})
+		}
+	}
+}
+
+// TestDecodeJPEG_HeaderSizeCheckedBeforeDecode pins that a JPEG whose SOF header
+// claims a frame over the pixel cap is rejected from the header alone. The
+// standard decoder allocates the whole frame before reading scan data, so
+// without the pre-check a few header bytes cost hundreds of megabytes (and
+// 65535×65535 exceeds js/wasm's 4 GiB memory).
+func TestDecodeJPEG_HeaderSizeCheckedBeforeDecode(t *testing.T) {
+	var jbuf bytes.Buffer
+	if err := jpeg.Encode(&jbuf, image.NewGray(image.Rect(0, 0, 8, 8)), nil); err != nil {
+		t.Fatal(err)
+	}
+	raw := jbuf.Bytes()
+	sof := bytes.Index(raw, []byte{0xFF, 0xC0})
+	if sof < 0 {
+		t.Fatal("no SOF0 marker in encoded JPEG")
+	}
+	// SOF0: marker(2) length(2) precision(1) height(2) width(2).
+	raw[sof+5], raw[sof+6] = 0x40, 0x00 // height 16384
+	raw[sof+7], raw[sof+8] = 0x40, 0x00 // width 16384: 2^28 px > maxCanvasPixels
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, ok := decodeJPEG(&parse.Stream{Raw: raw})
+	runtime.ReadMemStats(&after)
+	if ok {
+		t.Fatal("decodeJPEG accepted a 16384x16384 frame over the pixel cap")
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 16<<20 {
+		t.Errorf("decodeJPEG allocated %d bytes for a rejected header, want < 16 MiB", got)
 	}
 }

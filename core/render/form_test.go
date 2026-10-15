@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"testing"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
@@ -319,5 +320,81 @@ func TestForm_TruncatedStreamSkipped(t *testing.T) {
 
 	if got := nonWhitePixels(img); got != 0 {
 		t.Errorf("non-white pixels = %d, want 0 (undecodable form stream must be skipped)", got)
+	}
+}
+
+// TestForm_ExtremeBBox renders a form that fills the whole page through /BBox
+// rectangles with huge extents and asserts the exact ink count: the clip is the
+// part of the /BBox that overlaps the canvas (never empty because a coordinate
+// overflowed int), identically on native and js/wasm targets (see
+// TestFill_ExtremeCoordinates).
+func TestForm_ExtremeBBox(t *testing.T) {
+	big := spelled("1", 30)  // 1e30
+	big2 := spelled("2", 30) // 2e30
+	cases := []struct {
+		name string
+		bbox string
+		want int
+	}{
+		{"ordinary", "[0 0 50 50]", 50 * 50},
+		{"1e30 extents", "[0 0 " + big + " " + big + "]", 100 * 100},
+		{"+-1e30 extents", "[-" + big + " -" + big + " " + big + " " + big + "]", 100 * 100},
+		{"1e30 right half", "[50 0 " + big + " " + big + "]", 50 * 100},
+		{"1e30 tall, narrow", "[0 -" + big + " 50 " + big + "]", 50 * 100},
+		{"off the page", "[" + big + " " + big + " " + big2 + " " + big2 + "]", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := map[int]string{
+				5: formStreamObj("/BBox "+tc.bbox, "0 0 100 100 re f"),
+			}
+			img := renderFormPDF(t, "<< /XObject << /Fm 5 0 R >> >>", "/Fm Do", objs)
+			if got := darkPixels(img); got != tc.want {
+				t.Errorf("dark pixels = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDeviceBounds_ExtremeValues checks deviceBounds directly: huge extents clamp
+// to the bounds, and a NaN transform yields an empty box (the form paints
+// nothing) rather than the whole canvas.
+func TestDeviceBounds_ExtremeValues(t *testing.T) {
+	canvas := fullClip(100, 100)
+	nan, inf := math.NaN(), math.Inf(1)
+	page := matrix{1, 0, 0, -1, 0, 100} // 100x100pt page at 72 DPI
+	cases := []struct {
+		name  string
+		r     parse.Rectangle
+		ctm   matrix
+		want  clipRect
+		empty bool
+	}{
+		{"ordinary", parse.Rectangle{LLX: 10, LLY: 20, URX: 30, URY: 40}, page, clipRect{10, 60, 30, 80}, false},
+		{"fractional", parse.Rectangle{LLX: 10.5, LLY: 20, URX: 29.5, URY: 40}, page, clipRect{10, 60, 30, 80}, false},
+		{"1e30 extents", parse.Rectangle{LLX: -1e30, LLY: -1e30, URX: 1e30, URY: 1e30}, page, canvas, false},
+		// Not reachable from a file (the lexer cannot produce ±Inf), and the
+		// page matrix's zero entries make Inf×0 = NaN corners: empty, not full.
+		{"Inf extents", parse.Rectangle{LLX: -inf, LLY: -inf, URX: inf, URY: inf}, page, clipRect{}, true},
+		{"off the canvas", parse.Rectangle{LLX: 1e30, LLY: 1e30, URX: 2e30, URY: 2e30}, page, clipRect{}, true},
+		{"NaN transform", parse.Rectangle{LLX: 0, LLY: 0, URX: 1, URY: 1}, matrix{nan, 0, 0, nan, 0, 0}, clipRect{}, true},
+		// Corner (0,0) is NaN while (1,1) is +Inf; math.Max(NaN, +Inf) = +Inf,
+		// so without the explicit NaN check this was the whole canvas.
+		{"Inf scale, NaN corner", parse.Rectangle{LLX: 0, LLY: 0, URX: 1, URY: 1}, matrix{inf, 0, 0, inf, 0, 0}, clipRect{}, true},
+		{"Inf scale from the page origin", parse.Rectangle{LLX: 0, LLY: 0, URX: 1, URY: 1}, matrix{inf, 0, 0, -inf, 0, 100}, clipRect{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deviceBounds(tc.r, tc.ctm, canvas)
+			if tc.empty {
+				if !got.empty() {
+					t.Errorf("deviceBounds = %+v, want an empty box", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("deviceBounds = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

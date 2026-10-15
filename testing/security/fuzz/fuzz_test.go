@@ -12,6 +12,7 @@ package fuzz
 
 import (
 	"bytes"
+	"compress/zlib"
 	"fmt"
 	"strings"
 	"testing"
@@ -47,6 +48,36 @@ func contentPDF(content string) []byte {
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
 		"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
 		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+	})
+}
+
+// imagePDF builds a well-formed one-page PDF (100x100pt) whose page paints the
+// image XObject /Im (object 5, dictionary entries imageDict and sample bytes
+// data) over the whole page, so the seed reaches the image decoders. extra
+// objects follow as 6, 7, … (e.g. an /SMask referenced as 6 0 R).
+func imagePDF(imageDict string, data []byte, extra ...string) []byte {
+	const content = "100 0 0 100 0 0 cm /Im Do"
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		fmt.Sprintf("<< /Type /XObject /Subtype /Image %s /Length %d >>\nstream\n%s\nendstream", imageDict, len(data), data),
+	}
+	return classicPDF(append(objs, extra...))
+}
+
+// flatePDF builds a one-page PDF whose content stream is Flate-encoded empty
+// data with the given /DecodeParms, so the seed reaches the predictor.
+func flatePDF(decodeParms string) []byte {
+	var z bytes.Buffer
+	zw := zlib.NewWriter(&z)
+	zw.Close()
+	return classicPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Filter /FlateDecode /DecodeParms %s /Length %d >>\nstream\n%s\nendstream", decodeParms, z.Len(), z.Bytes()),
 	})
 }
 
@@ -111,6 +142,28 @@ func seeds() [][]byte {
 		contentPDF("-" + bigReal + " " + bigReal + " m " + bigReal + " -" + bigReal + " l S"),
 		contentPDF("100000 w -1000000000 -1000000000 2000000000 2000000000 re S"),
 		contentPDF(hugeReal + " 0 0 " + hugeReal + " 0 0 cm " + hugeReal + " 0 0 " + hugeReal + " 0 0 cm 0 0 m 1 1 l S"),
+		// Hostile image sizes: 2^32 x 2^32 wrapped the int64 area check to 0
+		// and the decoder indexed an empty sample buffer (a panic on every
+		// target); MaxInt64 overflowed the mask stride; a real 1e30 width
+		// saturated to MaxInt64 under js/wasm. Also via an /SMask and an
+		// inline image.
+		imagePDF("/Width 4294967296 /Height 4294967296 /ColorSpace /DeviceGray /BitsPerComponent 8", []byte{0, 0, 0, 0}),
+		imagePDF("/Width 4294967296 /Height 4294967296 /ColorSpace /DeviceRGB /BitsPerComponent 8", []byte{0, 0, 0, 0}),
+		imagePDF("/Width 9223372036854775807 /Height 2 /ImageMask true", []byte{0, 0, 0, 0}),
+		imagePDF("/Width "+bigReal+" /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", []byte{0, 0}),
+		imagePDF("/Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 6 0 R", []byte{0},
+			"<< /Type /XObject /Subtype /Image /Width 4294967296 /Height 4294967296 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\nstream\n\x00\x00\x00\x00\nendstream"),
+		contentPDF("q 100 0 0 100 0 0 cm BI /W 4294967296 /H 4294967296 /CS /G /BPC 8 ID \x00\x00\x00\x00 EI Q"),
+		// Hostile predictor parameters on an empty Flate stream: the row-length
+		// product wrapped or drove a makeslice panic before any data was read.
+		flatePDF("<< /Predictor 12 /Columns 4503599627370496 >>"),
+		flatePDF("<< /Predictor 12 /Colors 3 /BitsPerComponent 4611686018427387904 /Columns 3 >>"),
+		// /Rotate beyond the int range: amd64 and js/wasm used to disagree.
+		classicPDF([]string{
+			"<< /Type /Catalog /Pages 2 0 R >>",
+			"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+			"<< /Type /Page /Parent 2 0 R /Rotate " + bigReal + " >>",
+		}),
 	}
 }
 

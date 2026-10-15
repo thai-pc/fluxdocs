@@ -91,13 +91,9 @@ func (in *interp) doXObject(name parse.Name) {
 // samples in DeviceRGB (3×8) and DeviceGray (1×8); plus /ImageMask (1 bpc) and
 // an optional DeviceGray /SMask. Everything else is skipped.
 func decodeImage(res *parse.Resolver, st *parse.Stream, fill color.RGBA) (*decodedImage, bool) {
-	w, wok := imageInt(res, st.Dict, "Width", "W")
-	h, hok := imageInt(res, st.Dict, "Height", "H")
-	if !wok || !hok || w <= 0 || h <= 0 {
-		return nil, false
-	}
-	if int64(w)*int64(h) > maxCanvasPixels {
-		return nil, false // decompression-bomb / oversize guard
+	w, h, ok := imageSize(res, st.Dict)
+	if !ok {
+		return nil, false // missing, degenerate or oversize: skip
 	}
 
 	if imageBool(res, st.Dict, "ImageMask", "IM") {
@@ -140,6 +136,14 @@ func decodeImage(res *parse.Resolver, st *parse.Stream, fill color.RGBA) (*decod
 // matches interpret.go's cmyk() formula; Adobe-marker inversion is accepted as a
 // Wave-1 limitation.
 func decodeJPEG(st *parse.Stream) (*decodedImage, bool) {
+	// The decoder allocates the whole frame from the SOF header before reading
+	// any scan data, so a few hostile header bytes claiming 65535×65535 would
+	// cost gigabytes (fatal under js/wasm's 4 GiB memory). Check the header's
+	// size against the pixel cap first; sides are ≤ 65535, so the product fits.
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(st.Raw))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > maxCanvasPixels {
+		return nil, false
+	}
 	img, err := jpeg.Decode(bytes.NewReader(st.Raw))
 	if err != nil {
 		return nil, false
@@ -306,9 +310,8 @@ func applySMask(res *parse.Resolver, st *parse.Stream, img *decodedImage) {
 // decodeSMask decodes a soft-mask stream to an 8-bpc gray alpha grid. Only
 // Flate/no-filter DeviceGray data is supported; anything else returns ok=false.
 func decodeSMask(res *parse.Resolver, st *parse.Stream) (alpha []uint8, w, h int, ok bool) {
-	w, wok := imageInt(res, st.Dict, "Width", "W")
-	h, hok := imageInt(res, st.Dict, "Height", "H")
-	if !wok || !hok || w <= 0 || h <= 0 || int64(w)*int64(h) > maxCanvasPixels {
+	w, h, ok = imageSize(res, st.Dict)
+	if !ok {
 		return nil, 0, 0, false
 	}
 	for _, f := range imageFilters(st) {
@@ -356,13 +359,18 @@ func drawImage(rs *raster, ctm matrix, img *decodedImage) {
 	maxX, maxY := math.Inf(-1), math.Inf(-1)
 	for _, c := range [4][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}} {
 		dx, dy := ctm.apply(c[0], c[1])
+		if math.IsNaN(dx) || math.IsNaN(dy) {
+			return // Inf×0 from an overflowing CTM: placement undefined, draw nothing
+		}
 		minX, maxX = math.Min(minX, dx), math.Max(maxX, dx)
 		minY, maxY = math.Min(minY, dy), math.Max(maxY, dy)
 	}
-	x0 := clampCoord(int(math.Floor(minX)), rs.w)
-	y0 := clampCoord(int(math.Floor(minY)), rs.h)
-	x1 := clampCoord(int(math.Ceil(maxX)), rs.w)
-	y1 := clampCoord(int(math.Ceil(maxY)), rs.h)
+	// Clamp in float64 before converting (see clampToInt), so a huge placement
+	// covers the same pixels on every target.
+	x0 := clampToInt(math.Floor(minX), 0, float64(rs.w))
+	y0 := clampToInt(math.Floor(minY), 0, float64(rs.h))
+	x1 := clampToInt(math.Ceil(maxX), 0, float64(rs.w))
+	y1 := clampToInt(math.Ceil(maxY), 0, float64(rs.h))
 	// Restrict to the active clip so a form's /BBox crops its images (blend also
 	// enforces this per pixel; clamping the box just avoids the wasted scan).
 	x0 = maxInt(x0, rs.clip.x0)
@@ -376,8 +384,10 @@ func drawImage(rs *raster, ctm matrix, img *decodedImage) {
 	for dy := y0; dy < y1; dy++ {
 		for dx := x0; dx < x1; dx++ {
 			fcol, frow := inv.apply(float64(dx)+0.5, float64(dy)+0.5)
-			col := int(math.Floor(fcol))
-			row := int(math.Floor(frow))
+			// -1 and img.w/img.h fall outside the grid, so an out-of-range or
+			// NaN sample coordinate is skipped on every target.
+			col := clampToInt(math.Floor(fcol), -1, float64(img.w))
+			row := clampToInt(math.Floor(frow), -1, float64(img.h))
 			if col < 0 || col >= img.w || row < 0 || row >= img.h {
 				continue
 			}
@@ -418,9 +428,30 @@ func lastFilter(filters []parse.Name) parse.Name {
 	return filters[len(filters)-1]
 }
 
+// imageSize reads an image's /Width and /Height (or /W, /H) and validates them
+// before any arithmetic uses them (SECURITY.md §2). Each side must lie in
+// [1, maxCanvasPixels] before the area is formed: an unbounded side lets the
+// int64 product wrap (2^32 × 2^32 is 0) past the area cap, and the sample loops
+// then index an empty buffer. With both sides bounded, w×h and every derived
+// stride (at most 8 bytes per sample here) fit in an int64. ok is false for a
+// missing, non-positive or oversize size, and the caller skips the image.
+func imageSize(res *parse.Resolver, d parse.Dict) (w, h int, ok bool) {
+	w, wok := imageInt(res, d, "Width", "W")
+	h, hok := imageInt(res, d, "Height", "H")
+	if !wok || !hok || w <= 0 || h <= 0 || w > maxCanvasPixels || h > maxCanvasPixels {
+		return 0, 0, false
+	}
+	if int64(w)*int64(h) > maxCanvasPixels {
+		return 0, 0, false // decompression-bomb / oversize guard
+	}
+	return w, h, true
+}
+
 // imageInt reads an integer image-dictionary value under its full or abbreviated
 // key, resolving an indirect reference. ok is false when neither key holds an
-// integer.
+// integer. A real is truncated; one beyond the int32 range is clamped to it (see
+// clampToInt), so an absurd /Width is rejected by the callers' size checks on
+// every target instead of saturating to MaxInt64 under js/wasm.
 func imageInt(res *parse.Resolver, d parse.Dict, primary, abbrev parse.Name) (int, bool) {
 	for _, k := range [2]parse.Name{primary, abbrev} {
 		v, present := d[k]
@@ -435,7 +466,7 @@ func imageInt(res *parse.Resolver, d parse.Dict, primary, abbrev parse.Name) (in
 		case parse.Integer:
 			return int(n), true
 		case parse.Real:
-			return int(n), true
+			return clampToInt(math.Trunc(float64(n)), math.MinInt32, math.MaxInt32), true
 		}
 	}
 	return 0, false
@@ -488,15 +519,4 @@ func clampIndex(i, n int) int {
 		return n - 1
 	}
 	return i
-}
-
-// clampCoord clamps a device-coordinate bound into [0, n].
-func clampCoord(v, n int) int {
-	if v < 0 {
-		return 0
-	}
-	if v > n {
-		return n
-	}
-	return v
 }
