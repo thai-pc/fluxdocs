@@ -33,8 +33,8 @@ export function App() {
       {!runtime && !error && <p>Loading the WASM core…</p>}
       {runtime && <input type="file" accept="application/pdf" onChange={onPick} />}
       {runtime && pdf && (
-        <div style={{ marginTop: "1rem", border: "1px solid #ddd" }}>
-          <FluxDocsViewer runtime={runtime} data={pdf} renderOptions={{ dpi: 150 }} />
+        <div style={{ marginTop: "1rem", border: "1px solid #ddd", height: "70vh" }}>
+          <FluxDocsViewer runtime={runtime} data={pdf} />
         </div>
       )}
     </main>

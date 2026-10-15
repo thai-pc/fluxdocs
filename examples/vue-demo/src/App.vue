@@ -31,8 +31,8 @@ async function onPick(e: Event) {
     <p v-if="error" style="color: crimson">Failed to load the core: {{ error }}</p>
     <p v-else-if="!runtime">Loading the WASM core…</p>
     <input v-if="runtime" type="file" accept="application/pdf" @change="onPick" />
-    <div v-if="runtime && pdf" style="margin-top: 1rem; border: 1px solid #ddd">
-      <FluxDocsViewer :runtime="runtime" :data="pdf" :render-options="{ dpi: 150 }" />
+    <div v-if="runtime && pdf" style="margin-top: 1rem; border: 1px solid #ddd; height: 70vh">
+      <FluxDocsViewer :runtime="runtime" :data="pdf" />
     </div>
   </main>
 </template>
