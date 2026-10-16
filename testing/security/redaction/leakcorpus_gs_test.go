@@ -1,0 +1,44 @@
+//go:build !js
+
+package redaction
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// This file is the Ghostscript differential oracle of the leak corpus
+// (docs/design/redaction-hardening.md §12.3). Ghostscript is AGPL; it runs as
+// a separate process in tests only, so nothing is linked or shipped and the
+// MIT build is unaffected. exec is unavailable under js/wasm, where
+// leakcorpus_gs_js_test.go reports the oracle as absent.
+
+// gsPath is the Ghostscript binary, or "" when it is not installed.
+var gsPath, _ = exec.LookPath("gs")
+
+// gsText returns Ghostscript's txtwrite text of pdf, and false when gs is not
+// installed. A gs failure fails the test: an oracle that cannot read the file
+// proves nothing.
+func gsText(t *testing.T, pdf []byte) (string, bool) {
+	t.Helper()
+	if gsPath == "" {
+		return "", false
+	}
+	path := filepath.Join(t.TempDir(), "in.pdf")
+	if err := os.WriteFile(path, pdf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gsPath, "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER",
+		"-sDEVICE=txtwrite", "-sOutputFile=-", path)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("gs txtwrite: %v", err)
+	}
+	return string(out), true
+}
