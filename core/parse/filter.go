@@ -27,7 +27,8 @@ func DecodeStream(s *Stream) ([]byte, error) {
 }
 
 // ErrDecodeLimit is returned (wrapped) by DecodeStreamLimit when the filters
-// would produce more than the caller's limit.
+// would produce more than the caller's limit, and by PageContent and
+// PageContentLimit when a page's content exceeds its limit.
 var ErrDecodeLimit = errors.New("parse: decoded stream exceeds the caller's limit")
 
 // DecodeStreamLimit is DecodeStream for a caller that meters decode work, such

@@ -69,7 +69,7 @@ time whatever the algorithm does.
 | **W: raster work** | `span` (+width after clip clamp), `fillPath` (+edges examined per row; +E setup), `line` (+`lineRowCost` per row + span width), `drawImage` (+box width per row) | ≈ one pixel visit (≈ 4.75 ns native) | `MaxPaintPixels` (public, canvas-scaled default) |
 | **O: interpreter steps** | `interpret` (+1 per operator at any form depth), `drawText` (+1 per glyph shown or advanced, invisible modes included), `drawTextArray` (+1 per array element) | steps | `MaxOperators` (public) |
 | **S: image samples** | `doXObject` before `decodeImage` (+w×h, + SMask w×h) | samples | internal `maxImageSamples` |
-| **C: content bytes** | `render.Page` (+page content length), `execForm` (+decoded form length per invocation, charged **before** `ScanContent`) | bytes | internal `maxContentBytes` |
+| **C: content bytes** | `render.Page` (+page content bytes, decoded within what is left by `parse.PageContentLimit`), `execForm` (+decoded form length per invocation, charged **before** `ScanContent`) | bytes | internal `maxContentBytes` |
 | **D: decoded bytes** (added after review) | every image, image-mask, soft-mask and font-program decode (`budget.decode`): the bytes the filters produce beyond the image's sample bytes; a JPEG's compressed bytes beyond its frame's raw size | bytes | internal `maxDecodedBytes` |
 | **P: path points** | `moveTo`/`lineTo`/`curveTo`/`rect` (points in the current path) | points | internal `maxPathPoints` (not cumulative, reset by paint/`n`) |
 
@@ -147,7 +147,9 @@ worst case ≤ ~1 s native.
   sample grid even at a 72-DPI thumbnail. Charging decode to W would fail common
   scanned PDFs at low DPI.
 - `maxContentBytes` = 512 MiB per page (2 × `maxDecoded`). It counts the page's
-  own content plus every form invocation's decoded bytes.
+  own content plus every form invocation's decoded bytes. The page's own content
+  is further capped at `parse.MaxPageContent` = 256 MiB (§9 R1), so at least
+  256 MiB stays for forms.
 - `maxPathPoints` = 4 Mi points in the current path (≈ 64 MiB of `point`s).
 - `maxDecodedBytes` = 512 MiB per page (added after review, §10). Every decode
   runs through `parse.DecodeStreamLimit`, capped at what is left, so one `Do`
@@ -501,11 +503,11 @@ before and after §2.1 on a 50k-edge polygon.
 
 ## 9. Related findings (out of scope here, flagged)
 
-**Tracked follow-ups: R1 and R2 are not covered by the budget yet.** Both run
-before the first budget check, so neither `MaxOperators` nor a deadline can stop
-them. Measured by go-reviewer on the budget PR: 32 MB of `q Q\n` spends ≈ 4.75 s
-and ≈ 3.0 GB RSS in `ScanContent` before `MaxOperators` acts (R2). Spec §13.2
-states the gap.
+**Tracked follow-up: R2 is not covered by the budget yet.** It runs before the
+first budget check, so neither `MaxOperators` nor a deadline can stop it.
+Measured by go-reviewer on the budget PR: 32 MB of `q Q\n` spends ≈ 4.75 s and
+≈ 3.0 GB RSS in `ScanContent` before `MaxOperators` acts. Spec §13.2 states the
+gap. R1 is resolved (2026-10-16, below).
 
 **Being fixed separately: do not duplicate.** A concurrent fix in `core/render`
 adds an unexported float→int clamping helper, `clampToInt`, in `raster.go` and
@@ -521,12 +523,37 @@ The budget implementer rebases on that fix. Any new float→int conversion in th
 budget code (for example the wasm option parsing in §6) reuses the same
 checked-conversion approach rather than a raw cast.
 
-- **R1: `parse.(*Resolver).PageContent` concatenation is unbounded.** Each
-  stream is capped at 256 MiB, but a `/Contents` array may list the same stream
-  reference many times. The buffer grows to N × 256 MiB before the renderer, or
-  `ExtractText`, gets control, which is a memory DoS. Fix in `core/parse`: cap the
-  total at `maxDecoded` and fail with a wrapped `errLex`. This is a separate PR,
-  but it shares this note's fuzz seed.
+- **R1 (resolved 2026-10-16): `parse.(*Resolver).PageContent` concatenation
+  was unbounded.** Each stream is capped at 256 MiB, but a `/Contents` array
+  may list the same stream reference many times, and the buffer grew to
+  N × 256 MiB before the renderer, or `ExtractText`, got control. Measured on
+  the probe (one 64 MiB Flate bomb, a 64 KB file): 4 refs ≈ 1.36 GB RSS and
+  2.9 s CPU, 24 refs ≈ 5.2 GB RSS (fatal under js/wasm's 4 GiB) and 8.5 s.
+  Fix: the page's content is capped at `parse.MaxPageContent` = `maxDecoded`
+  (256 MiB) in total: every byte the filters output (each stage of a chain),
+  an unfiltered stream's length, each repeat counted again, and one separator
+  per stream. Each decode runs through `DecodeStreamLimit` against what is left
+  of that one allowance, and a stream listed again is decoded once and its
+  bytes counted again (ISO 32000-1 §7.7.3.3 concatenates the elements; the
+  output is identical). Past the cap `PageContent` returns an error wrapping
+  `errLex` and `ErrDecodeLimit`. Why 256 MiB and not `maxContentBytes`: it is
+  the plan this note recorded, a page's content then totals no more than its
+  largest permitted single stream, it leaves at least 256 MiB of the 512 MiB
+  content counter for forms, and it halves what `ScanContent` (R2) can be handed.
+  The largest page content in the corpus and the no-regression set is 57 KB.
+  Callers:
+  - `render.Page` calls `PageContentLimit` with what is left of C, charges
+    the returned count once (no second charge), and maps the limit error to a
+    `content bytes` trip, so `RenderPage` returns `ErrRenderBudgetExceeded`.
+  - `ExtractText`, `ExtractTextByPage` and `ExtractTables` return the
+    `parse.ErrDecodeLimit` error.
+  - `RedactText` and `AutoRedactPII` fail and mark the plan failed, and
+    `RedactAndFlatten` refuses: redaction fails closed.
+  - Merge, split and save copy content streams undecoded and are unaffected.
+  After the fix the probe fails in ≈ 0.2–0.4 s at ≈ 210 MB RSS for 4, 12 and 24
+  refs (one 64 MiB inflate). Gates: `TestDoS_RepeatedContentsBombIsCapped`,
+  `TestRedact_OversizedContentFailsClosed`, and the fuzz seed "Flate bomb
+  repeated in /Contents".
 - **R2: `parse.ScanContent` materializes the whole operator list up front.** A
   256 MiB stream of tiny operators allocates far more than 256 MiB of
   `ContentOp`/operand slices before the O budget is consulted. Options: a

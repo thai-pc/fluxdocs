@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"math/rand/v2"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,22 @@ func flateBomb(n int) string {
 	zw.Write(make([]byte, n))
 	zw.Close()
 	return z.String()
+}
+
+// repeatedContentsPage is a 100x100pt page whose /Contents array lists one
+// Flate stream reps times; the stream inflates to content.
+func repeatedContentsPage(t *testing.T, content []byte, reps int) (*parse.Resolver, parse.PageInfo) {
+	t.Helper()
+	var z bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&z, zlib.BestCompression)
+	zw.Write(content)
+	zw.Close()
+	return budgetPage(t, map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Contents [" + strings.Repeat("4 0 R ", reps) + "] >>",
+		4: fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", z.Len(), z.String()),
+	})
 }
 
 // bombPage is a 100x100pt page running content, whose resources hold a stream
@@ -300,6 +317,14 @@ func TestBudget_Trips(t *testing.T) {
 			resource: "paint work",
 		},
 		{
+			name: "Flate content stream repeated in /Contents",
+			page: func(t *testing.T) (*parse.Resolver, parse.PageInfo) {
+				return repeatedContentsPage(t, bytes.Repeat([]byte(" "), 1<<20), 20)
+			},
+			opts:     Options{testLimits: withLimit(func(l *budgetLimits) { l.content = 4 << 20 })},
+			resource: "content bytes",
+		},
+		{
 			name:     "long current path",
 			page:     func(t *testing.T) (*parse.Resolver, parse.PageInfo) { return contentPage(t, longPath) },
 			opts:     Options{testLimits: withLimit(func(l *budgetLimits) { l.pathPoints = 500 })},
@@ -394,6 +419,39 @@ func TestBudget_ExactLimit(t *testing.T) {
 				t.Errorf("err = %v, want success", err)
 			}
 		})
+	}
+}
+
+// TestBudget_PageContentWithinBudget pins how the page's own content meets the
+// content-bytes counter (render-budget.md §9 R1). It is decoded within what is
+// left of the counter, charged once (a page at exactly the limit renders, one
+// byte under trips), and a /Contents array repeating a stream fails at the
+// limit without materializing every copy: 200 repeats of a 1 MiB stream used
+// to concatenate 200 MiB before the counter was consulted.
+func TestBudget_PageContentWithinBudget(t *testing.T) {
+	// "q Q" twice plus two separators: 8 content bytes.
+	r, pi := repeatedContentsPage(t, []byte("q Q"), 2)
+	for _, tc := range []struct {
+		limit    int64
+		wantFail bool
+	}{{8, false}, {7, true}} {
+		_, err := Page(r, pi, Options{DPI: 72, testLimits: withLimitT(func(l *budgetLimits) { l.content = tc.limit })})
+		if tc.wantFail != errors.Is(err, ErrBudgetExceeded) || (!tc.wantFail && err != nil) {
+			t.Errorf("content limit %d: err = %v, want budget failure = %v", tc.limit, err, tc.wantFail)
+		}
+	}
+
+	r, pi = repeatedContentsPage(t, bytes.Repeat([]byte(" "), 1<<20), 200)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := Page(r, pi, Options{DPI: 72, testLimits: withLimitT(func(l *budgetLimits) { l.content = 4 << 20 })})
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, ErrBudgetExceeded) || !strings.Contains(err.Error(), "content bytes") {
+		t.Fatalf("err = %v, want ErrBudgetExceeded naming content bytes", err)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 32<<20 {
+		t.Errorf("render allocated %d MB, want ≤ 32 MB (one 1 MiB decode, not 200)", alloc>>20)
 	}
 }
 

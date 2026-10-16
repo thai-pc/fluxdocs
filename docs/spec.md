@@ -1571,10 +1571,15 @@ above runs under a per-page budget (design: `docs/design/render-budget.md`).
   magnitude of headroom for ordinary pages, but very dense vector pages may need
   a higher `MaxPaintPixels`: 100k short hairline segments on a Letter page at
   150 DPI use about half the default, 1M segments about 5.5× it.
+- **Page content cap:** a page's content (its `/Contents` streams decoded and
+  concatenated, a repeated stream counted each time) is capped at 256 MiB.
+  Each decode is capped at what is left, and a repeated stream is decoded once.
+  Past the cap the render fails with `ErrRenderBudgetExceeded` (content bytes).
+  Text and table extraction return an error. Redaction fails closed: the plan
+  is marked failed and `RedactAndFlatten` refuses.
 - **Not yet covered:** tokenizing the content stream (`ScanContent`) runs before
-  the budget is consulted, and a page's `/Contents` array is concatenated
-  without a total cap. Both are bounded only by the per-stream decode cap
-  (256 MiB); tracked as R1/R2 in `docs/design/render-budget.md` §9.
+  the budget is consulted and is bounded only by the page content cap (256 MiB);
+  tracked as R2 in `docs/design/render-budget.md` §9.
 
 ### 13.3 Parallel Multi-Page Rendering (a Go advantage)
 

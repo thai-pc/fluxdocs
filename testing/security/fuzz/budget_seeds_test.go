@@ -104,6 +104,20 @@ func budgetSeeds() []budgetSeed {
 		"<< " + gray1x1 + " /SMask 6 0 R /Length 1 >>\nstream\n\x80\nendstream",
 		fmt.Sprintf("<< %s /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", gray1x1, bomb.Len(), bomb.Bytes()),
 	})
+	// A 16 MiB Flate stream of spaces listed 20 times in /Contents: 320 MiB of
+	// content, past the per-page cap (render-budget.md §9 R1). The page fails
+	// after one inflate instead of materializing every copy.
+	var spaces bytes.Buffer
+	sw, _ := zlib.NewWriterLevel(&spaces, zlib.BestCompression)
+	sw.Write(bytes.Repeat([]byte(" "), 16<<20))
+	sw.Close()
+	repeatedBombContents := classicPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		"<< /Type /Page /Parent 2 0 R /Contents [" + strings.Repeat("4 0 R ", 20) + "] >>",
+		fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", spaces.Len(), spaces.Bytes()),
+	})
+
 	// An unfiltered 1×1 image Do'd 200k times: the per-Do cost (doCost).
 	tinyDos := classicPDF([]string{
 		"<< /Type /Catalog /Pages 2 0 R >>",
@@ -125,6 +139,7 @@ func budgetSeeds() []budgetSeed {
 		{"huge image tiny-placed and repeated", tinyImage, false},
 		{"many-edge path", manyEdges, false},
 		{"repeated /Contents stream", repeatedContents, true},
+		{"Flate bomb repeated in /Contents", repeatedBombContents, true},
 	}
 }
 

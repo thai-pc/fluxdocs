@@ -274,40 +274,120 @@ func skipInlineImage(data []byte, i int) (int, bool) {
 	return len(data), false
 }
 
+// MaxPageContent bounds the content bytes PageContent assembles for one page
+// (SECURITY.md §2): every byte the filters output (each stage of a chain
+// included), an unfiltered stream's length, each repeat of a stream in a
+// /Contents array counted again, and one separator per stream. It equals the
+// per-stream decode cap, so a page's content totals no more than its largest
+// permitted single stream. Without a total, a /Contents array listing one
+// 64 MiB Flate bomb 24 times (a 64 KB file) materialized 1.5 GiB before any
+// caller could meter it. Real pages are far below it: the largest page
+// content in testing/corpus and the no-regression set is 57 KB.
+const MaxPageContent = maxDecoded
+
 // PageContent resolves a page's /Contents (a single stream, an array of
 // streams, or a reference to either), decodes each per its /Filter, and returns
-// the concatenated content bytes. Streams are joined with a newline so a token
-// cannot straddle the boundary between two streams (§7.8.2).
+// the concatenated content bytes (ISO 32000-1 §7.7.3.3: the array's streams are
+// concatenated). Streams are joined with a newline so a token cannot straddle
+// the boundary between two streams (§7.8.2).
 //
-// Returns nil (no error) if the page has no content stream.
+// Returns nil (no error) if the page has no content stream, or an error
+// wrapping errLex and ErrDecodeLimit if the content exceeds MaxPageContent.
+// A single stream past the per-stream decode cap stays the decode error it was.
 func (r *Resolver) PageContent(pi PageInfo) ([]byte, error) {
+	data, _, err := r.PageContentLimit(pi, MaxPageContent)
+	return data, err
+}
+
+// PageContentLimit is PageContent for a caller that meters content bytes, such
+// as the renderer's per-page budget. It stops as soon as the content would
+// exceed min(limit, MaxPageContent): each decode is capped at what is left
+// (DecodeStreamLimit), and a stream listed again in the array is decoded once
+// and its bytes counted again, so a repeated bomb costs one decode. On
+// exceeding it returns an error wrapping errLex and ErrDecodeLimit.
+//
+// used counts the content bytes as MaxPageContent defines them, whether or
+// not err is nil; it is ≥ len(data), equal for content without filter chains,
+// and exceeds the limit when err wraps ErrDecodeLimit.
+func (r *Resolver) PageContentLimit(pi PageInfo, limit int64) (data []byte, used int64, err error) {
+	limit = min(limit, MaxPageContent)
 	resolved, err := r.Resolve(pi.Contents)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	switch v := resolved.(type) {
 	case *Stream:
-		return DecodeStream(v)
+		return decodeContent(v, limit)
 	case Array:
-		var buf bytes.Buffer
-		for _, el := range v {
-			ro, err := r.Resolve(el)
-			if err != nil {
-				return nil, err
-			}
-			st, ok := ro.(*Stream)
-			if !ok {
-				continue // skip a non-stream element leniently
-			}
-			dec, err := DecodeStream(st)
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(dec)
-			buf.WriteByte('\n')
-		}
-		return buf.Bytes(), nil
+		return r.contentArray(v, limit)
 	default:
-		return nil, nil
+		return nil, 0, nil
 	}
+}
+
+// contentArray concatenates the streams of a /Contents array within limit (see
+// PageContentLimit). Each distinct stream is decoded once and kept until the
+// output is assembled, whose exact size is known by then, so the output is
+// allocated once: peak memory is at most the distinct decoded streams plus the
+// output, each bounded by limit.
+func (r *Resolver) contentArray(arr Array, limit int64) ([]byte, int64, error) {
+	var used, size int64
+	var pieces [][]byte
+	decoded := make(map[*Stream][]byte) // the Resolver caches objects, so a repeated reference resolves to the same *Stream
+	for _, el := range arr {
+		ro, err := r.Resolve(el)
+		if err != nil {
+			return nil, used, err
+		}
+		st, ok := ro.(*Stream)
+		if !ok {
+			continue // skip a non-stream element leniently
+		}
+		dec, seen := decoded[st]
+		if seen {
+			used += int64(len(dec)) // its bytes are scanned again
+		} else {
+			var cost int64
+			dec, cost, err = decodeContent(st, limit-used)
+			used += cost
+			if err != nil {
+				return nil, used, err
+			}
+			decoded[st] = dec
+		}
+		used++ // the separator
+		if used > limit {
+			return nil, used, contentLimitError(limit)
+		}
+		pieces = append(pieces, dec)
+		size += int64(len(dec)) + 1
+	}
+	if size == 0 {
+		return nil, used, nil
+	}
+	out := make([]byte, 0, size) // size ≤ used ≤ limit
+	for _, p := range pieces {
+		out = append(out, p...)
+		out = append(out, '\n')
+	}
+	return out, used, nil
+}
+
+// decodeContent decodes one content stream within limit and returns its bytes
+// and cost: what the filters output, or the raw length if no filter ran.
+func decodeContent(st *Stream, limit int64) ([]byte, int64, error) {
+	dec, produced, err := DecodeStreamLimit(st, max(limit, 0))
+	cost := max(produced, int64(len(dec)))
+	if errors.Is(err, ErrDecodeLimit) || (err == nil && cost > limit) {
+		return nil, cost, contentLimitError(limit)
+	}
+	if err != nil {
+		return nil, cost, err
+	}
+	return dec, cost, nil
+}
+
+// contentLimitError is PageContentLimit's error for content past limit.
+func contentLimitError(limit int64) error {
+	return fmt.Errorf("%w: %w: page content exceeds %d bytes", errLex, ErrDecodeLimit, limit)
 }

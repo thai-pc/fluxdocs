@@ -115,13 +115,24 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 
 	rs := newRaster(pxW, pxH)
 	rs.b = b
-	content, err := r.PageContent(pi)
+	// The page's own content is decoded within what is left of the content
+	// counter (and parse.MaxPageContent), so a /Contents array repeating a
+	// bomb stops at the cap instead of materializing every copy first.
+	allow := b.lim.content - b.content
+	content, used, err := r.PageContentLimit(pi, allow)
+	if errors.Is(err, parse.ErrDecodeLimit) {
+		limit := b.content + min(allow, parse.MaxPageContent)
+		b.content += used
+		b.trip("content bytes", b.content, limit)
+		return nil, b.err
+	}
 	if err != nil {
 		return nil, err
 	}
 	// Charge the bytes before scanning them: ScanContent materializes every
-	// operator up front.
-	if len(content) > 0 && b.chargeContent(int64(len(content))) {
+	// operator up front. used is what PageContentLimit counted (len(content)
+	// for content without filter chains).
+	if len(content) > 0 && b.chargeContent(used) {
 		fonts := loadFonts(r, pi.Resources, b)
 		run(rs, base, parse.ScanContent(content), fonts, r, pi.Resources)
 	}

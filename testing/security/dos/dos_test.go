@@ -467,3 +467,88 @@ func TestDoS_BrokenObjStmIsDecodedOnce(t *testing.T) {
 	}
 	t.Logf("%v CPU (limit %v); under a 1 s deadline: %v wall, err %v", elapsed, limit, wall, err)
 }
+
+// repeatedBombContentsDoc is a page whose /Contents array lists one Flate
+// stream reps times; the stream inflates to 64 MiB of spaces (a 64 KB file).
+func repeatedBombContentsDoc(t *testing.T, reps int) *core.Document {
+	t.Helper()
+	var z bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&z, zlib.BestCompression)
+	zw.Write(bytes.Repeat([]byte(" "), 64<<20))
+	zw.Close()
+	pdf := classicPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [" + strings.Repeat("4 0 R ", reps) + "] >>",
+		fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", z.Len(), z.String()),
+	})
+	doc, err := core.OpenBytes(pdf)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	return doc
+}
+
+// classicPDF serializes objs as objects 1..n with a classic xref table and a
+// trailer whose /Root is object 1.
+func classicPDF(objs []string) []byte {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	off := make([]int, len(objs))
+	for i, o := range objs {
+		off[i] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	x := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
+	for _, o := range off {
+		fmt.Fprintf(&b, "%010d 00000 n \n", o)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, x)
+	return b.Bytes()
+}
+
+// TestDoS_RepeatedContentsBombIsCapped: a /Contents array repeating one 64 MiB
+// Flate bomb was concatenated whole before the render budget or ExtractText
+// got control (render-budget.md §9 R1): 4 refs ≈ 1.36 GB RSS, 24 refs ≈ 5 GB
+// (fatal under js/wasm's 4 GiB), ≈ 10 s. The page's content is now capped at
+// parse.MaxPageContent (256 MiB) and a repeated stream is decoded once, so
+// each shape fails after one 64 MiB inflate: the render with
+// ErrRenderBudgetExceeded naming content bytes, extraction with
+// parse.ErrDecodeLimit.
+func TestDoS_RepeatedContentsBombIsCapped(t *testing.T) {
+	skipUnlessTimed(t)
+	for _, reps := range []int{4, 12, 24} {
+		t.Run(fmt.Sprintf("%d refs", reps), func(t *testing.T) {
+			doc := repeatedBombContentsDoc(t, reps)
+			err, elapsed, alloc := timedRender(doc, core.RenderOptions{DPI: 72})
+			if !errors.Is(err, core.ErrRenderBudgetExceeded) || !strings.Contains(err.Error(), "content bytes") {
+				t.Fatalf("render err = %v, want ErrRenderBudgetExceeded naming content bytes", err)
+			}
+			if alloc > 600<<20 {
+				t.Errorf("render allocated %d MB, want ≤ 600 MB", alloc>>20)
+			}
+			if elapsed > 3*time.Second { // one 64 MiB inflate: ≈ 0.1–0.3 s
+				t.Errorf("render took %v CPU, want ≤ 3 s", elapsed)
+			}
+
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			start := cpuTime()
+			_, xerr := doc.ExtractText(core.ExtractOptions{})
+			xelapsed := cpuTime() - start
+			runtime.ReadMemStats(&after)
+			if !errors.Is(xerr, parse.ErrDecodeLimit) {
+				t.Fatalf("ExtractText err = %v, want parse.ErrDecodeLimit", xerr)
+			}
+			if xalloc := after.TotalAlloc - before.TotalAlloc; xalloc > 600<<20 {
+				t.Errorf("ExtractText allocated %d MB, want ≤ 600 MB", xalloc>>20)
+			}
+			if xelapsed > 3*time.Second {
+				t.Errorf("ExtractText took %v CPU, want ≤ 3 s", xelapsed)
+			}
+			t.Logf("render %v CPU, %d MB allocated; ExtractText %v CPU", elapsed, alloc>>20, xelapsed)
+		})
+	}
+}

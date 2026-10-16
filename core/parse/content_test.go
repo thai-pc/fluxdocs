@@ -1,8 +1,11 @@
 package parse
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +171,140 @@ func TestPageContent_ArrayOfStreams(t *testing.T) {
 	// Streams are joined with a newline separator.
 	if string(got) != "(a) Tj\n(b) Tj\n" {
 		t.Errorf("PageContent = %q, want %q", got, "(a) Tj\n(b) Tj\n")
+	}
+}
+
+// flateStreamObj is streamObj for a FlateDecode stream of content.
+func flateStreamObj(content []byte) string {
+	z := zlibBytes(content)
+	return fmt.Sprintf("<< /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream", len(z), z)
+}
+
+// contentsPage returns the resolver and page of a one-page PDF whose /Contents
+// is contents, with streams as objects 4, 5, ….
+func contentsPage(t *testing.T, contents string, streams ...string) (*Resolver, PageInfo) {
+	t.Helper()
+	objs := map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		3: "<< /Type /Page /Parent 2 0 R /Contents " + contents + " >>",
+	}
+	for i, s := range streams {
+		objs[4+i] = s
+	}
+	r, err := NewResolver(buildPDF(objs, fmt.Sprintf("<< /Size %d /Root 1 0 R >>", len(objs)+1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, err := r.Pages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r, pages[0]
+}
+
+// TestPageContentLimit pins the total cap on a page's content (render-budget.md
+// §9 R1): the decoded streams, each repeat counted again, plus one separator
+// per stream. Content at the limit is returned with used = its length; one
+// byte more fails with errLex and ErrDecodeLimit and no data.
+func TestPageContentLimit(t *testing.T) {
+	a := flateStreamObj([]byte("(a) Tj")) // 6 bytes decoded
+	b := flateStreamObj([]byte("(b) Tj"))
+	chain := fmt.Sprintf("<< /Filter [/FlateDecode /FlateDecode] /Length %d >>\nstream\n%s\nendstream",
+		len(zlibBytes(zlibBytes([]byte("(c) Tj")))), zlibBytes(zlibBytes([]byte("(c) Tj"))))
+	tests := []struct {
+		name     string
+		contents string
+		streams  []string
+		limit    int64
+		want     string // when wantErr is false
+		wantUsed int64  // when wantErr is false; -1 means len(want)
+		wantErr  bool
+	}{
+		{"repeated reference", "[4 0 R 4 0 R 4 0 R]", []string{a}, MaxPageContent, "(a) Tj\n(a) Tj\n(a) Tj\n", -1, false},
+		{"repeat at the limit", "[4 0 R 4 0 R]", []string{a}, 14, "(a) Tj\n(a) Tj\n", -1, false},
+		{"repeat one byte over", "[4 0 R 4 0 R]", []string{a}, 13, "", 0, true},
+		{"distinct streams at the limit", "[4 0 R 5 0 R]", []string{a, b}, 14, "(a) Tj\n(b) Tj\n", -1, false},
+		{"distinct streams one byte over", "[4 0 R 5 0 R]", []string{a, b}, 13, "", 0, true},
+		{"non-stream element skipped", "[4 0 R 1 0 R 4 0 R]", []string{a}, 14, "(a) Tj\n(a) Tj\n", -1, false},
+		{"single stream at the limit", "4 0 R", []string{a}, 6, "(a) Tj", -1, false},
+		{"single stream one byte over", "4 0 R", []string{a}, 5, "", 0, true},
+		{"unfiltered stream counts its length", "4 0 R", []string{streamObj("(abc) Tj")}, 7, "", 0, true},
+		{"unfiltered stream at the limit", "[4 0 R]", []string{streamObj("(abc) Tj")}, 9, "(abc) Tj\n", -1, false},
+		// A chain's intermediate stage counts: (c) Tj's zlib form plus (c) Tj.
+		{"filter chain counts every stage", "4 0 R", []string{chain}, MaxPageContent, "(c) Tj", int64(len(zlibBytes([]byte("(c) Tj"))) + 6), false},
+		{"limit above MaxPageContent is clamped", "[4 0 R]", []string{a}, 1 << 62, "(a) Tj\n", -1, false},
+		{"no content", "[]", nil, 0, "", 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, pi := contentsPage(t, tc.contents, tc.streams...)
+			data, used, err := r.PageContentLimit(pi, tc.limit)
+			if tc.wantErr {
+				if !errors.Is(err, ErrDecodeLimit) || !errors.Is(err, errLex) || data != nil {
+					t.Fatalf("err = %v, data %q; want errLex and ErrDecodeLimit, no data", err, data)
+				}
+				if used <= tc.limit {
+					t.Errorf("used = %d, want > the limit %d", used, tc.limit)
+				}
+				return
+			}
+			if err != nil || string(data) != tc.want {
+				t.Fatalf("PageContentLimit = %q, %v; want %q", data, err, tc.want)
+			}
+			want := tc.wantUsed
+			if want < 0 {
+				want = int64(len(tc.want))
+			}
+			if used != want {
+				t.Errorf("used = %d, want %d", used, want)
+			}
+		})
+	}
+}
+
+// TestPageContent_RepeatedBombIsCapped: a /Contents array listing one 1 MiB
+// stream 300 times used to concatenate 300 MiB (N × 256 MiB for a real bomb,
+// render-budget.md §9 R1). PageContent stops at MaxPageContent and decodes the
+// repeated stream once, so the failure allocates about one decode.
+func TestPageContent_RepeatedBombIsCapped(t *testing.T) {
+	stream := flateStreamObj(bytes.Repeat([]byte(" "), 1<<20))
+	r, pi := contentsPage(t, "["+strings.Repeat("4 0 R ", 300)+"]", stream)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	data, err := r.PageContent(pi)
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, ErrDecodeLimit) || !errors.Is(err, errLex) || data != nil {
+		t.Fatalf("PageContent: %d bytes, err %v; want errLex and ErrDecodeLimit", len(data), err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprint(MaxPageContent)) {
+		t.Errorf("err = %q, want it to name the cap %d", err, MaxPageContent)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 32<<20 {
+		t.Errorf("PageContent allocated %d MB, want ≤ 32 MB (one 1 MiB decode)", alloc>>20)
+	}
+}
+
+// TestPageContent_RepeatedStreamDecodedOnce: within the cap, a repeated stream
+// is decoded once and the output allocated once at its exact size, so 64
+// repeats of a 1 MiB stream allocate about the 64 MiB output plus one decode,
+// not 64 decodes.
+func TestPageContent_RepeatedStreamDecodedOnce(t *testing.T) {
+	stream := flateStreamObj(bytes.Repeat([]byte(" "), 1<<20))
+	r, pi := contentsPage(t, "["+strings.Repeat("4 0 R ", 64)+"]", stream)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	data, err := r.PageContent(pi)
+	runtime.ReadMemStats(&after)
+	if err != nil || len(data) != 64*(1<<20+1) {
+		t.Fatalf("PageContent: %d bytes, err %v; want %d bytes", len(data), err, 64*(1<<20+1))
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 80<<20 {
+		t.Errorf("PageContent allocated %d MB, want ≤ 80 MB (the 64 MB output plus one decode)", alloc>>20)
 	}
 }
 
