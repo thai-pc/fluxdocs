@@ -1,4 +1,4 @@
-package extract
+package fontmodel
 
 import (
 	"unicode/utf16"
@@ -6,15 +6,28 @@ import (
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
-// cmap is a parsed /ToUnicode CMap (ISO 32000-1 §9.10.3): it maps character
-// codes, as they appear in a shown string, to Unicode text. A CMap uses the
-// same token grammar as a content stream, so we parse it with parse.ScanContent
-// and read the bfchar/bfrange sections from the operands of the endbfchar /
-// endbfrange operators.
+// cmap is a parsed CMap stream: a /ToUnicode CMap (ISO 32000-1 §9.10.3), which
+// maps character codes, as they appear in a shown string, to Unicode text, or
+// an embedded encoding CMap of a Type 0 font (§9.7.5), of which only the
+// codespace ranges, the parent CMap and the writing mode are read. A CMap uses
+// the same token grammar as a content stream, so it is parsed with
+// parse.ScanContent and the bfchar/bfrange/codespace sections are read from
+// the operands of the endbfchar / endbfrange / endcodespacerange operators.
 type cmap struct {
-	codeLen int // bytes per character code (1 for simple fonts, 2 for Identity-H)
+	codeLen int // bytes per character code as Text reads it (1 for simple fonts, 2 for Identity-H)
 	single  map[uint32]string
 	ranges  []bfRange
+
+	// space holds the codespace ranges (§9.7.6.2) that are well formed:
+	// low and high of equal length, 1–4 bytes. bad is set when a range could
+	// not be read, so segmentation through this CMap is uncertain.
+	space []spaceRange
+	bad   bool
+	// useCMap is the name given to usecmap (a parent CMap whose ranges also
+	// apply), or "".
+	useCMap parse.Name
+	// wmode is the /WMode the CMap defines (1 vertical), or 0.
+	wmode int
 }
 
 // bfRange maps a contiguous code range [lo, hi] to Unicode. Either dst (a base
@@ -26,7 +39,18 @@ type bfRange struct {
 	arr    []string
 }
 
-// parseCMap parses a decoded /ToUnicode CMap stream. It is lenient: unrecognized
+// spaceRange is one codespace range: codes of n bytes whose byte i lies in
+// [lo[i], hi[i]] (§9.7.6.2: ranges are compared byte by byte).
+type spaceRange struct {
+	n      int
+	lo, hi [4]byte
+}
+
+// maxSpaceRanges bounds the codespace ranges kept from one CMap; a hostile
+// CMap past it is treated as one whose segmentation is uncertain.
+const maxSpaceRanges = 4096
+
+// parseCMap parses a decoded CMap stream. It is lenient: unrecognized
 // constructs are ignored and a partially valid CMap still decodes what it can.
 func parseCMap(data []byte) *cmap {
 	c := &cmap{single: map[uint32]string{}}
@@ -39,6 +63,10 @@ func parseCMap(data []byte) *cmap {
 				if s, ok := op.Operands[i].(parse.String); ok {
 					c.noteCodeLen(len(s.Value))
 				}
+				c.addSpace(op.Operands[i], op.Operands[i+1])
+			}
+			if len(op.Operands)%2 != 0 {
+				c.bad = true
 			}
 
 		case "endbfchar":
@@ -77,6 +105,26 @@ func parseCMap(data []byte) *cmap {
 				}
 				c.ranges = append(c.ranges, rng)
 			}
+
+		case "usecmap":
+			// /Parent usecmap (§9.7.5.3): the parent's mappings and ranges apply too.
+			if n := len(op.Operands); n > 0 {
+				if name, ok := op.Operands[n-1].(parse.Name); ok {
+					c.useCMap = name
+				} else {
+					c.bad = true
+				}
+			}
+
+		case "def":
+			// /WMode 1 def
+			if n := len(op.Operands); n >= 2 {
+				if key, ok := op.Operands[n-2].(parse.Name); ok && key == "WMode" {
+					if v, ok := op.Operands[n-1].(parse.Integer); ok && v == 1 {
+						c.wmode = 1
+					}
+				}
+			}
 		}
 	}
 
@@ -84,6 +132,22 @@ func parseCMap(data []byte) *cmap {
 		c.codeLen = 1
 	}
 	return c
+}
+
+// addSpace records one codespace range, or marks the CMap bad if it is not a
+// pair of equal-length 1–4 byte strings.
+func (c *cmap) addSpace(loObj, hiObj parse.Object) {
+	lo, ok1 := loObj.(parse.String)
+	hi, ok2 := hiObj.(parse.String)
+	n := len(lo.Value)
+	if !ok1 || !ok2 || n < 1 || n > 4 || len(hi.Value) != n || len(c.space) >= maxSpaceRanges {
+		c.bad = true
+		return
+	}
+	r := spaceRange{n: n}
+	copy(r.lo[:], lo.Value)
+	copy(r.hi[:], hi.Value)
+	c.space = append(c.space, r)
 }
 
 // noteCodeLen widens the recorded code length to the largest seen.
