@@ -175,20 +175,34 @@ func (r *Resolver) decodeObjStm(streamNum int) (*objStm, error) {
 		return nil, fmt.Errorf("%w: ObjStm %d /N %d exceeds its data", errLex, streamNum, n)
 	}
 
-	// Header: N pairs of integers "objNum offset" before /First.
-	offsets := make([]objStmEntry, 0, n)
-	hp := &iparser{data: decoded, pos: 0}
-	for i := 0; i < int(n); i++ {
-		numTok, np, err := nextToken(decoded, hp.pos)
-		if err != nil || numTok.kind != tokInt {
-			return nil, fmt.Errorf("%w: ObjStm %d header object number", errLex, streamNum)
+	// Header: N pairs of integers "objNum offset" before /First. The header is
+	// validated in a first pass that stores nothing, so a hostile /N with few
+	// real pairs fails before any entries are reserved, and a valid header is
+	// stored in exactly one allocation of N entries (no append regrowth).
+	header := func(store []objStmEntry) ([]objStmEntry, error) {
+		pos := 0
+		for i := 0; i < int(n); i++ {
+			numTok, np, err := nextToken(decoded, pos)
+			if err != nil || numTok.kind != tokInt {
+				return nil, fmt.Errorf("%w: ObjStm %d header object number", errLex, streamNum)
+			}
+			offTok, op, err := nextToken(decoded, np)
+			if err != nil || offTok.kind != tokInt {
+				return nil, fmt.Errorf("%w: ObjStm %d header offset", errLex, streamNum)
+			}
+			if store != nil {
+				store = append(store, objStmEntry{num: int(numTok.int), offset: int(offTok.int)})
+			}
+			pos = op
 		}
-		offTok, op, err := nextToken(decoded, np)
-		if err != nil || offTok.kind != tokInt {
-			return nil, fmt.Errorf("%w: ObjStm %d header offset", errLex, streamNum)
-		}
-		offsets = append(offsets, objStmEntry{num: int(numTok.int), offset: int(offTok.int)})
-		hp.pos = op
+		return store, nil
+	}
+	if _, err := header(nil); err != nil {
+		return nil, err
+	}
+	offsets, err := header(make([]objStmEntry, 0, n))
+	if err != nil {
+		return nil, err
 	}
 
 	return &objStm{decoded: decoded, first: int(first), offsets: offsets}, nil

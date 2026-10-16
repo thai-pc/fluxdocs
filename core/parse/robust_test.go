@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // These tests pin down hostile-input robustness (SECURITY.md §2): the parser
@@ -716,4 +718,85 @@ func TestResolver_DecryptionClearsFailureCaches(t *testing.T) {
 	if dct, ok := o.(Dict); !ok || dct["Type"] != Name("Page") {
 		t.Fatalf("object = %v, want the page dictionary", o)
 	}
+}
+
+// objStmBodyPDF is objStmPDF with a caller-supplied (unfiltered) ObjStm body,
+// /N n and /First first; object 3 is entry 0 of the stream.
+func objStmBodyPDF(n, first int, body []byte) []byte {
+	var b bytes.Buffer
+	off := map[int]int{}
+	b.WriteString("%PDF-1.5\n")
+	writeObj := func(num int, s string) {
+		off[num] = b.Len()
+		b.WriteString(fmt.Sprintf("%d 0 obj\n%s\nendobj\n", num, s))
+	}
+	writeObj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	writeObj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 600] >>")
+	osDict := fmt.Sprintf("<< /Type /ObjStm /N %d /First %d /Length %d >>", n, first, len(body))
+	off[4] = writeStreamObj(&b, 4, osDict, body)
+	xoff := b.Len()
+	rows := [][3]int64{
+		{0, 0, 65535},
+		{1, int64(off[1]), 0},
+		{1, int64(off[2]), 0},
+		{2, 4, 0},
+		{1, int64(off[4]), 0},
+		{1, int64(xoff), 0},
+	}
+	raw := packXref(rows, [3]int{1, 4, 2})
+	writeStreamObj(&b, 5, fmt.Sprintf("<< /Type /XRef /Size 6 /Root 1 0 R /W [1 4 2] /Length %d >>", len(raw)), raw)
+	b.WriteString(fmt.Sprintf("startxref\n%d\n%%%%EOF\n", xoff))
+	return b.Bytes()
+}
+
+// TestLoadObjStm_HeaderAllocationIsExact pins the ObjStm header's allocation
+// (SECURITY.md §2). /N is bounded only by the decoded size (≤ len/4), so the
+// offsets table can be 4× the data: a hostile /N with one real pair must fail
+// before reserving it, and a valid header must be stored in one allocation of
+// exactly N entries rather than grown by append (old and new backing arrays
+// coexisting at each regrowth).
+func TestLoadObjStm_HeaderAllocationIsExact(t *testing.T) {
+	const size = 16 << 20
+	const n = size / 4 // the largest /N the data bound admits
+	page := "<< /Type /Page /Parent 2 0 R >>"
+
+	measure := func(t *testing.T, pdf []byte) (uint64, error) {
+		t.Helper()
+		r, err := NewResolver(pdf)
+		if err != nil {
+			t.Fatalf("NewResolver: %v", err)
+		}
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err = r.Resolve(Reference{Number: 3})
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc, err
+	}
+
+	t.Run("hostile N, one real pair", func(t *testing.T) {
+		header := "3 0 "
+		body := append([]byte(header+page), bytes.Repeat([]byte{' '}, size)...)
+		alloc, err := measure(t, objStmBodyPDF(n, len(header), body))
+		if err == nil || !strings.Contains(err.Error(), "header object number") {
+			t.Fatalf("err = %v, want the header-object-number error", err)
+		}
+		// The decoded data itself (size) is the only allocation expected.
+		if limit := uint64(size + 8<<20); alloc > limit {
+			t.Fatalf("allocated %d bytes before failing, want ≤ %d (no offsets reserved)", alloc, limit)
+		}
+	})
+
+	t.Run("valid header of N pairs", func(t *testing.T) {
+		header := strings.Repeat("3 0 ", n)
+		body := []byte(header + page)
+		alloc, err := measure(t, objStmBodyPDF(n, len(header), body))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		entries := uint64(n) * uint64(unsafe.Sizeof(objStmEntry{}))
+		if limit := uint64(size) + entries + 8<<20; alloc > limit {
+			t.Fatalf("allocated %d bytes, want ≤ %d (data + one table of %d entries + slack)", alloc, limit, n)
+		}
+	})
 }
