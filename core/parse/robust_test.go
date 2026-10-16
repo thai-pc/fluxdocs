@@ -2,6 +2,7 @@ package parse
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -430,5 +431,126 @@ func TestParse_ObjectModeStaysStrictOnDeepNesting(t *testing.T) {
 	in := []byte("1 0 obj [ (x) " + nested("[", "1", "]", maxNestingDepth+10) + " ] endobj")
 	if _, _, _, next, err := ParseIndirectObjectAt(in, 0); err == nil || next != 0 {
 		t.Errorf("ParseIndirectObjectAt err = %v next = %d, want the nesting-depth error at offset 0", err, next)
+	}
+}
+
+// TestResolver_CachesFailures pins the failure caches: a reference to a broken
+// object (or into a broken ObjStm) does its work once and then returns the same
+// error value, so errors.Is behaves as before. Without them every Do of such an
+// image re-inflated its ObjStm or re-parsed its stream outside the render
+// budget.
+func TestResolver_CachesFailures(t *testing.T) {
+	t.Run("ObjStm with /First past the end", func(t *testing.T) {
+		r, err := NewResolver(objStmPDF("1", "999999999999", "[1 4 2]"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err1 := r.Resolve(Reference{Number: 3})
+		loads := r.loads
+		_, err2 := r.Resolve(Reference{Number: 3})
+		if err1 == nil || err2 != err1 || !errors.Is(err2, errLex) {
+			t.Fatalf("errors = %v, %v; want the same errLex value twice", err1, err2)
+		}
+		// Another object in the same broken ObjStm reuses the cached ObjStm
+		// failure: no second decode.
+		r.xref.Entries[6] = XrefEntry{InObjStm: true, StreamNum: 4, StreamIdx: 1}
+		if _, err := r.Resolve(Reference{Number: 6}); !errors.Is(err, errLex) {
+			t.Fatalf("Resolve(6) err = %v, want errLex", err)
+		}
+		if r.loads != loads {
+			t.Errorf("loads went %d -> %d: the failed ObjStm was decoded again", loads, r.loads)
+		}
+	})
+	t.Run("object that fails to parse", func(t *testing.T) {
+		pdf := buildPDF(map[int]string{
+			1: "<< /Type /Catalog /Pages 2 0 R >>",
+			2: "<< /Type /Pages /Kids [] /Count 0 >>",
+			3: "<< /Broken [ 1 2 ",
+		}, "<< /Size 4 /Root 1 0 R >>")
+		r, err := NewResolver(pdf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err1 := r.Resolve(Reference{Number: 3})
+		loads := r.loads
+		_, err2 := r.Resolve(Reference{Number: 3})
+		if err1 == nil || err2 != err1 {
+			t.Fatalf("errors = %v, %v; want the same error value twice", err1, err2)
+		}
+		if r.loads != loads {
+			t.Errorf("loads went %d -> %d: the failed object was parsed again", loads, r.loads)
+		}
+	})
+	t.Run("success is still cached", func(t *testing.T) {
+		r, err := NewResolver(objStmPDF("1", "", "[1 4 2]"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o1, err1 := r.Resolve(Reference{Number: 3})
+		loads := r.loads
+		o2, err2 := r.Resolve(Reference{Number: 3})
+		if err1 != nil || err2 != nil || r.loads != loads {
+			t.Fatalf("errs %v, %v, loads %d -> %d; want success from the cache", err1, err2, loads, r.loads)
+		}
+		if _, ok := o2.(Dict); !ok || o1 == nil {
+			t.Fatalf("object = %T, want the page dictionary", o2)
+		}
+	})
+}
+
+// TestResolver_DecryptionClearsFailureCaches: an encrypted ObjStm resolved
+// before EnableDecryption fails (its header is ciphertext). That failure must
+// not outlive the change of decryption state: after EnableDecryption the same
+// object resolves. It is the one way a failure is not permanent.
+func TestResolver_DecryptionClearsFailureCaches(t *testing.T) {
+	enc := encDict(2, 3, 128, "")
+	d, err := newDecryptor(enc, []byte("id"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var b bytes.Buffer
+	off := map[int]int{}
+	b.WriteString("%PDF-1.5\n")
+	writeObj := func(num int, body string) {
+		off[num] = b.Len()
+		b.WriteString(fmt.Sprintf("%d 0 obj\n%s\nendobj\n", num, body))
+	}
+	writeObj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	writeObj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 600] >>")
+	header := "3 0 "
+	plain := []byte(header + "<< /Type /Page /Parent 2 0 R >>")
+	cipherText := rc4Enc(d.objectKey(4, 0), plain)
+	off[4] = writeStreamObj(&b, 4, fmt.Sprintf("<< /Type /ObjStm /N 1 /First %d /Length %d >>", len(header), len(cipherText)), cipherText)
+	xoff := b.Len()
+	raw := packXref([][3]int64{
+		{0, 0, 65535},
+		{1, int64(off[1]), 0},
+		{1, int64(off[2]), 0},
+		{2, 4, 0},
+		{1, int64(off[4]), 0},
+		{1, int64(xoff), 0},
+	}, [3]int{1, 4, 2})
+	encStr := fmt.Sprintf("<< /Filter /Standard /V 2 /R 3 /Length 128 /O <%x> /U <%x> /P -44 >>",
+		bytes.Repeat([]byte{0xAB}, 32), bytes.Repeat([]byte{0xCD}, 32))
+	writeStreamObj(&b, 5, fmt.Sprintf("<< /Type /XRef /Size 6 /Root 1 0 R /Encrypt %s /ID [<6964> <6964>] /W [1 4 2] /Length %d >>", encStr, len(raw)), raw)
+	b.WriteString(fmt.Sprintf("startxref\n%d\n%%%%EOF\n", xoff))
+
+	r, err := NewResolver(b.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Resolve(Reference{Number: 3}); err == nil {
+		t.Fatal("encrypted ObjStm resolved before decryption, want an error")
+	}
+	if err := r.EnableDecryption(nil); err != nil {
+		t.Fatalf("EnableDecryption: %v", err)
+	}
+	o, err := r.Resolve(Reference{Number: 3})
+	if err != nil {
+		t.Fatalf("after EnableDecryption: %v (a stale cached failure?)", err)
+	}
+	if dct, ok := o.(Dict); !ok || dct["Type"] != Name("Page") {
+		t.Fatalf("object = %v, want the page dictionary", o)
 	}
 }

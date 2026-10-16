@@ -43,11 +43,30 @@ func (r *Resolver) objectFromStream(streamNum, idx, wantNum int) (Object, error)
 	return obj, nil
 }
 
-// loadObjStm decodes and caches the object stream numbered streamNum.
+// loadObjStm decodes and caches the object stream numbered streamNum. A failure
+// is cached as well (the same error value is returned again), so an ObjStm that
+// inflates successfully but has a bad header is not re-inflated for each object
+// or reference that points into it. r.mu is held.
 func (r *Resolver) loadObjStm(streamNum int) (*objStm, error) {
 	if os, ok := r.objstms[streamNum]; ok {
 		return os, nil
 	}
+	if err, ok := r.objstmErrs[streamNum]; ok {
+		return nil, err
+	}
+	os, err := r.decodeObjStm(streamNum)
+	if err != nil {
+		r.objstmErrs[streamNum] = err
+		return nil, err
+	}
+	r.objstms[streamNum] = os
+	return os, nil
+}
+
+// decodeObjStm does loadObjStm's work on a cache miss. Every failure depends
+// only on the file bytes, the xref table and the decryption state.
+func (r *Resolver) decodeObjStm(streamNum int) (*objStm, error) {
+	r.loads++
 
 	// An ObjStm is itself an in-use object; resolve it without recursing into
 	// compressed handling (object streams cannot be nested in object streams).
@@ -115,7 +134,5 @@ func (r *Resolver) loadObjStm(streamNum int) (*objStm, error) {
 		hp.pos = op
 	}
 
-	os := &objStm{decoded: decoded, first: int(first), offsets: offsets}
-	r.objstms[streamNum] = os
-	return os, nil
+	return &objStm{decoded: decoded, first: int(first), offsets: offsets}, nil
 }
