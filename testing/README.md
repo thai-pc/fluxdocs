@@ -17,6 +17,7 @@ testing/
 ├── security/
 │   ├── redaction/       # GATE: extract-after-redact must be empty. 100% to merge.
 │   ├── fuzz/            # seed corpus for go test -fuzz (parser/tokenizer)
+│   ├── dos/             # GATE: render-budget wall-clock gates (hostile pages/batches)
 │   └── encryption/      # crypto / signature / share-link tests
 ├── e2e/                 # end-to-end via client wrappers (React/Vue + WASM)
 ├── benchmark/           # benchmark suite (ms/page, MB/s, bundle size)

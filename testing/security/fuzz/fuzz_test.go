@@ -13,12 +13,15 @@ package fuzz
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
+	"github.com/thai-pc/fluxdocs/core/render"
 )
 
 // minimalPDF is a tiny valid one-page PDF used as a fuzz seed.
@@ -232,7 +235,7 @@ func seeds() [][]byte {
 			"<< /Type /Page /Parent 2 0 R >>",
 			"<< /Filter /Standard /V 2 /R 3 /Length 256 /P -44 /O <" + strings.Repeat("AB", 32) + "> /U <" + strings.Repeat("CD", 32) + "> >>",
 		}, "/Encrypt 4 0 R /ID [<00112233445566778899AABBCCDDEEFF> <00112233445566778899AABBCCDDEEFF>] "),
-	}, deepNestingSeeds()...)
+	}, append(deepNestingSeeds(), budgetSeedBytes()...)...)
 }
 
 // deepNestingDepth is deep enough to cross the parser's nesting bound many
@@ -323,6 +326,10 @@ func TestHostileMediaBoxSeedsReturnError(t *testing.T) {
 			if err == nil {
 				t.Fatalf("RenderPage returned %d bytes, want canvas-too-large error", len(img))
 			}
+			// The canvas cap is part of the render budget: both sentinels match.
+			if !errors.Is(err, core.ErrRenderBudgetExceeded) || !errors.Is(err, render.ErrCanvasTooLarge) {
+				t.Errorf("err = %v, want ErrRenderBudgetExceeded and render.ErrCanvasTooLarge", err)
+			}
 		})
 	}
 }
@@ -384,7 +391,9 @@ func failOnInternal(t *testing.T, err error) {
 
 // exercise runs the read-side pipeline on one input. Each step may reject the
 // input with an error, but must never panic — including a panic recovered into
-// ErrInternal.
+// ErrInternal. The render runs with the default budget under renderDeadline and
+// must return within the deadline plus renderSlack: a longer render is a hang
+// the budget failed to bound.
 func exercise(t *testing.T, data []byte) {
 	t.Helper()
 	doc, err := core.OpenBytes(data)
@@ -396,8 +405,14 @@ func exercise(t *testing.T, data []byte) {
 	if _, err := doc.GetPage(0); err == nil {
 		_, err = doc.ExtractTextByPage(0, core.ExtractOptions{})
 		failOnInternal(t, err)
-		_, err = doc.RenderPage(0, core.RenderOptions{DPI: 36, Format: "png"})
+		ctx, cancel := context.WithTimeout(context.Background(), renderDeadline)
+		defer cancel()
+		start := time.Now()
+		_, err = doc.RenderPageContext(ctx, 0, core.RenderOptions{DPI: 36, Format: "png"})
 		failOnInternal(t, err)
+		if elapsed := time.Since(start); elapsed > renderDeadline+renderSlack {
+			t.Errorf("render took %v, want ≤ %v (deadline %v)", elapsed, renderDeadline+renderSlack, renderDeadline)
+		}
 	}
 }
 

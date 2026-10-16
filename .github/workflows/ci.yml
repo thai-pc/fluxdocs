@@ -48,6 +48,12 @@ jobs:
       - name: Test (race)
         run: go test -race ./...
 
+      # SECURITY GATE: hostile documents must stop at the per-page render budget
+      # (SECURITY.md §2). CPU-time gates (plus deadline checks), so they run
+      # without -race.
+      - name: Render budget DoS gate
+        run: go test ./testing/security/dos/...
+
       # SECURITY GATE: redacted content must not be extractable afterwards
       # (spec §13.4, .claude/SECURITY.md §1). Must pass 100% once tests exist.
       - name: Redaction security gate
