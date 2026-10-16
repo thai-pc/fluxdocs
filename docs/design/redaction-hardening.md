@@ -1,6 +1,7 @@
 # Design: redaction hardening (one model instead of per-leak patches)
 
-Status: design (docs only). Base: `master` at 446eaea.
+Status: design (docs only); Phase 1 batch A in review. Base: `master` at
+446eaea (design). Batch A baselines: 71de860.
 Tier: **Pro** for the redaction engine (`core/docops/redact`, `core/redact.go`,
 `core/pii.go`). It also touches **Core (MIT)** code in `core/parse` (strict
 scanner, copier) and a new shared font model, which Core callers (render,
@@ -33,17 +34,47 @@ Do not start Phase 1 on a branch that predates that merge.
 | D7 | **Strip all `/ActualText`, `/Alt` and `/E` on marked pages in Phase 1** | §6.7 |
 | D11 | **The back-reference fix (`BuildOptions.PageRefs`) also applies to Merge/Split** | §5.5 |
 | D12 | **N1 matching fix moves into Phase 1:** Unicode via `/ToUnicode`, matched across TJ elements | §5.3, §11 |
-| D6, D8, D9, D10, D13 | **Not yet decided; the default applies.** D6: glyph-level granularity once Phase 2 lands, operator-level as fallback, no rounding. D8: keep refusing `/PS` XObjects. D9: accept and document the fidelity side effects. D10: Ghostscript oracle mandatory in CI, no further oracles yet. D13: public `ExtractText` stays page-only; the gate wording names the deep extraction | §13 |
-
 | P8 | **Approved (2026-10-15).** `func (d *Document) RedactionReport() (RedactionReport, bool)` on the `*Document` returned by `RedactAndFlatten`, with no signature change. The cloud `redactPII` response adds `"auto_extended"`; MCP and CLI print a text-free summary | §9 P8 |
 | P9 | **Approved (2026-10-15).** Propagation thresholds: 4 for matched strings, 8 for `RedactArea`-removed text. Matching is case-sensitive, after NFKC. `golang.org/x/text` becomes a direct dependency | §6.11, §9 P9 |
 | Attachments | **Approved (2026-10-15).** Drop all FileAttachment annotations whenever a redaction runs (non-empty plan), and list them in the report (`Reason "attachment-policy"`) | §6.11 |
+| D14 | **Approved (2026-10-16). Property-list matching moves from Phase 2 (old step 2.4) into Phase 1 (step 1.6).** `RedactText`/`AutoRedactPII` also match `/ActualText`, `/Alt` and `/E`, both in inline `BDC`/`DP` dicts and via `/Properties`. A match marks the page, removes the whole `BDC…EMC` sequence's runs, and strips the key. Reason (batch A): D7 strips only on marked pages, so a `RedactText` whose pattern matches only the `/ActualText` left the page unmarked. The `actualtext` repro stayed open, contradicting the Phase 1 exit criterion | §6.7, §11 step 1.6, §12 |
+| D15 | **Approved (2026-10-16). Narrow inline-image acceptance in Phase 1.** On pages being redacted, an inline image is accepted only if all of these hold. Anything else is an `inline_image` refusal. Phase 2 may widen this with full decoding. Reason: go-reviewer found 15 batch A leaks where gs rejects or under-reads an inline image and then parses its raw bytes as content (T5, classes B1–B4). The conditions: | §6.1, §11 step 1.1, §12 |
+| | • **Filters:** unfiltered, `AHx`, or zlib-headered `Fl`. Refused: DCT, A85, raw DEFLATE, LZW, RL, CCF, JBIG2, JPX, Crypt. | |
+| | • **Dictionary:** fully allow-listed. Every key and value is checked; unknown keys are refused; `/DP` predictors are refused. | |
+| | • **Colour space:** DeviceGray, DeviceRGB, DeviceCMYK, Indexed over a device base, or a name resolved via `InlineColorSpace` to one of these. Refused: CalGray, CalRGB, Lab, ICCBased, Separation, DeviceN. | |
+| | • **Decoded length:** exactly `H × rowBytes`. The whole filter chain is decoded within budget, with nothing left over. | |
+| D16 | **Approved (2026-10-16). Defence in depth.** Refuse (`inline_image`) when the image's raw data contains a text-show candidate: the byte pair `Tj` or `TJ`, or `)` or `>`, then optional white-space or comments, then `'` or `"` | §6.1 T6 |
+| D6, D8, D9, D10, D13 | **Not yet decided; the default applies.** D6: glyph-level granularity once Phase 2 lands, operator-level as fallback, no rounding. D8: keep refusing `/PS` XObjects. D9: accept and document the fidelity side effects. D10: Ghostscript oracle mandatory in CI, no further oracles yet. D13: public `ExtractText` stays page-only; the gate wording names the deep extraction | §13 |
 
 **No maintainer decision blocks Phase 1 any longer.** The remaining open items
-(D6, D8, D9, D10, D13, WASM cap) have defaults that apply, and the
-measurements in §13 do not gate any step. P2 (normalize `RedactArea` rects;
-reject NaN/Inf with `ErrInvalidArgument`) is not formally decided; its default
-is to implement it as proposed in step 1.5.
+have defaults that apply:
+- D6, D8, D9, D10, D13;
+- the WASM cap;
+- the lenient-scanner question Q1 (§13).
+
+The measurements in §13 do not gate any step. P2 (normalize `RedactArea`
+rects; reject NaN/Inf with `ErrInvalidArgument`) is not formally decided; its
+default is to implement it as proposed in step 1.5.
+
+## Design corrections from batch A implementation (2026-10-16)
+
+The batch A implementer found places where this design was wrong or said
+nothing. Each correction is applied in the section named. Batch A's baselines
+were recorded at **71de860** (HEAD at the time), not 446eaea.
+
+| # | Correction | Applied in |
+|---|---|---|
+| C1 | The gs sanity check ("gs on the input shows the secret") cannot apply to every row. gs `txtwrite` shows nothing for: a string or keyword split across streams, `0 Tf`, `0 Tz`, a singular `Tm`, tiling-pattern text, `/ActualText`, strings nested inside a TJ array, and some over-deep TJ fixtures. Rows get a per-row `gsBlind` flag. It is allowed only on rows whose expectation is `clean` (output must pass the oracles) | §12.1 |
+| C2 | N5 premise refined. gs does not show a string split across streams; it appears to tokenize each stream separately. But gs *does* end a comment at a stream boundary: in `split_comment`, the text after a comment that runs to the end of stream 1 is shown from stream 2. Readers therefore disagree three ways: join with no separator, join with white-space (us), or per-stream tokenization. Refusing a token or comment that straddles a boundary remains correct | §4 N5, §5.1 |
+| C3 | API shape. `ScanContentStrict(segments [][]byte, …)` cannot report offsets into the joined content that redaction splices. `PageContent` appends `\n` after *every* stream of an array, but adds nothing for a single stream. Implemented instead: `parse.ContentSegments{Data, Joins}`, where `Data` is byte-identical to `PageContent`'s output and `Joins` are the offsets of the inserted separators; plus `(*Resolver).PageContentSegments` | §5.1, §9 P7 |
+| C4 | T1 tightened: after `EI`, require white-space or end of content. A delimiter is not enough | §6.1 |
+| C5 | CR LF after `ID`: data may start after the CR or after the CR LF. Both starts are plausible and must agree. Unfiltered, Flate and DCT refuse after CR LF (their ends differ by one). AHx and A85 ignore white-space, so they are accepted unless a length entry (`/L`) is present | §6.1 |
+| C6 | `tj_nested` (a string inside a nested array inside a TJ array) had no step. It is assigned to 1.5: the text model reads strings at any nesting depth inside a TJ operand, for both matching and removal | §11 step 1.5 |
+| C7 | `StrictOptions.InlineColorSpace` is not yet wired into redaction, which scans without options. Until the 1.4 walker passes resource scopes, inline images with a *named* colour space refuse as `inline_image` | §5.1, §11 step 1.4 |
+| C8 | Until `RedactionError` exists (step 1.8), reason codes are classified from the error chain plus the loss text. That classifier is duplicated in the leak corpus and the regression harness, and collapses into `RedactionError.Reason` in 1.8 | §11 step 1.8, §12 |
+| C9 | Corpus coverage. `scratchpad/r2/list.txt` is mostly icons: 13 inline images and 21 stream joins in 2,598 pages, all accepted. A text-heavy corpus is needed to judge the D1-A refusal rate | §12.4, §13 |
+| C10 | Suggestion, **not decided**: the *lenient* scanner (render, extract) should also use the exact inline-image end where it can be computed. In `ii_tight_EI`, gs renders text that our renderer and extractor hide | §13 Q1, Phase 2 candidates |
+| C11 | N5 needed minimal wiring in 1.2, not later: batch A wired `core/redact.go` `redactionContent` to use `PageContentSegments` + `ScanContentStrict` when the page has joins | §11 step 1.2 |
 
 ---
 
@@ -165,7 +196,7 @@ before it is fixed (§12.1).
 | N2 | Copier back-references: an annotation on an unmarked page with `/P` or `/Dest` pointing to a marked page drags in the *original* page dict. Through its `/Parent` that brings the whole original page tree, with the marked page's original `/Annots` and `/Resources`. Widget `/Parent`→field→`/Kids` can drag in the marked page's widgets (`/V`, `/AP`) | F2 | `parse/copy.go` `copyValue` (no special case for page refs) |
 | N3 | The marked page dict is copied except `/Parent`, `/StructParents` and `/B`. `/Thumb` (§12.3.4, a picture of the unredacted page), `/PieceInfo`, page `/Metadata` and `/VP` survive | F2 | `parse/copy.go` `CopyPage` |
 | N4 | Unused resources on the marked page (e.g. a form in `/XObject` never `Do`-ed but holding the text) are copied verbatim | F2 | copier closure |
-| N5 | A token straddling two `/Contents` streams: `PageContent` inserts `\n`, so `(SECRET-12` + `34) Tj` scans as `SECRET-12\n34` and the regex misses it. A viewer that concatenates without a separator shows `SECRET-1234` | F1 | `parse/content.go` `PageContent` |
+| N5 | A token or comment straddling two `/Contents` streams. `PageContent` inserts `\n`, so `(SECRET-12` + `34) Tj` scans as `SECRET-12\n34` and the regex misses it. Readers disagree three ways (C2): join with no separator (shows `SECRET-1234`), join with white-space (us), or tokenize per stream. gs tokenizes per stream: it does not show the split string, but it ends a comment at the boundary (`split_comment` shows the secret) | F1 | `parse/content.go` `PageContent` |
 | N6 | `gs` with ExtGState `/Font [/F size]` (§8.4.5, Table 58) changes font and size, but the scanner tracks only `Tf`, so boxes are wrong | F1 | `scanRuns` |
 | N7 | The mandatory gate is weak: public `ExtractText` reads only the page's own content stream, not forms, patterns or Type 3, so "ExtractText lacks the secret" does not prove removal | test gap | `extract/text.go` |
 
@@ -203,17 +234,29 @@ before it is fixed (§12.1).
 `ScanContentSpansStrict` becomes the single entry point for every stream B
 visits, not only page content. Phase 1 adds:
 
-- **Segments.** A new `ScanContentStrict(segments [][]byte, opts StrictOptions)`
-  (internal-facing, exported from `parse`). It scans the concatenation and
-  reports a loss if any single lexical token (string, name, number, keyword,
-  hex string, comment) contains a segment boundary. §7.8.2 allows a split only
-  at token boundaries. A split *between* operands and their operator stays legal.
-  `PageContent` gains a sibling `PageContentSegments` that returns the decoded
-  streams without joining them (N5).
+- **Segments (as implemented in batch A, C3).**
+  - `parse.ContentSegments{Data []byte; Joins []int}`. `Data` is
+    byte-identical to `PageContent`'s output: for an array, each stream is
+    followed by `\n`; a single stream gets no separator. `Joins` are the offsets
+    of the inserted separators.
+  - `(*Resolver).PageContentSegments(pi)` returns it. Spans are offsets into
+    `Data`, so the byte splice works unchanged.
+  - `ScanContentStrict(seg ContentSegments, opts StrictOptions)` reports a loss
+    if any single lexical token (string, name, number, keyword, hex string,
+    inline-image data) or comment contains a join. A comment that runs to the
+    end of a stream is such a straddle (C2).
+  - §7.8.2 allows a split only at token boundaries. A split *between* operands
+    and their operator stays legal.
+  - Readers disagree three ways about straddles (C2), so refusing is the only
+    safe answer (N5).
+  - `core/redact.go` `redactionContent` uses this path whenever the page has
+    joins (C11, step 1.2).
 - **Inline image boundary.** See §6.1. `StrictOptions.InlineColorSpace` is a
   callback that resolves a named inline-image colour space to its component
   count through the unit's resource scope. If it is nil or cannot resolve the
-  name, the result is a loss.
+  name, the result is a loss. **Not yet wired into redaction (C7):** redaction
+  scans without options, so named colour spaces refuse as `inline_image` until
+  the 1.4 walker passes scopes.
 - **Operand types for resource-name operators.** `Do`, `gs`, `sh`, `cs` and
   `CS` take a Name. `Tf` takes a Name and a number. `BMC` and `MP` take a Name.
   `BDC` and `DP` take a Name plus a Dict or Name. Today `operandsFit` checks
@@ -397,27 +440,69 @@ normalize abbreviated colour spaces and filters (`/G /RGB /CMYK /I`, `/AHx /A85
 /LZW /Fl /RL /CCF /DCT`). A repeated key, or a value of the wrong type for a key
 we need, is a loss.
 
-**Step 2. Compute the exact end `E`** from the first filter in `/F` (the
-outermost filter determines the extent of the encoded bytes):
+**Step 1a. Phase 1 dictionary allow-list (D15).** On pages being redacted
+(marked, or reached by the D4 pre-pass), every key must be in this table, with
+a value of the stated form. Any other key, value, or combination is an
+`inline_image` refusal.
 
-| First filter | End `E` | Phase |
+| Key (full / abbreviation, Table 93) | Accepted value |
+|---|---|
+| `/Width` `/W`, `/Height` `/H` | Integer ≥ 1. `W × H` within the inline cap (§6.4 budget) |
+| `/BitsPerComponent` `/BPC` | 1, 2, 4 or 8. Must be absent or 1 when `/IM true`. Required otherwise |
+| `/ImageMask` `/IM` | Boolean |
+| `/ColorSpace` `/CS` | (absent only when `/IM true`) **one of:** `/G` `/DeviceGray`, `/RGB` `/DeviceRGB`, `/CMYK` `/DeviceCMYK`; `[/I base hival lookup]` or `[/Indexed …]`, where `base` is one of those three, `hival` is an integer in `0 … min(255, 2^BPC − 1)`, and `lookup` is a string of exactly `(hival+1) × n(base)` bytes; or a Name resolved through `InlineColorSpace` (the unit's scopes) to one of the above. Refused: CalGray, CalRGB, Lab, ICCBased, Separation, DeviceN, Pattern, an incomplete array, an unresolvable name (B1) |
+| `/Decode` `/D` | Array of exactly `2 × n` numbers (`2` for `/IM` and for Indexed). A wrong length is a refusal (B1) |
+| `/Interpolate` `/I` | Boolean. `/I 5` is a refusal (B1) |
+| `/Intent` | Name |
+| `/Filter` `/F` | A Name or an array of Names from {`/AHx` `/ASCIIHexDecode`, `/Fl` `/FlateDecode`}. **Every** element is checked, not just the first (B1 "unchecked second filter"). At most one `Fl`, and `AHx` may only come first |
+| `/DecodeParms` `/DP` | Absent, `null`, or a dict (or array aligned with `/F`) whose `/Predictor` is absent or 1 and which has no other keys. Any predictor is a refusal |
+| `/L` `/Length` | Integer; T4 applies |
+
+Duplicate keys (full and abbreviated count as the same key) are a refusal.
+`n` is 1 for Gray, Indexed and `/IM`; 3 for RGB; 4 for CMYK.
+`rowBytes = ceil(W × BPC × n / 8)`, or `ceil(W / 8)` for `/IM`.
+
+**Step 1b. Data start (C5).** §8.9.7 puts exactly one white-space byte after
+`ID`. When `ID` is followed by CR LF, two starts are plausible: after the CR
+(the data begins with LF) and after the CR LF (the end-of-line taken as one
+separator). Steps 2–3 run for **both** starts, and the results must agree.
+
+- Unfiltered and Flate: the two starts give different ends, or one of them
+  fails. These **refuse** after CR LF.
+- AHx ignores white-space, so both starts reach the same EOD. It is
+  **accepted**, unless a length entry (`/L`, T4) is present. The two starts
+  then imply lengths that differ by one, so the result is a loss.
+- DCT and A85 are refused in Phase 1 regardless (D15).
+
+**Step 2. Compute the exact end `E` and decode the whole chain (D15).** `E`
+comes from the first filter in `/F` (the outermost filter determines the extent
+of the encoded bytes). Then the **whole chain** is decoded:
+
+- within the inline budget;
+- with a limit reader capped at `expected + 1` bytes;
+- requiring that each filter consumes **all** of its input, with nothing left
+  over;
+- requiring that the final output is **exactly** `expected = H × rowBytes`
+  bytes. More or fewer is a refusal (B2).
+
+| First filter | End `E` and checks | Phase |
 |---|---|---|
-| none | `dataStart + H × ceil(W × BPC × n / 8)` (rows byte-aligned, §8.9.5.2). `n` comes from `/CS`: G=1, RGB=3, CMYK=4, I (Indexed)=1, or a named entry in `/ColorSpace` resolved through the scope (`ICCBased` → `/N`; `Indexed` → 1; `Separation` → 1; `DeviceN` → array length). `/IM true` ⇒ n=1, BPC=1. Overflow-checked int64; `E > len` is a loss | 1 |
-| `AHx` | first `>` (EOD, §7.4.2). A byte that is neither hex nor white-space before it is a loss | 1 |
-| `A85` | first `~>` (EOD, §7.4.3). An invalid byte is a loss | 1 |
-| `Fl` | decode with a `bytes.Reader` handed directly to `compress/zlib` / `compress/flate` (it implements `io.ByteReader`, so the decompressor does not read ahead). `E = dataStart + consumed`. The stream must reach a real end of stream (zlib Adler-32 checked, or a final deflate block). Truncation or an error is a loss. **Do not** use the lenient `DecodeStream` | 1 |
-| `DCT` | JPEG marker walk (no pixel decode): length-prefixed segments until SOS, then entropy data where `FF00` and `FFD0–D7` are not markers, repeated over several SOS for progressive JPEGs, until EOI `FFD9`. `E` is just after EOI. Anything malformed is a loss | 1 |
-| `LZW` | EOD code 257 (§7.4.4). Needs a consuming decoder | 2 (loss in 1) |
-| `RL` | EOD byte 128 (§7.4.5) | 2 (loss in 1) |
-| `CCF`, other, unknown | — | loss |
+| none | `E = dataStart + H × rowBytes` (rows byte-aligned, §8.9.5.2). Overflow-checked int64; `E > len` is a loss | 1 |
+| `AHx` | first `>` (EOD, §7.4.2). A byte that is neither hex nor white-space before it is a loss. The decoded byte count (an odd final digit is padded with 0) must equal `expected`, or for `[/AHx /Fl]` it is the exact input to the Flate step | 1 |
+| `Fl` | Requires a **zlib header**: valid CMF/FLG, CM = 8, `(CMF<<8 \| FLG) % 31 == 0`, no preset dictionary. Raw DEFLATE without the header is a refusal (B3); the `flateDecode` raw-DEFLATE fallback is never used here. Decode with a `bytes.Reader` handed directly to `compress/zlib`, which implements `io.ByteReader`, so the decompressor does not read ahead. `E = dataStart + consumed`. The stream must reach its end, including the Adler-32 check. Truncation, an error, or decoded output ≠ `expected` (an over-long stream, B2) is a refusal. **Do not** use the lenient `DecodeStream` | 1 |
+| `A85` | first `~>` (EOD, §7.4.3), plus exact decoded length | 2 (refused in 1, D15; B2) |
+| `DCT` | JPEG marker walk to EOI **and** a full decode whose dimensions and components match `W`, `H` and `n` (B4) | 2 (refused in 1, D15) |
+| `LZW` | EOD code 257 (§7.4.4). Needs a consuming decoder | 2 (refused in 1) |
+| `RL` | EOD byte 128 (§7.4.5) | 2 (refused in 1) |
+| `CCF`, `JBIG2`, `JPX`, `Crypt`, other, unknown | — | refused |
 
-Every computed size is checked against the remaining bytes before use (no
-allocation from untrusted `W × H`).
+Every computed size is checked against the remaining bytes and the budget
+before use. Nothing is allocated from untrusted `W × H` beyond the cap.
 
 **Step 3. Terminator agreement.** All of the following must hold:
 
-- (T1) `data[E:]` is `ws* "EI"` followed by white-space, a delimiter, or end of
-  stream.
+- (T1) `data[E:]` is `ws* "EI"` followed by **white-space or the end of the
+  content**. A delimiter alone is not enough (C4): `EI(` or `EI/` is a loss.
 - (T2) The byte immediately before that `E` of `EI` is white-space. This can
   be the last data byte or a separator. Without it, a reader that searches for a
   white-space-preceded `EI` runs past the end, as in repro `ii_tight_EI` and the
@@ -440,6 +525,40 @@ allocation from untrusted `W × H`).
 - (T4) If the dictionary also carries a length entry (`/L` or `/Length`), it
   must equal `E − dataStart`. ISO 32000-2 defines one; verify Table 91 before
   relying on it. ISO 32000-1 does not.
+- (T5) **A reader that rejects or under-reads the image parses its raw bytes
+  as content.** Observed with gs (go-reviewer, batch A, 15 repros). When gs
+  rejects an inline image, or stops reading it early, it resumes content
+  parsing inside the image data. Text placed there is shown, while we treat it
+  as image data.
+  - Repro classes:
+    - **B1, bad dictionary values:** `/I 5`; a `/D` of the wrong length; an
+      incomplete CalGray, Lab, Separation or DeviceN array; an unchecked second
+      filter.
+    - **B2, over-long data:** Flate or A85 carrying more encoded data than the
+      samples need, so the reader stops early.
+    - **B3, raw DEFLATE** without a zlib header.
+    - **B4, DCT that does not decode.**
+  - Rule: we accept an image only when we are confident that every mainstream
+    reader decodes exactly `[dataStart, E)` as image data. That is the D15
+    allow-list (Step 1a) plus the full-chain exact decode (Step 2). Anything
+    a reader might reject or under-read is refused. No allow-list can be
+    *proven* complete across readers, so T6 adds defence in depth.
+- (T6) **Defence in depth (D16).** The raw bytes `[dataStart, E)` must not
+  contain a text-show candidate. Any of the following is an `inline_image`
+  refusal:
+  - the byte pair `Tj` or `TJ`;
+  - `)` or `>`, then zero or more white-space bytes or comments (a comment
+    is white-space, ISO 32000-1 §7.2.3), then `'` or `"`.
+
+  This holds even if the image passed T1–T5. If some reader still falls back to
+  parsing the data as content, it cannot reach a text-showing operator inside
+  the data. The trailing text a fall-back reader would see lies after `E` and
+  is scanned by us anyway.
+  - AHx data can contain neither pattern, because `j`, `J`, `'` and `"` are
+    not hex digits.
+  - Unfiltered and Flate binary data trip T6 with probability about
+    `2·len/65536` (the pair test dominates). Measured on the text-heavy corpus
+    (§12.4, §13).
 
 **Considered and rejected:** "remove the ambiguous region". When readers
 disagree about where the image ends, the later candidates are unbounded (the
@@ -592,20 +711,36 @@ is `Tz/100`. `Tw` applies only to the single-byte code 32 (§9.3.3).
 
 - **Matching.** `/ActualText`, `/Alt` and `/E` are decoded as text strings
   (§7.9.2.2), then:
-  - **Text matching.** For `RedactText`, if the pattern matches the property
-    text, mark the whole `BDC…EMC` sequence: every run inside it becomes a span
-    mark, and the property key is stripped. Repros `actualtext` and
-    `actualtext_props` show the visible glyphs `XXXXXXXXXXX` while
-    copy/paste yields the secret.
+  - **Text matching (Phase 1, D14, step 1.6).** `RedactText` and
+    `AutoRedactPII` run their regexp over each property text, the same way they
+    run it over glyph text (§6.11 skeleton rules apply only to D4
+    propagation). On a match:
+    - the whole `BDC…EMC` sequence is marked: every run inside it, at any
+      nesting depth of marked content, becomes a span mark;
+    - the matching key is stripped;
+    - **the page is marked even when the sequence contains no runs.** The plan
+      entry carries a property mark, so D7 and the rest of the marked-page
+      pipeline apply. `RedactText` returns the union box of the sequence's runs
+      (none if it has no runs).
+    - The matched substring is a match needle for D4 (≥ 4 skeleton characters).
+
+    This closes repros `actualtext` and `actualtext_props` for `RedactText`.
+    Their visible glyphs are `XXXXXXXXXXX`, which never match, while copy/paste
+    yields the secret. Before D14, D7 never ran because the page stayed
+    unmarked. Scope in Phase 1: page content (inline dicts and page
+    `/Properties`). Property lists inside forms make the form "show text"
+    (§6.3), so it is refused.
   - **Area matching.** If any run inside the sequence is removed, or its box
-    meets a rect, strip all three keys from that property list.
+    meets a rect, strip all three keys from that property list. On marked pages
+    D7 strips them all anyway.
 - **Rewrite.**
   - Inline dict: re-emit the `BDC` operand dict without the keys. This is a
     byte splice of the `BDC` span with a serialized dict; the other keys are
     preserved.
   - Named entry: COW a page-private `/Properties` entry.
-- **Phase 1 (decided, D7).** On a marked page, strip `/ActualText`, `/Alt` and
-  `/E` from every property list:
+- **Phase 1 (decided, D7).** The rewriter is built in step 1.6 (D14) and reused
+  here. On a marked page, strip `/ActualText`, `/Alt` and `/E` from every
+  property list:
   - inline `BDC`/`DP` dicts in the page content are re-emitted without the keys;
   - named `/Properties` entries get page-private clones.
 
@@ -953,11 +1088,15 @@ P4/P5 for Phase 2, decide later).
   (Phase 2) across consecutive
   text-showing operators on the same line. Visual–semantic mismatch is out of
   scope (§2).
-- **P7, `parse` API.** This is Core and lower stakes, but importable:
-  `ScanContentStrict(segments, StrictOptions)`,
-  `(*Resolver).PageContentSegments`, `(*Resolver).ResolveName`,
-  `PageSource.ReplaceResources`, `PageSource.Redacted`, `BuildOptions.PageRefs`.
-  `ScanContentSpansStrict(data)` stays as a one-segment wrapper.
+- **P7, `parse` API.** This is Core and lower stakes, but importable. The shape
+  was corrected in batch A (C3):
+  - `ContentSegments{Data []byte; Joins []int}`;
+  - `ScanContentStrict(seg ContentSegments, opts StrictOptions)`;
+  - `(*Resolver).PageContentSegments`, `(*Resolver).ResolveName`;
+  - `PageSource.ReplaceResources`, `PageSource.Redacted`,
+    `BuildOptions.PageRefs`.
+
+  `ScanContentSpansStrict(data)` stays as a wrapper with no joins.
 
 ## 10. Spec and SECURITY.md changes to apply (not applied by this note)
 
@@ -969,7 +1108,8 @@ for whoever lands Phase 1:
   - D5 (images and paths under a region are removed whole);
   - D4 automatic extension and the P9 scope change;
   - the P8 report accessor;
-  - that `RedactText` matches extracted Unicode across TJ elements.
+  - that `RedactText` matches extracted Unicode across TJ elements, and also
+    matches `/ActualText`, `/Alt` and `/E` (D14).
 
   Add the Phase 2 P4/P5 signatures once decided.
 - **§10.2.** Add `ErrRedactionUnsupported` and `ErrRedactionVerification` to the
@@ -1009,25 +1149,47 @@ Check the diff first.
 
 | Step | Content | Items / decisions |
 |---|---|---|
-| 1.0 | Record the HEAD baseline (§12.4). Write repros for N1–N6 and the D4 extension cases. Add the leak-corpus table with every rv7 case (expected to fail or refuse before the fix) | N1–N6, D4 |
-| 1.1 | `parse`: inline-image end rule (§6.1: none/AHx/A85/Fl/DCT; LZW/RL/CCF are a loss; T1–T4 with the strict no-`EI`-pair rule), with `StrictOptions.InlineColorSpace` | 1, D1 |
-| 1.2 | `parse`: segment-boundary token check (`PageContentSegments`), operand types for resource-name operators | N5, 2 |
+Batch A (in review) covers 1.0–1.2, with corrections C1–C11.
+
+| Step | Content | Items / decisions |
+|---|---|---|
+| 1.0 | Record the baseline (§12.4; batch A recorded it at 71de860). Write repros for N1–N6 and the D4 extension cases. Add the leak-corpus table with every rv7 case, plus `split_comment`, with `gsBlind` flags (C1) and a temporary reason classifier (C8) | N1–N6, D4 |
+| 1.1 | `parse`: inline-image rules (§6.1). The D15 dictionary allow-list (every key and value; unknown keys, predictors and non-device colour spaces refused). Filters: unfiltered, AHx and zlib-headered Flate only (A85, DCT, raw DEFLATE, LZW, RL, CCF, JBIG2, JPX and Crypt refused). Whole-chain exact decode to `H × rowBytes` with nothing left over. Both starts after CR LF (C5). T1 white-space-or-end (C4). T1–T4 with the strict no-`EI`-pair rule. T5. T6 text-show-candidate scan (D16). `StrictOptions.InlineColorSpace` is not yet wired (C7). **Batch A fix-up:** close the 15 go-reviewer repros (B1–B4) | 1, D1, D15, D16 |
+| 1.2 | `parse`: `ContentSegments` / `PageContentSegments` / `ScanContentStrict` (C3); straddling-token and straddling-comment check (C2); operand types for resource-name operators. **Minimal wiring:** `core/redact.go` `redactionContent` uses the segment scan when the page has joins (C11), because N5 is not closed otherwise | N5, 2 |
 | 1.3 | `core/internal/fontmodel` v1: code segmentation and `/ToUnicode` (widths can wait for 2.2). Migrate `extract` to it with no behaviour change, confirmed by the existing `extract` tests | D12, N1 |
-| 1.4 | `redact/walk` v1 (check only for text-bearing units): resolved classification, decoded names, candidate scopes, routes Form / SMask group / tiling pattern (selected + reachable) / Type 3 char procs / `gs /Font`; refuse when any shows text; placements recorded for D5; memoized; budgets (§6.4) | 2, 3, 4, N6 |
-| 1.5 | Text model and matching: Unicode via the font model, one run per TJ (elements concatenated, glyph index map kept), skeleton normalization (§6.11); span marks; closed intervals; non-finite boxes intersect everything; rect validation | N1, 5, D12, P2, P6 |
-| 1.6 | `Tc`/`Tw`/1.1 em stopgap boxes and the interval pen (§6.6, last bullet) | 6 (stopgap) |
-| 1.7 | `ErrRedactionUnsupported` + `RedactionError` + `ErrRedactionVerification` (wraps `ErrInternal`) in `core/errors.go`, rebased on render-budget's sentinels. Drop `ErrInvalidPDF` from the redaction chain; keep `redact.ErrFormXObjectText` via `Unwrap`; update the cloud (422), MCP and CLI callers | 9, P1, P3, D2, D3 |
-| 1.8 | Builder (`core/parse/copy.go`): `Redacted` page-dict allow-list; `PageRefs` back-reference remap, **also for Merge/Split**; resource GC on marked pages (the page's own resources only; text-bearing forms are refused in Phase 1, so no COW yet) | N2, N3, N4, D11 |
-| 1.9 | D7: strip `/ActualText`, `/Alt` and `/E` on every marked page (inline and `/Properties`); collect the stripped values as needles | 7, D7 |
-| 1.10 | D5: remove image `Do`, inline images, text-free forms, painted paths and `sh` whose bbox meets a rect (§6.10 Phase 1 rules) | D5 |
-| 1.11 | Verifier (§5.6 checks 1–3): needle search, object classification, `/Info` | P3, N7, D3 |
-| 1.12 | D4 automatic extension (§6.11): needles from the user plan; pre-pass over all pages, annotations, fields and `/Info`; attachment policy; fixed-point loop with `maxExtendRounds = 2`; minimal report via `(*Document).RedactionReport()` (P8, P9 approved) | D4, P8, P9 |
-| 1.13 | Benchmarks for the ≤ 50% verification + pre-pass target. Corpus no-regression (§12.4). Oracle CI job with `FLUXDOCS_REQUIRE_GS=1`. Apply the §10 spec and SECURITY.md changes | D3, D10 |
+| 1.4 | `redact/walk` v1 (check only for text-bearing units): resolved classification, decoded names, candidate scopes, routes Form / SMask group / tiling pattern (selected + reachable) / Type 3 char procs / `gs /Font`; refuse when any shows text; placements recorded for D5; memoized; budgets (§6.4). **Wires `InlineColorSpace`** with the unit's scopes, so named inline colour spaces stop refusing (C7) | 2, 3, 4, N6 |
+| 1.5 | Text model and matching: Unicode via the font model, one run per TJ (elements concatenated, glyph index map kept, **strings read at any nesting depth inside the TJ operand**, `tj_nested`, C6), skeleton normalization (§6.11); span marks; closed intervals; non-finite boxes intersect everything; rect validation | N1, 5, D12, P2, P6 |
+| 1.6 | **Property-list matching (D14, moved from Phase 2):** `RedactText`/`AutoRedactPII` match `/ActualText`, `/Alt` and `/E` (inline `BDC`/`DP` dicts and page `/Properties`). A match marks the page (a property mark, even with no runs), span-marks the `BDC…EMC` runs, and strips the key. Builds the property-list rewriter (inline re-emit and page-private `/Properties` clone) | 7, D14 |
+| 1.7 | `Tc`/`Tw`/1.1 em stopgap boxes and the interval pen (§6.6, last bullet) | 6 (stopgap) |
+| 1.8 | `ErrRedactionUnsupported` + `RedactionError` + `ErrRedactionVerification` (wraps `ErrInternal`) in `core/errors.go`, rebased on render-budget's sentinels. Drop `ErrInvalidPDF` from the redaction chain; keep `redact.ErrFormXObjectText` via `Unwrap`; update the cloud (422), MCP and CLI callers. **Collapse the duplicated reason classifiers** in the leak corpus and the regression harness into `RedactionError.Reason` (C8) | 9, P1, P3, D2, D3 |
+| 1.9 | Builder (`core/parse/copy.go`): `Redacted` page-dict allow-list; `PageRefs` back-reference remap, **also for Merge/Split**; resource GC on marked pages (the page's own resources only; text-bearing forms are refused in Phase 1, so no COW yet) | N2, N3, N4, D11 |
+| 1.10 | D7: strip `/ActualText`, `/Alt` and `/E` on every marked page, reusing the 1.6 rewriter; collect the stripped values as needles | 7, D7 |
+| 1.11 | D5: remove image `Do`, inline images, text-free forms, painted paths and `sh` whose bbox meets a rect (§6.10 Phase 1 rules) | D5 |
+| 1.12 | Verifier (§5.6 checks 1–3): needle search, object classification, `/Info` | P3, N7, D3 |
+| 1.13 | D4 automatic extension (§6.11): needles from the user plan; pre-pass over all pages, annotations, fields and `/Info`; attachment policy; fixed-point loop with `maxExtendRounds = 2`; minimal report via `(*Document).RedactionReport()` (P8, P9 approved) | D4, P8, P9 |
+| 1.14 | Benchmarks for the ≤ 50% verification + pre-pass target. Corpus no-regression (§12.4), including a **text-heavy corpus** (C9). Oracle CI job with `FLUXDOCS_REQUIRE_GS=1`. Apply the §10 spec and SECURITY.md changes | D3, D10 |
+
+**Why D14 is step 1.6.** Property-list matching is a *matching* feature. It
+needs the 1.5 machinery: Unicode decoding, regexp over decoded text, span marks
+for the `BDC…EMC` runs, and plan entries that can mark a page. So it comes
+directly after 1.5.
+
+It also has to remove what it matched. That is why it builds the property-list
+rewriter itself, rather than waiting for D7. D7 (1.10) then becomes a small
+policy step: "strip all keys on every marked page", reusing that rewriter.
+
+Placing it later, next to D7, would leave the `actualtext` repros open through
+four more steps. Merging the two into one step would couple a matching change
+with a page-policy change in one review.
 
 Exit criteria for Phase 1:
 
 - Every leak-corpus case either produces output that passes all three oracles
-  (§12.1) or is refused with `ErrRedactionUnsupported` and the expected reason.
+  (§12.1, with the gs input sanity check skipped only on `gsBlind` rows) or is
+  refused with `ErrRedactionUnsupported` and the expected reason.
+- `actualtext` and `actualtext_props` are `clean` under **both** `RedactText`
+  (pattern matching only the `/ActualText`) and full-page `RedactArea` (D14 +
+  D7).
 - Every D4 extension case either removes all occurrences and reports them (P8),
   or fails closed with the expected error.
 - The corpus no-regression check (§12.4) passes.
@@ -1041,13 +1203,14 @@ Exit criteria for Phase 1:
 | 2.1 | `fontmodel` v2: widths, FontBBox, WMode, Type 3 metrics; deep extraction for forms and Type 3 shared with the verifier | 6, N7 |
 | 2.2 | Full width model: interval pen with known widths, FontBBox, WMode | 6 |
 | 2.3 | COW rewrite of forms, soft-mask groups, tiling patterns and Type 3 char procs (§5.5, §6.3); `ReplaceResources`. This makes D4 extensions into such units possible, where Phase 1 refuses them | 3, D4 |
-| 2.4 | Property-list *matching* (§6.7: a pattern matching `/ActualText` marks the sequence); metadata policy option; COW'd `/Metadata` dropped | 7 |
+| 2.4 | Property-list matching *inside rewritten units* (forms, patterns, groups; the page-content part moved to Phase 1 step 1.6 by D14); metadata policy option; COW'd `/Metadata` dropped | 7 |
 | 2.5 | Glyph-level partial removal with collapsed adjustments (§6.8); area needles shrink to the glyphs inside the rect | 8, D6, D4 |
 | 2.6 | Matching across operators on a line (page-level glyph stream with index → (unit, span, glyph) map) | N1 |
-| 2.7 | LZW and RL consuming decoders for inline images; inline image → XObject normalization on marked pages | 1 |
+| 2.7 | Widen D15 with full decoding: A85, DCT (decode and check dimensions), LZW and RL consuming decoders, and Cal*/Lab/ICCBased/Separation/DeviceN colour spaces fully validated. Each widening needs gs + differential repros showing no T5 fall-back. Inline image → XObject normalization on marked pages | 1, D15 |
 | 2.8 | Pixel-level image redaction (D5 phase 2) | D5 |
 | 2.9 | `RedactAndFlattenWithOptions` (P4, P5), returning the P8 report extended with per-page counts | P4, P5 |
-| 2.10 | Per-document text-model cache (pulled into Phase 1 if the 1.13 benchmark misses its target) | 4 |
+| 2.10 | Per-document text-model cache (pulled into Phase 1 if the 1.14 benchmark misses its target) | 4 |
+| 2.11 | *Candidate, needs a decision (Q1):* the lenient scanner (render, extract) uses the exact inline-image end when it can be computed (C10) | 1 |
 
 Exit criteria for Phase 2:
 
@@ -1069,7 +1232,7 @@ all cases in the reviewer's harness (`rv7/main.go`):
 - `pattern_text`, `smask_text`, `type3_text`;
 - `actualtext`, `actualtext_props`;
 - `tj_nested`, `bx_known`, `quote_dq`, `quote_sq`, `comment_split`;
-- `tc_spread`, `split_string`, `split_keyword`;
+- `tc_spread`, `split_string`, `split_keyword`, `split_comment` (C2);
 - `zero_tf`, `zero_tz`, `degenerate_tm`, `wide_glyphs`.
 
 Add every case from `malformed_content_test.go` and `deep_nesting_test.go`, and
@@ -1081,12 +1244,30 @@ Each row declares:
 
 - the content and objects;
 - the operation (`RedactText` with a pattern, a full-page `RedactArea`, or a
-  partial-area rect);
-- the expectation: `removed`, or `refused(reason)` per phase. The expectation
-  flips from refused to removed when Phase 2 lands. A row whose expectation is
-  `removed` must never regress to refused without review.
+  partial-area rect). `actualtext` and `actualtext_props` have both a
+  `RedactText` row (pattern matches only the `/ActualText`; D14) and a
+  full-page `RedactArea` row (D7);
+- the expectation: `clean` (output produced and passes the assertions below),
+  or `refused(reason)` per phase. The expectation flips from refused to clean
+  when the step that closes it lands. A `clean` row must never regress to
+  refused without review;
+- `gsBlind bool` (C1). This is allowed **only on `clean` rows**: refused rows
+  never run gs on output. Set it when gs `txtwrite` does not show the secret
+  even on the *input*. Batch A found this for: strings or keywords split
+  across streams, `0 Tf`, `0 Tz`, a singular `Tm`, tiling-pattern text,
+  `/ActualText`, strings nested inside a TJ array, and some over-deep TJ
+  fixtures. On such a row:
+  - the gs input sanity check is skipped;
+  - the fixture's validity is instead shown by our own deep extraction of the
+    input containing the secret (or, for `/ActualText`, the decoded property
+    value);
+  - the row carries a comment naming the reader behaviour it models;
+  - the gs output assertion still runs; it passes trivially but guards against
+    regressions.
+- until step 1.8: the reason is classified from the error chain plus the loss
+  text (C8); afterwards from `RedactionError.Reason`.
 
-For `removed`, the assertions are:
+For `clean`, the assertions are:
 
 1. **Our extraction.** `ExtractText` on the output lacks the secret, and so does
    the deep extraction from the verifier. N7: the public `ExtractText` alone is
@@ -1099,8 +1280,9 @@ For `removed`, the assertions are:
 3. **Ghostscript oracle.**
    `gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=txtwrite -sOutputFile=- out.pdf`
    output lacks the secret.
-   - Sanity check: gs on the *input* must show the secret. If not, the fixture is
-     broken and the test fails.
+   - Sanity check, rows without `gsBlind`: gs on the *input* must show the
+     secret. If not, the fixture is broken (or the row needs `gsBlind`, with a
+     justification) and the test fails.
    - Optionally, non-redacted control text must survive (catches over-removal
      regressions).
 
@@ -1110,15 +1292,68 @@ matches, the returned document is nil, and the plan is sticky (later
 
 ### 12.2 Unit tests (table-driven)
 
+- **Inline images, leak corpus rows (D15/D16, T5).** Each row is followed by
+  `BT … (SECRET-1234) Tj ET` and a final `EI`, or has the text placed so that a
+  fall-back reader would show it.
+  - **`clean` rows**, where the image is accepted and the trailing text is
+    redacted normally:
+    - a valid unfiltered DeviceGray image and a valid unfiltered DeviceRGB
+      image;
+    - `/IM true`;
+    - Indexed over DeviceRGB with an exact lookup;
+    - a valid AHx image (with and without CR LF after `ID`);
+    - a valid zlib Flate image;
+    - `[/AHx /Fl]`;
+    - a named colour space resolved via `InlineColorSpace`, once 1.4 has wired
+      it.
+  - **`refused(inline_image)` rows**, one per go-reviewer repro and at least
+    one per class:
+    - **B1:** `/I 5`; `/D` of length ≠ `2n`; incomplete
+      `[/CalGray]`, `[/Lab]`, `[/Separation /X]`, `[/DeviceN [/A]]`; a
+      complete ICCBased/CalRGB/Lab colour space (D15 non-device); an unknown
+      key; a duplicate key (`/W` and `/Width`); `/DP << /Predictor 12 >>`;
+      `/F [/Fl /DCT]` and `/F [/Fl /LZW]` (second filter); `/F [/Fl /AHx]`
+      (`AHx` not first); Indexed with a short lookup or `hival` out of range.
+    - **B2:** Flate whose decoded output exceeds `H × rowBytes`; Flate shorter
+      than needed; any A85.
+    - **B3:** raw DEFLATE (no zlib header).
+    - **B4:** DCT that does not decode, and a valid DCT (D15 refuses all DCT
+      in Phase 1).
+    - **D16:** an otherwise valid unfiltered image whose bytes contain `Tj`,
+      `TJ`, `) '`, `>"`.
+  - Rows where gs shows nothing on the input carry `gsBlind`. Most B rows are
+    *not* gs-blind: that is how they were found.
 - **`parse`, inline-image boundary.** Every filter row of §6.1, crossed with
-  T1–T4 pass and fail cases: exact length with W/H/BPC/n combinations; named
+  T1–T6 pass and fail cases:
+  - `EI` followed by a delimiter (loss, C4) and by end of content (pass);
+  - single white-space vs CR LF after `ID` per filter: unfiltered, Flate and
+    DCT refuse after CR LF; AHx and A85 pass, and refuse when `/L` is present
+    (C5);
+  - exact length with W/H/BPC/n combinations; named
   `/CS` resolved and unresolved; `/IM`; AHx with white-space and with an invalid
   byte; A85 `z` and `~>`; Fl truncated, with trailing junk, and with an
   embedded `EI`; DCT with an EXIF thumbnail (inner `FFD9`), progressive, and
   truncated; LZW/RL/CCF (loss in Phase 1); size overflow.
-- **`parse`, segments.** Splits between tokens (allowed), inside a string,
-  inside a name, inside a number, inside a keyword, and inside a comment
-  (each a loss).
+- **`parse`, segments.**
+  - Splits between tokens are allowed, including between operands and their
+    operator.
+  - Each of these is a loss: a split inside a string, a name, a number, a
+    keyword, inside inline-image data, and a comment running to the end of a
+    stream (C2).
+  - `Data` is byte-identical to `PageContent` for a single stream (no joins)
+    and for arrays (a `\n` after every stream) (C3).
+- **Property-list matching (D14, step 1.6).**
+  - Inline dict and `/Properties` match, each with the key stripped and the
+    page marked.
+  - A match in a `BDC…EMC` sequence with no runs still marks the page.
+  - Nested marked content.
+  - `/Alt` and `/E` as well as `/ActualText`.
+  - UTF-16BE and PDFDocEncoding values.
+  - A non-matching property list leaves an unmarked page untouched.
+  - `AutoRedactPII` with a PII value only in `/ActualText`.
+- **Text model, nested TJ (C6, step 1.5).** `[ (A) [ (SECRET) ] ] TJ`, and
+  deeper nesting within the depth bound: the nested strings are matched and
+  their operator is removed.
 - **`parse`, operand types.** `(x) Do`, `1 gs`, `/F1 /F2 Tf`, and so on.
 - **`redact/walk`.** Each route × {direct, indirect, own scope, fallback scope,
   `/Pages`-inherited, `#xx` name} × {text, no text}. Cycles; depth 12/13; budget
@@ -1181,6 +1416,15 @@ matches, the returned document is nil, and the plan is sticky (later
   (`scratchpad/r2/list.txt`, about 300 system PDFs). The list is not committed.
   A `testing/corpus/redaction_regress_test.go` reads `FLUXDOCS_EXTRA_CORPUS`
   (a file of paths) when it is set, and skips when it is not.
+- **Coverage gap (C9).** The macOS list is mostly icons. Batch A saw 13 inline
+  images and 21 stream joins in 2,598 pages, all accepted. That is too little
+  to judge the D1-A refusal rate or the straddle rule.
+  - Step 1.14 adds a **text-heavy corpus**, passed through the same
+    `FLUXDOCS_EXTRA_CORPUS` mechanism and not committed. It should cover:
+    Word/LibreOffice exports, Chrome print, LaTeX, scanned+OCR, government
+    forms, and older PDF 1.2–1.4 producers that emit inline images.
+  - Its source list is recorded in the PR. The D15, D16 and D1-A refusal counts
+    (and, for comparison, the D1-B counts) are reported per producer.
 - **Operations per page.** `RedactText(page, ".")` (match everything), a
   full-page `RedactArea`, and a centred half-page `RedactArea`. Then
   `RedactAndFlatten`.
@@ -1195,7 +1439,8 @@ matches, the returned document is nil, and the plan is sticky (later
   `RedactText(page, ".")` matches single characters, which are below the
   4-character propagation threshold. So it exercises matching without
   extension, while the full-page area operation exercises extension heavily.
-- **Baseline.** Record the HEAD 446eaea refusal counts per reason first.
+- **Baseline.** Refusal counts per reason, recorded by batch A at **71de860**
+  (not 446eaea).
   - Phase 1 may add refusals only of reasons `pattern_text`, `softmask_text`,
     `type3_text` and `inline_image`, plus `form_text` refusals caused by D4
     extending into a form on another page. Each must be listed with its file in
@@ -1218,8 +1463,24 @@ input size).
 ## 13. Open questions
 
 D1, D2, D3, D4, D5, D7, D11, D12, P8, P9 and the attachments policy were
-decided on 2026-10-15; see "Decisions (maintainer-approved)" at the top. They
-are not repeated here. **No open item below blocks Phase 1.**
+decided on 2026-10-15, and D14, D15 and D16 on 2026-10-16; see "Decisions
+(maintainer-approved)" at the top. They are not repeated here. **No open item
+below blocks Phase 1.**
+
+**For the maintainer, not decided (from batch A, C10):**
+
+- **Q1. Should the lenient scanner use the exact inline-image end?** The
+  lenient scanner (used by `RenderPage` and `ExtractText`) would compute the
+  exact end (§6.1 step 2) whenever it can, and fall back to today's
+  white-space-delimited `EI` search only when it cannot. In `ii_tight_EI`, gs
+  renders text that our renderer and extractor hide. Redaction is already safe
+  here, because the strict scan refuses.
+  - **For:** our viewer and extraction agree with exact-length readers. Users
+    see what gs and Acrobat-class readers see.
+  - **Against:** it changes Core render and extract output on malformed files,
+    and needs golden updates. It would also make the lenient and strict paths
+    share more code, which is a risk to the "lenient never fails" contract.
+  - *Default until decided:* no change (Phase 2 candidate 2.11).
 
 **Not yet decided; the default applies** (implement the default unless the
 maintainer says otherwise):
@@ -1255,7 +1516,11 @@ maintainer says otherwise):
 - **Measure.** Do readers fall back to page resources for Type 3 `/CharProcs`
   and pattern cells the way gs does for forms? (§6.2 already over-approximates;
   measure for documentation only.)
-- **Measure.** Refusal rate of D1-A on the corpus and the macOS list.
+- **Measure.** Inline-image refusal rates on the text-heavy corpus (C9),
+  broken down by rule: D15 (by filter, by colour space, by dictionary key), D16
+  (T6 pattern), D1-A (`EI` pair), CR LF, and the straddle rule. The macOS list
+  is not representative: 13 inline images and 21 joins in 2,598 pages. These
+  numbers are the evidence a Phase 2 widening (2.7) or a D1-B relaxation needs.
 - **Measure.** Cost of verification plus the D4 pre-pass on large documents,
   against the approved ≤ 50% target. D4 means the needle search now also covers
   `R_u`, so the cost scales with the document, not only the marked pages. If
