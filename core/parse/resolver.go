@@ -1,21 +1,43 @@
 package parse
 
 import (
+	"container/list"
 	"fmt"
 	"sync"
 )
 
 const maxRefChain = 32 // bound a reference->reference loop (SECURITY.md §2)
 
+const (
+	// maxObjStmCache bounds the decoded object-stream bytes a Resolver keeps
+	// (SECURITY.md §2): each ObjStm's decoded data plus its offset table. Past
+	// it the least recently used ObjStms are evicted. Without it every decoded
+	// ObjStm stayed cached for the document's lifetime, so N distinct 256 MiB
+	// ObjStm bombs (≈ 256 KB compressed each) held N × 256 MiB. It admits one
+	// ObjStm at the per-stream decode cap. Real files are far below it: a
+	// 2000-page Ghostscript file holds 41 ObjStms totalling ≈ 410 KB, and no
+	// file in testing/corpus holds more than 3 KB.
+	maxObjStmCache = 256 << 20
+	// maxObjStmRedecode bounds, over a Resolver's lifetime, the bytes decoded
+	// again for ObjStms the cache evicted. Objects are cached once parsed, so
+	// an evicted ObjStm is decoded again only for an object not loaded yet; a
+	// file that rotates object loads across more than maxObjStmCache of
+	// ObjStms would otherwise re-inflate up to 256 MiB per object. Once it is
+	// spent, loading from an evicted ObjStm fails. It is the work of refilling
+	// the cache once (≈ 0.3–0.5 s of inflate natively).
+	maxObjStmRedecode = 256 << 20
+)
+
 // Resolver pairs the file bytes with the cross-reference table to resolve a
 // Reference into a concrete object. Parsed objects are cached by object number,
 // and decoded compressed object streams (ObjStm) are cached by their object
-// number.
+// number, up to maxObjStmCache bytes, least recently used evicted first.
 //
 // Failures are cached too (errs, objstmErrs): an object that fails to load
 // fails the same way every time, since loading depends only on the immutable
 // file bytes, the xref table and the decryption state (EnableDecryption clears
-// these caches when it changes that). Without them every reference to a broken
+// these caches when it changes that), or on a spent ObjStm re-decode budget,
+// which never refills. Without them every reference to a broken
 // object redid its work — re-parsing a stream that runs to the end of a large
 // file, or re-inflating an ObjStm whose /First is bad — so a page that Do'd it
 // repeatedly cost that work per Do, outside the render budget.
@@ -28,9 +50,21 @@ type Resolver struct {
 	xref       *Xref
 	mu         sync.Mutex // guards the caches and counters below
 	cache      map[int]Object
-	errs       map[int]error   // object() failures, keyed by object number
-	objstms    map[int]*objStm // decoded /ObjStm, keyed by stream object number
-	objstmErrs map[int]error   // loadObjStm failures, keyed by stream object number
+	errs       map[int]error         // object() failures, keyed by object number
+	objstms    map[int]*list.Element // decoded /ObjStm (*cachedObjStm in objstmLRU), keyed by stream object number
+	objstmErrs map[int]error         // loadObjStm failures, keyed by stream object number
+
+	// The ObjStm cache bound (maxObjStmCache) and the re-decode budget
+	// (maxObjStmRedecode). objstmLRU holds the cached ObjStms, most recently
+	// used first; objstmBytes is the sum of their sizes. evicted records the
+	// ObjStms dropped from the cache: decoding one again is charged to
+	// redecoded. The caps are fields so tests can lower them.
+	objstmLRU   *list.List
+	objstmBytes int64
+	objstmCap   int64
+	evicted     map[int]bool
+	redecoded   int64
+	redecodeCap int64
 
 	// loads counts offset parses and ObjStm loads actually performed (cache
 	// misses), for tests that check the caches.
@@ -53,12 +87,16 @@ func NewResolver(data []byte) (*Resolver, error) {
 		return nil, err
 	}
 	return &Resolver{
-		data:       data,
-		xref:       x,
-		cache:      make(map[int]Object),
-		errs:       make(map[int]error),
-		objstms:    make(map[int]*objStm),
-		objstmErrs: make(map[int]error),
+		data:        data,
+		xref:        x,
+		cache:       make(map[int]Object),
+		errs:        make(map[int]error),
+		objstms:     make(map[int]*list.Element),
+		objstmErrs:  make(map[int]error),
+		objstmLRU:   list.New(),
+		objstmCap:   maxObjStmCache,
+		evicted:     make(map[int]bool),
+		redecodeCap: maxObjStmRedecode,
 	}, nil
 }
 
@@ -186,6 +224,8 @@ func (r *Resolver) EnableDecryption(password []byte) error {
 	// An ObjStm decodes differently once decrypted, so a failure cached while
 	// resolving /Encrypt (before r.decrypt was set) may no longer hold: drop
 	// the failure caches. Only the /Encrypt chain can have been resolved so far.
+	// The eviction record and the re-decode count carry over: they count work
+	// done, and a spent re-decode budget stays spent.
 	clear(r.errs)
 	clear(r.objstmErrs)
 	r.mu.Unlock()

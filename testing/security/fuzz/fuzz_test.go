@@ -124,6 +124,57 @@ func objStmPDF(n, w string) []byte {
 	return b.Bytes()
 }
 
+// interleavedObjStmPDF is a document of streams × perStream pages where page j
+// lives in Flate ObjStm j % streams, padded to inflate to pad bytes each.
+func interleavedObjStmPDF(streams, perStream, pad int) []byte {
+	pages := streams * perStream
+	pageNum := func(j int) int { return 3 + streams + j }
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.5\n")
+	off := make([]int, 3+streams)
+	kids := ""
+	for j := 0; j < pages; j++ {
+		kids += fmt.Sprintf("%d 0 R ", pageNum(j))
+	}
+	off[1] = b.Len()
+	b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+	off[2] = b.Len()
+	fmt.Fprintf(&b, "2 0 obj\n<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 100 100] >>\nendobj\n", kids, pages)
+	const page = "<< /Type /Page /Parent 2 0 R >>"
+	for st := 0; st < streams; st++ {
+		var header strings.Builder
+		for i := 0; i < perStream; i++ {
+			fmt.Fprintf(&header, "%d %d ", pageNum(i*streams+st), i*len(page))
+		}
+		header.WriteString(strings.Repeat(" ", pad))
+		var z bytes.Buffer
+		zw := zlib.NewWriter(&z)
+		zw.Write([]byte(header.String() + strings.Repeat(page, perStream)))
+		zw.Close()
+		off[3+st] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n<< /Type /ObjStm /N %d /First %d /Filter /FlateDecode /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+			3+st, perStream, header.Len(), z.Len(), z.Bytes())
+	}
+	xrefNum := pageNum(pages)
+	xoff := b.Len()
+	var rows []byte
+	row := func(typ byte, f2 uint32, f3 uint16) {
+		rows = append(rows, typ, byte(f2>>24), byte(f2>>16), byte(f2>>8), byte(f2), byte(f3>>8), byte(f3))
+	}
+	row(0, 0, 65535)
+	for num := 1; num < 3+streams; num++ {
+		row(1, uint32(off[num]), 0)
+	}
+	for j := 0; j < pages; j++ {
+		row(2, uint32(3+j%streams), uint16(j/streams))
+	}
+	row(1, uint32(xoff), 0)
+	fmt.Fprintf(&b, "%d 0 obj\n<< /Type /XRef /Size %d /W [1 4 2] /Root 1 0 R /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		xrefNum, xrefNum+1, len(rows), rows)
+	fmt.Fprintf(&b, "startxref\n%d\n%%%%EOF\n", xoff)
+	return b.Bytes()
+}
+
 // classicPDF serializes objs as objects 1..n with a classic xref table and a
 // trailer whose /Root is object 1.
 func classicPDF(objs []string) []byte {
@@ -221,6 +272,10 @@ func seeds() [][]byte {
 		objStmPDF("9223372036854775807", "[1 4 2]"),
 		objStmPDF("1", "[4611686018427387904 4611686018427387904 4611686018427387904]"),
 		objStmPDF("1", "[1 9223372036854775807 1]"),
+		// Pages interleaved across Flate object streams: the page-tree walk
+		// alternates between them, exercising the resolver's ObjStm cache
+		// (render-budget.md §9 R4).
+		interleavedObjStmPDF(3, 8, 64<<10),
 		// A direct stream /Length of MaxInt64 wrapped start+length negative.
 		classicPDF([]string{
 			"<< /Type /Catalog /Pages 2 0 R >>",

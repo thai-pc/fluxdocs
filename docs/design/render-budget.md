@@ -507,7 +507,7 @@ before and after §2.1 on a 50k-edge polygon.
 first budget check, so neither `MaxOperators` nor a deadline can stop it.
 Measured by go-reviewer on the budget PR: 32 MB of `q Q\n` spends ≈ 4.75 s and
 ≈ 3.0 GB RSS in `ScanContent` before `MaxOperators` acts. Spec §13.2 states the
-gap. R1 is resolved (2026-10-16, below).
+gap. R1 and R4 are resolved (2026-10-16, below).
 
 **Being fixed separately: do not duplicate.** A concurrent fix in `core/render`
 adds an unexported float→int clamping helper, `clampToInt`, in `raster.go` and
@@ -554,6 +554,37 @@ checked-conversion approach rather than a raw cast.
   refs (one 64 MiB inflate). Gates: `TestDoS_RepeatedContentsBombIsCapped`,
   `TestRedact_OversizedContentFailsClosed`, and the fuzz seed "Flate bomb
   repeated in /Contents".
+- **R4 (resolved 2026-10-16): decoded object streams were cached for the
+  document's lifetime.** `Resolver.objstms` kept every successfully decoded
+  ObjStm, so N distinct 256 MiB ObjStm bombs (≈ 256 KB compressed each) held
+  N × 256 MiB. Fix: the cache is bounded at `maxObjStmCache` = 256 MiB. Each
+  entry counts its decoded bytes plus its offset table. The least recently
+  used ObjStm is evicted first; one larger than the cap on its own is used for
+  the object being loaded and then dropped. Objects are cached once parsed,
+  so an evicted ObjStm is decoded again only for an object not loaded yet.
+  Those re-decodes are charged to `maxObjStmRedecode` = 256 MiB per document,
+  each capped at what is left (`DecodeStreamLimit`). Once that budget is spent,
+  loading from an evicted ObjStm fails with a wrapped `errLex`. The failure is
+  negative-cached like any ObjStm failure. `EnableDecryption` still clears the
+  failure caches, but the eviction record and the re-decode count carry over,
+  since a spent budget stays spent.
+  - **Why evict rather than fail:** a file whose ObjStms total more than the
+    cap still opens. It fails only if it rotates object loads across them
+    beyond one cache refill.
+  - **Why 256 MiB:** the cap admits one ObjStm at the per-stream decode cap.
+    Real files are three orders of magnitude below it. A 2000-page
+    Ghostscript file holds 41 ObjStms totalling ≈ 410 KB (≈ 210 B per page),
+    and no file in `testing/corpus` holds more than 3 KB.
+  - **Without the re-decode budget:** a file alternating loads between two
+    ObjStm bombs would re-inflate up to 256 MiB per object.
+  - **Measured:** four distinct 192 MiB ObjStms now retain ≈ 193 MB of heap
+    with the document open (≈ 769 MB before). 64 pages alternating between
+    two of them used to open with both cached (384 MiB). They now fail to open
+    after ≈ 1.4 s of CPU. Eviction without the re-decode budget would
+    re-inflate ≈ 12 GiB (64 × 192 MiB).
+  - **Gates:** `TestDoS_ObjStmCacheIsBounded`,
+    `TestResolver_ObjStmCacheIsBounded`, and the fuzz seed "pages interleaved
+    across Flate object streams".
 - **R2: `parse.ScanContent` materializes the whole operator list up front.** A
   256 MiB stream of tiny operators allocates far more than 256 MiB of
   `ContentOp`/operand slices before the O budget is consulted. Options: a

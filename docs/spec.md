@@ -1511,6 +1511,10 @@ function resolveObject(file, objectNumber, generation):
   correctly to get the newest version
 - Nested object streams (a compressed object inside a compressed object — rare,
   but allowed by the spec)
+- Object-stream memory: decoded object streams are cached up to 256 MiB per
+  document, least recently used evicted first. An evicted stream is decoded
+  again on demand, within 256 MiB of re-decoding per document. Past that,
+  loading from an evicted stream fails.
 
 ### 13.2 Content Stream Rendering Pipeline
 

@@ -552,3 +552,124 @@ func TestDoS_RepeatedContentsBombIsCapped(t *testing.T) {
 		})
 	}
 }
+
+// objStmBombsPDF is a document of streams × perStream pages whose page
+// dictionaries live in Flate object streams padded to inflate to pad bytes
+// each (BestSpeed, to keep building the gate fast). With interleave, page j lives in ObjStm
+// j % streams, so walking the page tree alternates between them; otherwise
+// each ObjStm holds consecutive pages.
+func objStmBombsPDF(streams, perStream, pad int, interleave bool) []byte {
+	pages := streams * perStream
+	pageNum := func(j int) int { return 3 + streams + j }
+	where := func(j int) (stream, idx int) {
+		if interleave {
+			return j % streams, j / streams
+		}
+		return j / perStream, j % perStream
+	}
+	members := make([][]int, streams)
+	for j := 0; j < pages; j++ {
+		st, _ := where(j)
+		members[st] = append(members[st], j)
+	}
+
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	off := map[int]int{}
+	kids := ""
+	for j := 0; j < pages; j++ {
+		kids += fmt.Sprintf("%d 0 R ", pageNum(j))
+	}
+	off[1] = b.Len()
+	b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+	off[2] = b.Len()
+	fmt.Fprintf(&b, "2 0 obj\n<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 100 100] >>\nendobj\n", kids, pages)
+	const page = "<< /Type /Page /Parent 2 0 R >>"
+	for st := 0; st < streams; st++ {
+		var header strings.Builder
+		for i, j := range members[st] {
+			fmt.Fprintf(&header, "%d %d ", pageNum(j), i*len(page))
+		}
+		header.WriteString(strings.Repeat(" ", pad))
+		var z bytes.Buffer
+		zw, _ := zlib.NewWriterLevel(&z, zlib.BestSpeed)
+		zw.Write([]byte(header.String() + strings.Repeat(page, len(members[st]))))
+		zw.Close()
+		off[3+st] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n<< /Type /ObjStm /N %d /First %d /Filter /FlateDecode /Length %d >>\nstream\n",
+			3+st, len(members[st]), header.Len(), z.Len())
+		b.Write(z.Bytes())
+		b.WriteString("\nendstream\nendobj\n")
+	}
+	xrefNum := pageNum(pages)
+	xoff := b.Len()
+	var xs bytes.Buffer
+	ent := func(typ byte, f2 uint32, f3 uint16) {
+		xs.WriteByte(typ)
+		binary.Write(&xs, binary.BigEndian, f2)
+		binary.Write(&xs, binary.BigEndian, f3)
+	}
+	ent(0, 0, 65535)
+	for num := 1; num < 3+streams; num++ {
+		ent(1, uint32(off[num]), 0)
+	}
+	for j := 0; j < pages; j++ {
+		st, idx := where(j)
+		ent(2, uint32(3+st), uint16(idx))
+	}
+	ent(1, uint32(xoff), 0)
+	fmt.Fprintf(&b, "%d 0 obj\n<< /Type /XRef /Size %d /W [1 4 2] /Root 1 0 R /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		xrefNum, xrefNum+1, xs.Len(), xs.String())
+	fmt.Fprintf(&b, "startxref\n%d\n%%%%EOF\n", xoff)
+	return b.Bytes()
+}
+
+// TestDoS_ObjStmCacheIsBounded: every decoded object stream stayed cached for
+// the document's lifetime, so N distinct 192 MiB ObjStm bombs (≈ 190 KB
+// each at best compression) held N × 192 MiB (render-budget.md §9 R4). The resolver now keeps at
+// most 256 MiB of decoded ObjStms, evicting the least recently used, and
+// bounds the bytes it decodes again for evicted ObjStms (256 MiB per
+// document); past that, loading from an evicted ObjStm fails.
+func TestDoS_ObjStmCacheIsBounded(t *testing.T) {
+	skipUnlessTimed(t)
+	const pad = 192 << 20
+
+	t.Run("distinct ObjStm bombs", func(t *testing.T) {
+		pdf := objStmBombsPDF(4, 1, pad, false)
+		runtime.GC()
+		start := cpuTime()
+		doc, err := core.OpenBytes(pdf) // the page-tree walk decodes all four
+		elapsed := cpuTime() - start
+		if err != nil {
+			t.Fatalf("OpenBytes: %v", err)
+		}
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		runtime.KeepAlive(doc)
+		if ms.HeapAlloc > 384<<20 {
+			t.Errorf("open document retains %d MB of heap, want ≤ 384 MB (one 192 MiB ObjStm cached, not four)", ms.HeapAlloc>>20)
+		}
+		if elapsed > 10*time.Second { // four 192 MiB inflates: ≈ 1–2 s
+			t.Errorf("OpenBytes took %v CPU, want ≤ 10 s", elapsed)
+		}
+		t.Logf("%v CPU; %d MB heap retained with the document open", elapsed, ms.HeapAlloc>>20)
+	})
+
+	t.Run("loads rotating between ObjStm bombs", func(t *testing.T) {
+		// 64 pages alternating between two 192 MiB ObjStms: the cache holds
+		// one, so without a re-decode budget every page would re-inflate
+		// 192 MiB (64 × 192 MiB ≈ 12 GiB of inflate).
+		pdf := objStmBombsPDF(2, 32, pad, true)
+		start := cpuTime()
+		_, err := core.OpenBytes(pdf)
+		elapsed := cpuTime() - start
+		if err == nil || !strings.Contains(err.Error(), "re-decode budget") {
+			t.Fatalf("OpenBytes err = %v, want the re-decode budget error", err)
+		}
+		if elapsed > 10*time.Second { // ≈ 3.3 inflates of 192 MiB
+			t.Errorf("OpenBytes took %v CPU, want ≤ 10 s", elapsed)
+		}
+		t.Logf("%v CPU; err %v", elapsed, err)
+	})
+}
