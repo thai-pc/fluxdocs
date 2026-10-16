@@ -50,7 +50,7 @@ func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err erro
 	}
 	accepted = true
 	injectTestPanic("RedactText", pageIndex)
-	content, err := d.resolver.PageContent(d.pageInfos[pageIndex])
+	content, err := d.redactionContent(pageIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 	for i := range d.pageInfos {
 		src := parse.PageSource{Resolver: d.resolver, Page: d.pageInfos[i]}
 		if rects := plan[i]; len(rects) > 0 {
-			content, err := d.resolver.PageContent(d.pageInfos[i])
+			content, err := d.redactionContent(i)
 			if err != nil {
 				return nil, err
 			}
@@ -149,6 +149,47 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 		return nil, err
 	}
 	return OpenBytes(built)
+}
+
+// redactionContent returns a page's content for redaction. A page whose
+// /Contents is an array of streams is refused (as content the strict scanner
+// cannot read) if a token, comment or inline image spans two of its streams:
+// viewers that concatenate the streams, separate them or parse each alone would
+// show different text (parse.ContentSegments). The redact package then scans
+// the joined content as one stream. A page whose /ColorSpace resources define
+// G, RGB, CMYK or I is refused too: only the full device names are protected
+// from resource lookup (ISO 32000-1 §8.6.3), so an inline image using such an
+// abbreviation could have a different size for a reader that looks it up.
+//
+// Returns the content, a read error, or the scan error wrapped by
+// redactionScanError.
+func (d *Document) redactionContent(pageIndex int) ([]byte, error) {
+	seg, err := d.resolver.PageContentSegments(d.pageInfos[pageIndex])
+	if err != nil {
+		return nil, err
+	}
+	// TODO(redaction-hardening 1.4): pass the scopes to the strict scan as
+	// parse.StrictOptions.InlineColorSpace, which refuses only an image that
+	// uses a redefined abbreviation. Until then any such resource refuses.
+	colorSpaces, _, err := d.resolver.ResolveDict(d.pageInfos[pageIndex].Resources["ColorSpace"])
+	if err != nil {
+		return nil, err
+	}
+	for _, abbr := range []parse.Name{"G", "RGB", "CMYK", "I"} {
+		if _, ok := colorSpaces[abbr]; ok {
+			return nil, redactionScanError(pageIndex, fmt.Errorf(
+				"inline image colour space abbreviation /%s is redefined by the page's /ColorSpace resources", abbr))
+		}
+	}
+	if len(seg.Joins) > 0 {
+		// TODO(redaction-hardening 1.4): the walker should scan once with the
+		// segments and pass the spans on; today the redact package scans the
+		// joined content again, so a multi-stream page is scanned twice.
+		if _, err := parse.ScanContentStrict(seg, parse.StrictOptions{}); err != nil {
+			return nil, redactionScanError(pageIndex, err)
+		}
+	}
+	return seg.Data, nil
 }
 
 // redactionScanError wraps a failure to read a page's content safely for

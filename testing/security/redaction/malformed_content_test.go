@@ -19,81 +19,86 @@ import (
 // Before the fix, each case left the secret invisible to RedactText and in the
 // output bytes after a full-page RedactArea. Now redaction refuses to run.
 
+// unreadableContentCases is page content the strict scanner cannot read
+// losslessly, each with the secret where some viewer may show it. The leak
+// corpus (leakcorpus_test.go) runs them too.
+var unreadableContentCases = []struct {
+	name    string
+	content string
+}{
+	{"TJ, unterminated over-deep array",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + strings.Repeat("[", overDeep) + " ] TJ ET"},
+	{"TJ, unterminated over-deep dictionary",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + strings.Repeat("<< /A ", overDeep) + " ] TJ ET"},
+	{"TJ, invalid hex string sibling",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") <zz> ] TJ ET"},
+	{"TJ, stray ')' sibling",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") ) ] TJ ET"},
+	{"TJ, stray '>' sibling",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") > ] TJ ET"},
+	{"TJ, non-name dictionary key sibling",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") << 1 2 >> ] TJ ET"},
+	{"Tj, stray ']' between operand and operator",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") ] Tj ET"},
+	{"Tj, invalid hex string operand",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") <zz> Tj ET"},
+	{"inline image dictionary with a syntax error",
+		"BI /W 1 /H 1 /D <zz> ID \x00 EI BT /F1 24 Tf 72 700 Td (" + secret + ") Tj ET"},
+	{"inline image without EI",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") Tj ET BI /W 1 /H 1 ID \x00\x01"},
+
+	// An over-deep subtree may hold only what an operand may hold.
+	{"operator inside an over-deep array",
+		"BT /F1 24 Tf 72 700 Td " + openArrays(overDeep) + " (" + secret + ") Tj " + closeArrays(overDeep) + " TJ ET"},
+	{"inline image inside an over-deep array, '(' in its data",
+		"BT /F1 24 Tf 72 700 Td " + openArrays(overDeep) + " BI /W 1 /H 1 /BPC 8 /CS /G ID\n( EI " + closeArrays(overDeep) + " TJ\n(" +
+			secret + ") Tj %)\n" + closeArrays(overDeep) + " TJ ET"},
+	{"stream keyword inside an over-deep array",
+		"BT /F1 24 Tf 72 700 Td " + openArrays(overDeep) + " << >> stream\n(" + secret + ") Tj\nendstream " + closeArrays(overDeep) + " TJ ET"},
+	{"over-deep array closed by '>>'",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + openArrays(overDeep) + "1" + closeArrays(overDeep-1) + ">> ] TJ ET"},
+
+	// Operands pending at an inline image or at the end of the stream.
+	{"operand pending before an inline image",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") BI /W 1 /H 1 /BPC 8 /CS /G ID\n\x00 EI Tj ET"},
+	{"operand pending at end of stream",
+		"BT /F1 24 Tf 72 700 Td (public) Tj ET (" + secret + ")"},
+
+	// No stream data inside a content stream (ISO 32000-1 §7.3.8.1).
+	{"stream keyword after a dictionary",
+		"BT /F1 24 Tf 72 700 Td << >> stream\n(" + secret + ") Tj\nendstream ET"},
+
+	// Operands that do not match their operator (ISO 32000-1 Annex A).
+	{"Tj with an over-deep sibling operand after the string",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") " + deepArrays(overDeep) + " Tj ET"},
+	{"Tj with an over-deep sibling operand before the string",
+		"BT /F1 24 Tf 72 700 Td " + deepArrays(overDeep) + " (" + secret + ") Tj ET"},
+	{"surplus operand before Td",
+		"BT /F1 24 Tf (" + secret + ") 72 700 Td Tj ET"},
+	{"surplus string before Tj",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") (x) Tj Tj ET"},
+	{"unknown operator with an operand",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") Xq Tj ET"},
+	{"unknown operator with an operand inside BX/EX",
+		"BX BT /F1 24 Tf 72 700 Td (" + secret + ") Xq Tj ET EX"},
+	{"procedure brace with an operand",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") { Tj ET"},
+	{"string shown by TJ",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") TJ ET"},
+	{"string left over by sc",
+		"BT /F1 24 Tf 72 700 Td (" + secret + ") 1 0 0 sc Tj ET"},
+}
+
+func openArrays(n int) string  { return strings.Repeat("[", n) }
+func closeArrays(n int) string { return strings.Repeat("]", n) }
+
 // TestRedact_UnreadableOperandFailsClosed: when the content cannot be read
 // losslessly — an operand that does not parse, operands the scanner would drop,
 // or operands a viewer could pair with a different operator — redaction cannot
 // know what a viewer would show, so RedactText, AutoRedactPII and
 // RedactAndFlatten return an error and produce no document.
 func TestRedact_UnreadableOperandFailsClosed(t *testing.T) {
-	L := func(n int) string { return strings.Repeat("[", n) }
-	R := func(n int) string { return strings.Repeat("]", n) }
-	tests := []struct {
-		name    string
-		content string
-	}{
-		{"TJ, unterminated over-deep array",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + strings.Repeat("[", overDeep) + " ] TJ ET"},
-		{"TJ, unterminated over-deep dictionary",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + strings.Repeat("<< /A ", overDeep) + " ] TJ ET"},
-		{"TJ, invalid hex string sibling",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") <zz> ] TJ ET"},
-		{"TJ, stray ')' sibling",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") ) ] TJ ET"},
-		{"TJ, stray '>' sibling",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") > ] TJ ET"},
-		{"TJ, non-name dictionary key sibling",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") << 1 2 >> ] TJ ET"},
-		{"Tj, stray ']' between operand and operator",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") ] Tj ET"},
-		{"Tj, invalid hex string operand",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") <zz> Tj ET"},
-		{"inline image dictionary with a syntax error",
-			"BI /W 1 /H 1 /D <zz> ID \x00 EI BT /F1 24 Tf 72 700 Td (" + secret + ") Tj ET"},
-		{"inline image without EI",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") Tj ET BI /W 1 /H 1 ID \x00\x01"},
-
-		// An over-deep subtree may hold only what an operand may hold.
-		{"operator inside an over-deep array",
-			"BT /F1 24 Tf 72 700 Td " + L(overDeep) + " (" + secret + ") Tj " + R(overDeep) + " TJ ET"},
-		{"inline image inside an over-deep array, '(' in its data",
-			"BT /F1 24 Tf 72 700 Td " + L(overDeep) + " BI /W 1 /H 1 /BPC 8 /CS /G ID\n( EI " + R(overDeep) + " TJ\n(" +
-				secret + ") Tj %)\n" + R(overDeep) + " TJ ET"},
-		{"stream keyword inside an over-deep array",
-			"BT /F1 24 Tf 72 700 Td " + L(overDeep) + " << >> stream\n(" + secret + ") Tj\nendstream " + R(overDeep) + " TJ ET"},
-		{"over-deep array closed by '>>'",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + L(overDeep) + "1" + R(overDeep-1) + ">> ] TJ ET"},
-
-		// Operands pending at an inline image or at the end of the stream.
-		{"operand pending before an inline image",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") BI /W 1 /H 1 /BPC 8 /CS /G ID\n\x00 EI Tj ET"},
-		{"operand pending at end of stream",
-			"BT /F1 24 Tf 72 700 Td (public) Tj ET (" + secret + ")"},
-
-		// No stream data inside a content stream (ISO 32000-1 §7.3.8.1).
-		{"stream keyword after a dictionary",
-			"BT /F1 24 Tf 72 700 Td << >> stream\n(" + secret + ") Tj\nendstream ET"},
-
-		// Operands that do not match their operator (ISO 32000-1 Annex A).
-		{"Tj with an over-deep sibling operand after the string",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") " + deepArrays(overDeep) + " Tj ET"},
-		{"Tj with an over-deep sibling operand before the string",
-			"BT /F1 24 Tf 72 700 Td " + deepArrays(overDeep) + " (" + secret + ") Tj ET"},
-		{"surplus operand before Td",
-			"BT /F1 24 Tf (" + secret + ") 72 700 Td Tj ET"},
-		{"surplus string before Tj",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") (x) Tj Tj ET"},
-		{"unknown operator with an operand",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") Xq Tj ET"},
-		{"unknown operator with an operand inside BX/EX",
-			"BX BT /F1 24 Tf 72 700 Td (" + secret + ") Xq Tj ET EX"},
-		{"procedure brace with an operand",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") { Tj ET"},
-		{"string shown by TJ",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") TJ ET"},
-		{"string left over by sc",
-			"BT /F1 24 Tf 72 700 Td (" + secret + ") 1 0 0 sc Tj ET"},
-	}
-	for _, tc := range tests {
+	for _, tc := range unreadableContentCases {
 		t.Run(tc.name, func(t *testing.T) {
 			pdf := contentPDF(tc.content)
 

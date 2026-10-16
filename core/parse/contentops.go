@@ -38,13 +38,17 @@ var fixedOperands = map[string]int{
 	"BX": 0, "EX": 0,
 }
 
-// operandsFit reports whether operands are exactly what op takes. Operators
-// that can show or position text, or whose operands could be a string, are also
-// type-checked: Tj and ' take a string, " two numbers and a string, TJ an
-// array, d an array and a number, SC/sc one to four numbers, SCN/scn numbers
-// optionally followed by a pattern name. An operator not in Annex A — inside a
-// BX/EX compatibility section or not — fits only with no operands, since what a
-// viewer does with operands it pairs to an unknown operator is undefined.
+// operandsFit reports whether operands are exactly what op takes. Beyond the
+// count, operators whose operands could hold text are type-checked: Tj and '
+// take a string, " two numbers and a string, TJ an array, d an array and a
+// number, SC/sc one to four numbers, SCN/scn numbers optionally followed by a
+// pattern name. So are the operators that name a resource, since a viewer
+// that coerces a string to a name would paint a resource the scan never looks
+// up (§7.8.3): Do, gs, sh, ri, cs, CS, MP and BMC take a name, Tf a name and a
+// number, BDC and DP a name and a property list (a dictionary, or a name in
+// /Properties). An operator not in Annex A — inside a BX/EX compatibility
+// section or not — fits only with no operands, since what a viewer does with
+// operands it pairs to an unknown operator is undefined.
 func operandsFit(op string, operands []Object) bool {
 	n := len(operands)
 	switch op {
@@ -65,6 +69,12 @@ func operandsFit(op string, operands []Object) bool {
 			}
 		}
 		return n >= 1 && allNumbers(operands)
+	case "Do", "gs", "sh", "ri", "cs", "CS", "MP", "BMC":
+		return n == 1 && isName(operands[0])
+	case "Tf":
+		return n == 2 && isName(operands[0]) && isNumber(operands[1])
+	case "BDC", "DP":
+		return n == 2 && isName(operands[0]) && (isName(operands[1]) || isDict(operands[1]))
 	}
 	want, known := fixedOperands[op]
 	if !known {
@@ -84,6 +94,10 @@ func isNumber(o Object) bool {
 func isString(o Object) bool { _, ok := o.(String); return ok }
 
 func isArray(o Object) bool { _, ok := o.(Array); return ok }
+
+func isName(o Object) bool { _, ok := o.(Name); return ok }
+
+func isDict(o Object) bool { _, ok := o.(Dict); return ok }
 
 func allNumbers(objs []Object) bool {
 	for _, o := range objs {

@@ -65,30 +65,33 @@ func assertNoSecret(t *testing.T, out *core.Document) {
 	}
 }
 
+// overDeepSiblingCases put a balanced over-deep operand next to the secret in
+// a TJ array. The leak corpus (leakcorpus_test.go) runs them too.
+var overDeepSiblingCases = []struct {
+	name    string
+	content string
+}{
+	{"TJ, deep array after the string",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + deepArrays(overDeep) + " ] TJ ET"},
+	{"TJ, deep array before the string",
+		"BT /F1 24 Tf 72 700 Td [ " + deepArrays(overDeep) + " (" + secret + ") ] TJ ET"},
+	{"TJ, deep dictionary after the string",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + deepDicts(overDeep) + " ] TJ ET"},
+	{"TJ, deep mixed array/dictionary after the string",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + deepMixed(overDeep) + " ] TJ ET"},
+	{"TJ, deep elements on both sides",
+		"BT /F1 24 Tf 72 700 Td [ " + deepDicts(overDeep) + " (" + secret + ") " + deepArrays(overDeep) + " ] TJ ET"},
+	{"TJ, brackets inside strings in the deep subtree do not count",
+		"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + strings.Repeat("[ (]]>>) <5d5d> % ]]\n", overDeep) +
+			strings.Repeat("]", overDeep) + " ] TJ ET"},
+}
+
 // TestRedact_OverDeepSiblingOperand: a balanced over-deep array/dictionary next
 // to the secret is skipped as one placeholder, so the secret stays visible to
 // extraction and RedactText, and both RedactText and a full-page RedactArea
 // remove it.
 func TestRedact_OverDeepSiblingOperand(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-	}{
-		{"TJ, deep array after the string",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + deepArrays(overDeep) + " ] TJ ET"},
-		{"TJ, deep array before the string",
-			"BT /F1 24 Tf 72 700 Td [ " + deepArrays(overDeep) + " (" + secret + ") ] TJ ET"},
-		{"TJ, deep dictionary after the string",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + deepDicts(overDeep) + " ] TJ ET"},
-		{"TJ, deep mixed array/dictionary after the string",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + deepMixed(overDeep) + " ] TJ ET"},
-		{"TJ, deep elements on both sides",
-			"BT /F1 24 Tf 72 700 Td [ " + deepDicts(overDeep) + " (" + secret + ") " + deepArrays(overDeep) + " ] TJ ET"},
-		{"TJ, brackets inside strings in the deep subtree do not count",
-			"BT /F1 24 Tf 72 700 Td [ (" + secret + ") " + strings.Repeat("[ (]]>>) <5d5d> % ]]\n", overDeep) +
-				strings.Repeat("]", overDeep) + " ] TJ ET"},
-	}
-	for _, tc := range tests {
+	for _, tc := range overDeepSiblingCases {
 		t.Run(tc.name, func(t *testing.T) {
 			pdf := contentPDF(tc.content)
 

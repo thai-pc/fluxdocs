@@ -77,21 +77,7 @@ func nextToken(data []byte, i int) (token, int, error) {
 		return token{kind: tokEOF}, i, nil
 	}
 
-	// Skip whitespace and comments.
-	for i < n {
-		c := data[i]
-		if isWhitespace(c) {
-			i++
-			continue
-		}
-		if c == '%' {
-			for i < n && data[i] != '\n' && data[i] != '\r' {
-				i++
-			}
-			continue
-		}
-		break
-	}
+	i = skipBlank(data, i)
 	if i >= n {
 		return token{kind: tokEOF}, i, nil
 	}
@@ -149,6 +135,27 @@ func nextToken(data []byte, i int) (token, int, error) {
 		}
 		return token{kind: tokKeyword, kw: string(data[start:i])}, i, nil
 	}
+}
+
+// skipBlank returns the offset of the first byte at or after i that is neither
+// white-space nor inside a comment (a comment runs from '%' to the end of the
+// line, ISO 32000-1 §7.2.3), or len(data). nextToken starts each token there.
+func skipBlank(data []byte, i int) int {
+	for i < len(data) {
+		c := data[i]
+		if isWhitespace(c) {
+			i++
+			continue
+		}
+		if c == '%' {
+			for i < len(data) && data[i] != '\n' && data[i] != '\r' {
+				i++
+			}
+			continue
+		}
+		break
+	}
+	return i
 }
 
 // tokenize converts all bytes into a token slice (terminated by EOF). It is

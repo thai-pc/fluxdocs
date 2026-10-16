@@ -55,12 +55,33 @@ func ScanContent(data []byte) []ContentOp {
 // ScanContentSpans is ScanContent with each operator's byte range recorded (see
 // ContentOpSpan).
 func ScanContentSpans(data []byte) []ContentOpSpan {
-	ops, _ := scanContent(data, false)
+	ops, _ := scanContent(data, nil)
 	return ops
 }
 
-// ScanContentSpansStrict is ScanContentSpans for redaction, which must fail
-// closed (SECURITY.md §1). The lenient scanner recovers from a syntax error by
+// ScanContentSpansStrict is ScanContentStrict for one content stream with no
+// options: an inline image with a named colour space is a loss, since nothing
+// can resolve the name.
+func ScanContentSpansStrict(data []byte) ([]ContentOpSpan, error) {
+	return ScanContentStrict(ContentSegments{Data: data}, StrictOptions{})
+}
+
+// StrictOptions configures ScanContentStrict.
+type StrictOptions struct {
+	// InlineColorSpace resolves a named inline-image colour space — a name
+	// other than the device colour spaces and their abbreviations — through
+	// the resources of the stream being scanned (ISO 32000-1 §8.9.7). It
+	// returns the colour space with every indirect reference resolved and an
+	// Indexed lookup table as a String (a lookup stream decoded), or false. The
+	// result must pass the same allow-list as a colour space written inline: a
+	// full device colour space name, or an Indexed array over one. It is needed
+	// only for inline images; when it is nil or reports false, an inline image
+	// with a named colour space is a loss.
+	InlineColorSpace func(name Name) (Object, bool)
+}
+
+// ScanContentStrict is ScanContentSpans for redaction, which must fail closed
+// (SECURITY.md §1). The lenient scanner recovers from a syntax error by
 // dropping the pending operands and resyncing, and it pairs operands with
 // operators however they fall; a viewer may pair them differently, so a string
 // it renders — e.g. in a TJ array next to a malformed element, or left over
@@ -68,29 +89,54 @@ func ScanContentSpans(data []byte) []ContentOpSpan {
 // escape redaction. Strict mode scans the same way but reports the first place
 // where the scan and an interpreter could disagree instead of hiding it.
 //
+// c is the content to scan: one stream's decoded bytes, or a page's content as
+// PageContentSegments assembles it, whose Joins mark where its streams meet.
+// Span offsets index c.Data.
+//
 // Returns the spans, or nil and a wrapped errLex naming the first offset where
-// input was discarded or could be read differently: a token error, an operand
-// array/dictionary that failed to parse (including an over-deep one that never
-// closes or holds a keyword), a stray ']' or '>>', operands pending at an
-// inline image or at the end of the stream, an inline image whose dictionary
-// is malformed or that has no ID/EI, or an operator whose operands do not
-// match ISO 32000-1 Annex A (operandsFit; any operand on an unknown operator).
-func ScanContentSpansStrict(data []byte) ([]ContentOpSpan, error) {
-	ops, err := scanContent(data, true)
+// input was discarded or could be read differently:
+//   - a token error, an operand array/dictionary that failed to parse
+//     (including an over-deep one that never closes or holds a keyword), a
+//     stray ']' or '>>', or operands pending at an inline image or at the end of
+//     the stream;
+//   - an operator whose operands do not match ISO 32000-1 Annex A (operandsFit:
+//     the count, and the types of the operands that name resources or carry
+//     text; any operand on an unknown operator);
+//   - an inline image inside a text object (BT … ET), or one whose
+//     dictionary, data or terminator strictInlineImage does not accept;
+//   - a token, comment or inline image that spans a join between two streams
+//     (§7.8.2 allows a split only between tokens), or two tokens that would
+//     merge into one if the streams were concatenated without a separator.
+func ScanContentStrict(c ContentSegments, opts StrictOptions) ([]ContentOpSpan, error) {
+	st := &strictScan{opts: &opts, images: map[int]int{}}
+	ops, err := scanContent(c.Data, st)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkJoins(c.Data, c.Joins, st.images); err != nil {
 		return nil, err
 	}
 	return ops, nil
 }
 
+// strictScan is the state of one strict scan.
+type strictScan struct {
+	opts     *StrictOptions
+	inflated int64       // bytes inflated to delimit Flate inline images (maxInlineInflate)
+	images   map[int]int // offset just past each BI operator → offset just past its EI
+	inText   bool        // inside BT … ET
+}
+
 // scanContent is the single scanner implementation. It returns every operator
 // it could recover plus, when it had to discard input to do so, a wrapped
-// errLex describing the first discard (nil for a well-formed stream). strict
-// adds the operand checks against Annex A, which lenient callers do not need.
-func scanContent(data []byte, strict bool) ([]ContentOpSpan, error) {
+// errLex describing the first discard (nil for a well-formed stream). A non-nil
+// strict selects strict mode (ScanContentStrict): the operand checks against
+// Annex A and the exact inline-image end, which lenient callers do not need,
+// and it stops at the first loss.
+func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
 	var ops []ContentOpSpan
 	var operands []Object
-	var lossErr error // first discarded input; see ScanContentSpansStrict
+	var lossErr error // first discarded input; see ScanContentStrict
 	loss := func(off int, what string, cause error) {
 		if lossErr != nil {
 			return
@@ -115,6 +161,9 @@ func scanContent(data []byte, strict bool) ([]ContentOpSpan, error) {
 	p := &iparser{data: data, pos: 0, lenient: true}
 
 	for p.pos < len(data) {
+		if strict != nil && lossErr != nil {
+			return nil, lossErr // the strict caller discards the spans
+		}
 		start := p.pos
 		t, ni, err := nextToken(data, p.pos)
 		if err != nil {
@@ -184,17 +233,37 @@ func scanContent(data []byte, strict bool) ([]ContentOpSpan, error) {
 				if len(operands) > 0 {
 					loss(start, "operands pending before inline image", nil)
 				}
-				next, ok := skipInlineImage(data, ni)
-				if !ok {
-					loss(start, "malformed inline image", nil)
+				var next int
+				if strict != nil && strict.inText {
+					// ISO 32000-1 Figure 9: no inline image inside a text
+					// object; readers differ on what they do with one.
+					loss(start, "inline image inside a text object", nil)
+					next = len(data)
+				} else if strict != nil {
+					end, what := strictInlineImage(data, ni, strict.opts, &strict.inflated)
+					if what != "" {
+						loss(end, what, nil)
+						end = len(data)
+					}
+					strict.images[ni] = end
+					next = end
+				} else {
+					var ok bool
+					next, ok = skipInlineImage(data, ni)
+					if !ok {
+						loss(start, "malformed inline image", nil)
+					}
 				}
 				p.pos = next
 				operands = nil
 				opStart = -1
 				continue
 			default: // any other keyword is an operator
-				if strict && lossErr == nil && !operandsFit(t.kw, operands) {
+				if strict != nil && lossErr == nil && !operandsFit(t.kw, operands) {
 					loss(opStart, "operands do not match their operator", nil)
+				}
+				if strict != nil && (t.kw == "BT" || t.kw == "ET") {
+					strict.inText = t.kw == "BT"
 				}
 				ops = append(ops, ContentOpSpan{
 					ContentOp: ContentOp{Op: t.kw, Operands: operands},
@@ -220,6 +289,9 @@ func scanContent(data []byte, strict bool) ([]ContentOpSpan, error) {
 	}
 	if len(operands) > 0 {
 		loss(opStart, "operands pending at end of stream", nil)
+	}
+	if strict != nil && lossErr != nil {
+		return nil, lossErr
 	}
 	return ops, lossErr
 }
@@ -310,18 +382,49 @@ func (r *Resolver) PageContent(pi PageInfo) ([]byte, error) {
 // not err is nil; it is ≥ len(data), equal for content without filter chains,
 // and exceeds the limit when err wraps ErrDecodeLimit.
 func (r *Resolver) PageContentLimit(pi PageInfo, limit int64) (data []byte, used int64, err error) {
+	c, used, err := r.pageContent(pi, limit)
+	return c.Data, used, err
+}
+
+// ContentSegments is page content as PageContent assembles it, plus where its
+// streams were joined. ScanContentStrict uses the joins to refuse a token split
+// across two streams: §7.8.2 allows a split only between tokens, and readers
+// disagree on such content — one concatenates the streams as they are, another
+// separates them as PageContent does, another parses each on its own (N5 in
+// docs/design/redaction-hardening.md).
+type ContentSegments struct {
+	// Data is the content exactly as PageContent returns it.
+	Data []byte
+	// Joins are the offsets in Data of the newline PageContent inserts between
+	// two streams of a /Contents array, in increasing order. It is empty for a
+	// single stream; the newline after the last stream of an array ends the
+	// content and is not a join.
+	Joins []int
+}
+
+// PageContentSegments is PageContent that also reports where the page's
+// /Contents streams were joined (see ContentSegments). Its Data is identical to
+// PageContent's output, and it returns the same errors.
+func (r *Resolver) PageContentSegments(pi PageInfo) (ContentSegments, error) {
+	c, _, err := r.pageContent(pi, MaxPageContent)
+	return c, err
+}
+
+// pageContent implements PageContentLimit and PageContentSegments.
+func (r *Resolver) pageContent(pi PageInfo, limit int64) (ContentSegments, int64, error) {
 	limit = min(limit, MaxPageContent)
 	resolved, err := r.Resolve(pi.Contents)
 	if err != nil {
-		return nil, 0, err
+		return ContentSegments{}, 0, err
 	}
 	switch v := resolved.(type) {
 	case *Stream:
-		return decodeContent(v, limit)
+		data, used, err := decodeContent(v, limit)
+		return ContentSegments{Data: data}, used, err
 	case Array:
 		return r.contentArray(v, limit)
 	default:
-		return nil, 0, nil
+		return ContentSegments{}, 0, nil
 	}
 }
 
@@ -330,14 +433,14 @@ func (r *Resolver) PageContentLimit(pi PageInfo, limit int64) (data []byte, used
 // output is assembled, whose exact size is known by then, so the output is
 // allocated once: peak memory is at most the distinct decoded streams plus the
 // output, each bounded by limit.
-func (r *Resolver) contentArray(arr Array, limit int64) ([]byte, int64, error) {
+func (r *Resolver) contentArray(arr Array, limit int64) (ContentSegments, int64, error) {
 	var used, size int64
 	var pieces [][]byte
 	decoded := make(map[*Stream][]byte) // the Resolver caches objects, so a repeated reference resolves to the same *Stream
 	for _, el := range arr {
 		ro, err := r.Resolve(el)
 		if err != nil {
-			return nil, used, err
+			return ContentSegments{}, used, err
 		}
 		st, ok := ro.(*Stream)
 		if !ok {
@@ -351,29 +454,33 @@ func (r *Resolver) contentArray(arr Array, limit int64) ([]byte, int64, error) {
 			dec, cost, err = decodeContent(st, limit-used)
 			used += cost
 			if errors.Is(err, ErrDecodeLimit) {
-				return nil, used, contentLimitError(limit) // report the page cap
+				return ContentSegments{}, used, contentLimitError(limit) // report the page cap
 			}
 			if err != nil {
-				return nil, used, err
+				return ContentSegments{}, used, err
 			}
 			decoded[st] = dec
 		}
 		used++ // the separator
 		if used > limit {
-			return nil, used, contentLimitError(limit)
+			return ContentSegments{}, used, contentLimitError(limit)
 		}
 		pieces = append(pieces, dec)
 		size += int64(len(dec)) + 1
 	}
 	if size == 0 {
-		return nil, used, nil
+		return ContentSegments{}, used, nil
 	}
 	out := make([]byte, 0, size) // size ≤ used ≤ limit
-	for _, p := range pieces {
+	joins := make([]int, 0, len(pieces)-1)
+	for i, p := range pieces {
 		out = append(out, p...)
+		if i < len(pieces)-1 {
+			joins = append(joins, len(out))
+		}
 		out = append(out, '\n')
 	}
-	return out, used, nil
+	return ContentSegments{Data: out, Joins: joins}, used, nil
 }
 
 // decodeContent decodes one content stream within limit and returns its bytes
