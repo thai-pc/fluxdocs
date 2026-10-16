@@ -274,7 +274,9 @@ func seeds() [][]byte {
 		objStmPDF("1", "[1 9223372036854775807 1]"),
 		// Pages interleaved across Flate object streams: the page-tree walk
 		// alternates between them, exercising the resolver's ObjStm cache
-		// (render-budget.md §9 R4).
+		// path (render-budget.md §9 R4). At 3 × 64 KiB it stays under the
+		// default cap, so it never evicts; eviction is covered by
+		// TestResolver_ObjStmCacheIsBounded with lowered caps.
 		interleavedObjStmPDF(3, 8, 64<<10),
 		// A direct stream /Length of MaxInt64 wrapped start+length negative.
 		classicPDF([]string{

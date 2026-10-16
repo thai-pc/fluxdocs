@@ -1514,7 +1514,11 @@ function resolveObject(file, objectNumber, generation):
 - Object-stream memory: decoded object streams are cached up to 256 MiB per
   document, least recently used evicted first. An evicted stream is decoded
   again on demand, within 256 MiB of re-decoding per document. Past that,
-  loading from an evicted stream fails.
+  loading from an evicted stream fails. Files whose decoded object streams
+  total more than 256 MiB (offsets included) may therefore fail to load some
+  objects after about one cache refill; which objects fail can vary between
+  runs under `RenderAllPages`, and because rendering tolerates missing
+  resources the result can be a degraded page rather than an error.
 
 ### 13.2 Content Stream Rendering Pipeline
 
@@ -1578,7 +1582,9 @@ above runs under a per-page budget (design: `docs/design/render-budget.md`).
 - **Page content cap:** a page's content (its `/Contents` streams decoded and
   concatenated, a repeated stream counted each time) is capped at 256 MiB.
   Each decode is capped at what is left, and a repeated stream is decoded once.
-  Past the cap the render fails with `ErrRenderBudgetExceeded` (content bytes).
+  Past the cap the render fails with `ErrRenderBudgetExceeded` (content bytes);
+  a single filtered stream larger than the 256 MiB per-stream decode cap still
+  fails earlier with the parser's suspected-bomb error.
   Text and table extraction return an error. Redaction fails closed: the plan
   is marked failed and `RedactAndFlatten` refuses.
 - **Not yet covered:** tokenizing the content stream (`ScanContent`) runs before

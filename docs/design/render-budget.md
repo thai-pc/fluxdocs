@@ -575,6 +575,14 @@ checked-conversion approach rather than a raw cast.
     Real files are three orders of magnitude below it. A 2000-page
     Ghostscript file holds 41 ObjStms totalling ≈ 410 KB (≈ 210 B per page),
     and no file in `testing/corpus` holds more than 3 KB.
+  - **Limit for large legitimate files:** nothing is evicted below 256 MiB of
+    decoded ObjStms (≈ 1.3M pages at 205 B/page). Above it, a sequential pass
+    re-decodes at most (total − 256 MiB), so the budget is exhausted only past
+    ≈ 512 MiB or under random access across far more than the cache holds.
+    Then specific objects fail; which ones can vary between runs under
+    `RenderAllPages`, and render tolerates missing resources, so the result
+    can be a degraded page. A possible later refinement is a re-decode budget
+    of max(256 MiB, 2 × bytes first-decoded).
   - **Without the re-decode budget:** a file alternating loads between two
     ObjStm bombs would re-inflate up to 256 MiB per object.
   - **Measured:** four distinct 192 MiB ObjStms now retain ≈ 193 MB of heap

@@ -350,6 +350,9 @@ func (r *Resolver) contentArray(arr Array, limit int64) ([]byte, int64, error) {
 			var cost int64
 			dec, cost, err = decodeContent(st, limit-used)
 			used += cost
+			if errors.Is(err, ErrDecodeLimit) {
+				return nil, used, contentLimitError(limit) // report the page cap
+			}
 			if err != nil {
 				return nil, used, err
 			}
