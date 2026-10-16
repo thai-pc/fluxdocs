@@ -6,6 +6,7 @@
 import type {
   Annotation,
   AnnotationInput,
+  FluxDocsErrorCode,
   PageSize,
   RenderOptions,
 } from "./types.js";
@@ -14,17 +15,54 @@ export type {
   Annotation,
   AnnotationInput,
   AnnotationType,
+  FluxDocsErrorCode,
   PageSize,
   Point,
   Rect,
   RenderOptions,
 } from "./types.js";
 
-/** Thrown when a core call reports an error in its result envelope. */
+/** Every code in {@link FluxDocsErrorCode}, for validating envelope codes. */
+const ERROR_CODES: ReadonlySet<string> = new Set<FluxDocsErrorCode>([
+  "canvas_too_large",
+  "budget_exceeded",
+  "timeout",
+  "canceled",
+  "invalid_pdf",
+  "encrypted",
+  "page_not_found",
+  "unsupported_format",
+  "invalid_annotation",
+  "invalid_argument",
+  "invalid_handle",
+  "internal",
+  "unknown",
+]);
+
+/**
+ * toErrorCode narrows an envelope `code` to a known {@link FluxDocsErrorCode}.
+ * A missing, non-string, or unrecognized code (e.g. from an older or newer
+ * `.wasm` build) maps to "unknown".
+ */
+function toErrorCode(code: unknown): FluxDocsErrorCode {
+  return typeof code === "string" && ERROR_CODES.has(code)
+    ? (code as FluxDocsErrorCode)
+    : "unknown";
+}
+
+/**
+ * Thrown when a core call reports an error in its result envelope, or when the
+ * wrapper itself rejects a call. `message` is human-readable (for logs); branch
+ * on `code` instead of parsing it.
+ */
 export class FluxDocsError extends Error {
-  constructor(message: string) {
+  /** The machine-readable reason; "unknown" when none applies. */
+  readonly code: FluxDocsErrorCode;
+
+  constructor(message: string, code: FluxDocsErrorCode = "unknown") {
     super(message);
     this.name = "FluxDocsError";
+    this.code = code;
   }
 }
 
@@ -34,9 +72,14 @@ interface GoRuntime {
   run(instance: WebAssembly.Instance): Promise<void>;
 }
 
-/** Every result the core returns carries an `error` string ("" on success). */
+/**
+ * Every result the core returns carries an `error` string and a `code` string,
+ * both "" on success. `code` is optional here because a `.wasm` built before
+ * the code field existed omits it.
+ */
 interface Envelope {
   error: string;
+  code?: string;
 }
 
 /** The raw function surface the WASM registers on globalThis.fluxdocs. */
@@ -71,10 +114,15 @@ export interface LoadOptions {
   Go?: new () => GoRuntime;
 }
 
-/** unwrap throws on a non-empty error field, otherwise returns the result. */
+/**
+ * unwrap throws a FluxDocsError carrying the envelope's code when the call
+ * failed, otherwise returns the result. A non-empty `code` with an empty
+ * `error` is a malformed envelope and also throws (fail closed).
+ */
 function unwrap<T extends Envelope>(res: T): T {
-  if (res.error) {
-    throw new FluxDocsError(res.error);
+  if (res.error || res.code) {
+    const code = toErrorCode(res.code);
+    throw new FluxDocsError(res.error || `fluxdocs: ${code}`, code);
   }
   return res;
 }
@@ -93,6 +141,7 @@ export async function loadFluxDocs(
   if (!GoCtor) {
     throw new FluxDocsError(
       "Go runtime not found: load wasm_exec.js first, or pass opts.Go",
+      "internal",
     );
   }
   const go = new GoCtor();
@@ -102,7 +151,7 @@ export async function loadFluxDocs(
   void go.run(instance);
   const api = (globalThis as unknown as { fluxdocs?: RawAPI }).fluxdocs;
   if (!api) {
-    throw new FluxDocsError("WASM did not register globalThis.fluxdocs");
+    throw new FluxDocsError("WASM did not register globalThis.fluxdocs", "internal");
   }
   return new FluxDocs(api);
 }
@@ -138,7 +187,7 @@ export class FluxDoc {
 
   private check(): void {
     if (this.#closed) {
-      throw new FluxDocsError("document is closed");
+      throw new FluxDocsError("document is closed", "invalid_handle");
     }
   }
 

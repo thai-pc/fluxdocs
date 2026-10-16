@@ -1,7 +1,8 @@
-import type { PageSize } from "@fluxdocs/core";
+import type { FluxDocsErrorCode, PageSize } from "@fluxdocs/core";
 
 // viewer-model: the pure logic behind the FluxDocsViewer chrome (zoom ladder,
-// fit-to-width, render DPI, display size, page clamping, key classification).
+// fit-to-width, render DPI, display size, page clamping, key classification,
+// error text).
 // An identical copy lives in @fluxdocs/react and @fluxdocs/vue (like
 // dataurl.ts) so both viewers behave the same; it is not exported from either
 // package index. Design: docs/design/viewer-chrome.md §4–§5.
@@ -210,6 +211,36 @@ export function renderPixels(o: Size, dpi: number): number {
 
 /** Error message shown when a page exceeds the pixel budget even at 1 dpi. */
 export const PAGE_TOO_LARGE_MESSAGE = "page is too large to render";
+
+/** Error text for a render the core stopped at its resource budget. */
+export const PAGE_TOO_COMPLEX_MESSAGE = "This page is too complex to display.";
+
+/** Error text for a render that passed `renderOptions.timeoutMs`. */
+export const RENDER_TIMEOUT_MESSAGE = "Rendering this page took too long.";
+
+/**
+ * errorText is the text the viewer shows for `err` (design note
+ * render-budget.md §6.1), chosen by the FluxDocsError `code`:
+ * `budget_exceeded` -> PAGE_TOO_COMPLEX_MESSAGE, `canvas_too_large` -> the
+ * same text as the viewer's own pixel-budget pre-check ("Failed to display
+ * PDF: " + PAGE_TOO_LARGE_MESSAGE), `timeout` -> RENDER_TIMEOUT_MESSAGE,
+ * anything else (including an error with no code) -> "Failed to display PDF:
+ * {message}". The code is read by shape,
+ * not instanceof, so it works across duplicate @fluxdocs/core copies.
+ */
+export function errorText(err: Error): string {
+  const code = (err as { code?: unknown }).code as FluxDocsErrorCode | undefined;
+  switch (code) {
+    case "budget_exceeded":
+      return PAGE_TOO_COMPLEX_MESSAGE;
+    case "canvas_too_large":
+      return `Failed to display PDF: ${PAGE_TOO_LARGE_MESSAGE}`;
+    case "timeout":
+      return RENDER_TIMEOUT_MESSAGE;
+    default:
+      return `Failed to display PDF: ${err.message}`;
+  }
+}
 
 /**
  * fitsBudget reports whether the page can be rendered within RENDER_BUDGET_PX

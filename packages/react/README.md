@@ -67,6 +67,18 @@ also displayed the page at ~156% of its physical size. Omit `dpi` to let the
 viewer pick `96 × devicePixelRatio` (capped at 2×); each zoom step re-renders at
 a matching DPI, capped at an 8 Mi px bitmap.
 
+`renderOptions` also passes the render limits through to the core
+(`maxPaintPixels`, `maxOperators`, `timeoutMs`; see the `@fluxdocs/core`
+README). The viewer sets no timeout of its own. On failure the viewer shows a
+`role="alert"` message chosen by the error's `FluxDocsError.code`:
+
+| `code` | Message |
+|---|---|
+| `budget_exceeded` | This page is too complex to display. |
+| `canvas_too_large` | Failed to display PDF: page is too large to render |
+| `timeout` | Rendering this page took too long. |
+| anything else | Failed to display PDF: *message* |
+
 ### Hooks
 
 - `useFluxDoc(runtime, data)` → `{ doc, error }` — opens a PDF and closes it

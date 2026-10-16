@@ -36,7 +36,8 @@ try {
 
 const work = mkdtempSync(join(tmpdir(), "fluxdocs-wasm-"));
 const wasmPath = join(work, "fluxdocs.wasm");
-execSync(`go build -o ${wasmPath} ./wasm`, {
+// -tags smoketest adds the test-only _testPanic export (wasm/testexport_smoketest.go).
+execSync(`go build -tags smoketest -o ${wasmPath} ./wasm`, {
   cwd: repo,
   env: { ...process.env, GOOS: "js", GOARCH: "wasm" },
   stdio: "inherit",
@@ -98,17 +99,65 @@ const saved = fluxdocs.save(h);
 assert(saved.error === "" && saved.bytes.length > 0, `save: ${saved.error}`);
 assert(saved.bytes[0] === 0x25 && saved.bytes[1] === 0x50, "save returns %PDF header");
 
+// Every envelope carries a code: "" on success, a closed-set value on failure.
+assert(png.code === "", `success code: ${JSON.stringify(png.code)}`);
+assert(fluxdocs.version().code === "", "version code");
+
 // Error envelope on a bad handle.
-assert(fluxdocs.pageCount(9999).error !== "", "unknown handle -> error");
+const unknownHandle = fluxdocs.pageCount(9999);
+assert(unknownHandle.error !== "" && unknownHandle.code === "invalid_handle", `unknown handle: ${JSON.stringify(unknownHandle)}`);
+const noHandle = fluxdocs.pageCount();
+assert(noHandle.code === "invalid_handle", `missing handle: ${JSON.stringify(noHandle)}`);
+const stringHandle = fluxdocs.pageCount("not-a-handle");
+assert(stringHandle.code === "invalid_handle", `non-numeric handle: ${JSON.stringify(stringHandle)}`);
+
+// Argument and lookup errors map to their codes.
+const noIndex = fluxdocs.renderPage(h, undefined);
+assert(noIndex.code === "invalid_argument" && /^renderPage: /.test(noIndex.error), `missing index: ${JSON.stringify(noIndex)}`);
+const badOpts = fluxdocs.renderPage(h, 0, "png");
+assert(badOpts.code === "invalid_argument", `non-object options: ${JSON.stringify(badOpts)}`);
+assert(fluxdocs.renderPage(h, 0, null).error === "", "null options -> defaults");
+// Numbers that have no int value are rejected, not cast (a raw float->int cast
+// saturates under js/wasm).
+for (const [what, res] of [
+  ["NaN index", fluxdocs.renderPage(h, NaN)],
+  ["huge index", fluxdocs.renderPage(h, 1e300)],
+  ["Infinity dpi", fluxdocs.renderPage(h, 0, { dpi: Infinity })],
+  ["NaN quality", fluxdocs.renderPage(h, 0, { format: "jpeg", quality: NaN })],
+]) {
+  assert(res.code === "invalid_argument" && res.image === undefined, `${what}: ${JSON.stringify(res)}`);
+}
+const noPage = fluxdocs.renderPage(h, 7, { dpi: 72 });
+assert(noPage.code === "page_not_found" && noPage.image === undefined, `page not found: ${JSON.stringify(noPage)}`);
+const badFormat = fluxdocs.renderPage(h, 0, { format: "svg" });
+assert(badFormat.code === "unsupported_format", `unsupported format: ${JSON.stringify(badFormat)}`);
+const badAnn = fluxdocs.addAnnotation(h, { pageIndex: 0, type: "stamp", rect: { x: 0, y: 0, width: 1, height: 1 } });
+assert(badAnn.code === "invalid_annotation", `invalid annotation: ${JSON.stringify(badAnn)}`);
+const notPDF = fluxdocs.open(new Uint8Array([1, 2, 3]));
+assert(notPDF.code === "invalid_pdf", `invalid pdf: ${JSON.stringify(notPDF)}`);
 
 fluxdocs.close(h);
-assert(fluxdocs.pageCount(h).error !== "", "closed handle -> error");
+const closed = fluxdocs.pageCount(h);
+assert(closed.error !== "" && closed.code === "invalid_handle", `closed handle: ${JSON.stringify(closed)}`);
 
-// A Go panic inside an export (here: a non-numeric handle, which makes
-// js.Value.Int panic) must come back as an error envelope, and the runtime must
-// survive it — an uncaught panic would kill every later fluxdocs.* call.
-const bad = fluxdocs.pageCount("not-a-handle");
-assert(/^pageCount: internal error: /.test(bad.error), `panic -> envelope: ${JSON.stringify(bad)}`);
+// A non-numeric annotation pageIndex is an argument error, not a panic.
+const panicky = fluxdocs.open(pdf);
+const badIndex = fluxdocs.addAnnotation(panicky.handle, { pageIndex: "zero", type: "note" });
+assert(badIndex.code === "invalid_argument" && /^addAnnotation: /.test(badIndex.error), `non-numeric pageIndex: ${JSON.stringify(badIndex)}`);
+const nanIndex = fluxdocs.addAnnotation(panicky.handle, { pageIndex: NaN, type: "note" });
+assert(nanIndex.code === "invalid_argument", `NaN pageIndex: ${JSON.stringify(nanIndex)}`);
+fluxdocs.close(panicky.handle);
+
+// A Go panic inside an export (the test-only _testPanic, which panics with a
+// value holding "SECRET document bytes") must come back as an error envelope
+// with code "internal", and the runtime must survive it — an uncaught panic
+// would kill every later fluxdocs.* call. The message names a non-runtime panic
+// value by its type only (it could hold document bytes).
+const bad = fluxdocs._testPanic();
+assert(/^_testPanic: internal error: /.test(bad.error), `panic -> envelope: ${JSON.stringify(bad)}`);
+assert(bad.code === "internal", `panic -> code internal: ${JSON.stringify(bad)}`);
+assert(/panic value of type \*errors\.errorString/.test(bad.error), `panic value shown by type only: ${bad.error}`);
+assert(!/SECRET/.test(bad.error), `panic value text must not be echoed: ${bad.error}`);
 assert(fluxdocs.version().version === "0.1.0", "runtime survives a recovered panic");
 
 // A hostile MediaBox (2^33 pt at 36 DPI = 2^32 x 2^32 px, whose int64 area wraps
@@ -141,6 +190,7 @@ const huge = fluxdocs.open(onePagePDF("[0 0 8589934592 8589934592]"));
 assert(huge.error === "", `open hostile MediaBox: ${huge.error}`);
 const hugeRender = fluxdocs.renderPage(huge.handle, 0, { dpi: 36, format: "png" });
 assert(/exceeds/.test(hugeRender.error), `hostile MediaBox render -> canvas error: ${hugeRender.error}`);
+assert(hugeRender.code === "canvas_too_large", `canvas cap code (not budget_exceeded): ${hugeRender.code}`);
 fluxdocs.close(huge.handle);
 assert(fluxdocs.version().version === "0.1.0", "runtime alive after hostile render");
 
@@ -169,6 +219,48 @@ assert(strokeRender.error === "" && strokeRender.image[0] === 0x89, `hostile str
 assert(strokeMs < 5000, `hostile strokes render took ${strokeMs}ms, want < 5000ms`);
 fluxdocs.close(strokes.handle);
 
+// Render budget (SECURITY.md §2): 2000 full-page fills on a 100x100 pt page
+// cost ≈ 2000 × 10k pixel visits, past the default budget at 72 DPI (16 Mi), so
+// the render stops with budget_exceeded instead of running on. An explicit
+// limit applies as given; a negative one disables the budget; a NaN, infinite
+// or out-of-range value is ignored (the default applies).
+const flood = fluxdocs.open(onePagePDF("[0 0 100 100]", "0 0 100 100 re f\n".repeat(2000)));
+assert(flood.error === "", `open flood page: ${flood.error}`);
+const overBudget = fluxdocs.renderPage(flood.handle, 0, { dpi: 72 });
+assert(overBudget.code === "budget_exceeded" && overBudget.image === undefined, `default budget: ${JSON.stringify(overBudget)}`);
+assert(/render budget exceeded/.test(overBudget.error), `budget message: ${overBudget.error}`);
+for (const junk of [NaN, Infinity, -Infinity, 1e300, -1e300]) {
+  const r = fluxdocs.renderPage(flood.handle, 0, { dpi: 72, maxPaintPixels: junk });
+  assert(r.code === "budget_exceeded", `maxPaintPixels ${junk} ignored -> default budget: ${r.code} ${r.error}`);
+}
+const tight = fluxdocs.renderPage(flood.handle, 0, { dpi: 72, maxPaintPixels: 1000 });
+assert(tight.code === "budget_exceeded" && /paint work \d+ > 1000/.test(tight.error), `explicit limit: ${tight.error}`);
+const fewOps = fluxdocs.renderPage(flood.handle, 0, { dpi: 72, maxPaintPixels: -1, maxOperators: 100 });
+assert(fewOps.code === "budget_exceeded" && /operators/.test(fewOps.error), `maxOperators: ${fewOps.error}`);
+const unlimited = fluxdocs.renderPage(flood.handle, 0, { dpi: 72, maxPaintPixels: -1 });
+assert(unlimited.error === "" && unlimited.code === "" && unlimited.image[0] === 0x89, `unlimited budget renders: ${unlimited.error}`);
+fluxdocs.close(flood.handle);
+
+// timeoutMs bounds the wall clock inside a synchronous export. Go/wasm cannot
+// preempt the render loop, so the timer goroutine never runs while it is busy:
+// only the renderer's own clock check can stop it. With the budget disabled,
+// 20000 full-page fills at 300 DPI would run for minutes.
+const heavy = fluxdocs.open(onePagePDF("[0 0 100 100]", "0 0 100 100 re f\n".repeat(20000)));
+assert(heavy.error === "", `open heavy page: ${heavy.error}`);
+const timeoutStart = Date.now();
+const timedOut = fluxdocs.renderPage(heavy.handle, 0, { dpi: 300, maxPaintPixels: -1, maxOperators: -1, timeoutMs: 200 });
+const timeoutMs = Date.now() - timeoutStart;
+assert(timedOut.code === "timeout" && timedOut.image === undefined, `timeoutMs -> timeout: ${JSON.stringify(timedOut)}`);
+assert(timeoutMs < 5000, `timed-out render returned after ${timeoutMs}ms, want shortly after 200ms`);
+for (const junk of [0, -5, NaN, Infinity]) {
+  // A non-positive or non-finite timeoutMs means no deadline: the default
+  // budget stops the render instead.
+  const r = fluxdocs.renderPage(heavy.handle, 0, { dpi: 72, timeoutMs: junk });
+  assert(r.code === "budget_exceeded", `timeoutMs ${junk} ignored: ${r.code} ${r.error}`);
+}
+fluxdocs.close(heavy.handle);
+assert(fluxdocs.version().version === "0.1.0", "runtime alive after budget and timeout renders");
+
 // After a recovered panic and two rejected renders, the real pipeline must still
 // produce output: recover() must not swallow happy-path results.
 const again = fluxdocs.open(pdf);
@@ -177,10 +269,13 @@ const pngAgain = fluxdocs.renderPage(again.handle, 0, { dpi: 72, format: "png" }
 assert(pngAgain.error === "" && pngAgain.image.length > 100, `render after recovered panic: ${pngAgain.error}`);
 assert(pngAgain.image[0] === 0x89 && pngAgain.image[1] === 0x50, "render after recovered panic returns PNG magic");
 
-// An absurd JS dpi (js.Value.Int on 1e300) must hit the canvas cap, not wrap
-// into a tiny or negative canvas.
+// An absurd JS dpi (1e300, past the int range) must be rejected as an argument,
+// never cast into a saturated, tiny, or negative canvas. A huge in-range dpi
+// still hits the canvas cap.
 const absurdDPI = fluxdocs.renderPage(again.handle, 0, { dpi: 1e300, format: "png" });
-assert(/exceeds/.test(absurdDPI.error), `dpi 1e300 -> canvas error: ${absurdDPI.error}`);
+assert(absurdDPI.code === "invalid_argument" && absurdDPI.image === undefined, `dpi 1e300 -> invalid_argument: ${JSON.stringify(absurdDPI)}`);
+const hugeDPI = fluxdocs.renderPage(again.handle, 0, { dpi: 1e9, format: "png" });
+assert(hugeDPI.code === "canvas_too_large" && /exceeds/.test(hugeDPI.error), `dpi 1e9 -> canvas error: ${hugeDPI.error}`);
 assert(fluxdocs.extractText(again.handle).text.includes("Hello WASM"), "extractText after rejected render");
 fluxdocs.close(again.handle);
 

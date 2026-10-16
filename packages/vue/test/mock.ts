@@ -1,4 +1,12 @@
-import type { Annotation, FluxDoc, FluxDocs, PageSize, RenderOptions } from "@fluxdocs/core";
+import { FluxDocsError } from "@fluxdocs/core";
+import type {
+  Annotation,
+  FluxDoc,
+  FluxDocs,
+  FluxDocsErrorCode,
+  PageSize,
+  RenderOptions,
+} from "@fluxdocs/core";
 
 // A minimal in-memory stand-in for the WASM runtime, so the Vue glue can be
 // tested without building/loading the core. The real core is tested in
@@ -18,6 +26,18 @@ export interface MockOptions {
   pageSize?: PageSize;
   /** When set, pageSize() throws this message. */
   pageSizeError?: string;
+  /**
+   * With openError, open() throws a FluxDocsError with this code (as the
+   * wrapper does for a coded WASM envelope) instead of a plain Error.
+   */
+  openErrorCode?: FluxDocsErrorCode;
+  /** With renderError, renderPage() throws a FluxDocsError with this code. */
+  renderErrorCode?: FluxDocsErrorCode;
+}
+
+/** fail builds the error the mock throws: coded like the wrapper's, or plain. */
+function fail(message: string, code: FluxDocsErrorCode | undefined): Error {
+  return code ? new FluxDocsError(message, code) : new Error(message);
 }
 
 export interface RenderCall {
@@ -38,7 +58,7 @@ export function mockRuntime(opts: MockOptions = {}): FluxDocs {
     extractTextByPage: (i: number) => `page ${i}`,
     renderPage: (i: number, o?: RenderOptions) => {
       opts.renderCalls?.push({ index: i, opts: o });
-      if (opts.renderError) throw new Error(opts.renderError);
+      if (opts.renderError) throw fail(opts.renderError, opts.renderErrorCode);
       return fakePNG(i);
     },
     addAnnotation: (): Annotation => ({
@@ -58,7 +78,7 @@ export function mockRuntime(opts: MockOptions = {}): FluxDocs {
   return {
     version: () => "0.1.0-mock",
     open: () => {
-      if (opts.openError) throw new Error(opts.openError);
+      if (opts.openError) throw fail(opts.openError, opts.openErrorCode);
       return doc;
     },
   } as unknown as FluxDocs;

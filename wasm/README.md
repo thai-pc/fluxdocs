@@ -26,8 +26,26 @@ toolchain under `$(go env GOROOT)/lib/wasm/wasm_exec.js`):
 
 ## API
 
-Every function returns a plain object with an `error` string field (`""` on
-success) plus result fields — no exceptions to catch.
+Every function returns a plain object with an `error` string field and a `code`
+string field (both `""` on success) plus result fields — no exceptions to catch.
+On failure `error` is a human-readable `"<function>: <message>"` and `code` is
+one of a closed set, for programmatic handling:
+
+| `code` | Meaning |
+|---|---|
+| `canvas_too_large` | the page's canvas exceeds the pixel cap at this DPI |
+| `budget_exceeded` | the page exceeded its render budget (`maxPaintPixels` / `maxOperators`, or an internal cap); retrying does not help |
+| `timeout` | the render passed `timeoutMs` |
+| `canceled` | the render was canceled |
+| `invalid_pdf` | not a valid PDF |
+| `encrypted` | the document is encrypted |
+| `page_not_found` | page index out of range |
+| `unsupported_format` | unsupported `format` |
+| `invalid_annotation` | annotation failed validation, or not found |
+| `invalid_argument` | a malformed argument (missing page index, non-object options, a page index, `dpi` or `quality` that is NaN, infinite or out of the int range, …) |
+| `invalid_handle` | missing, unknown, or closed document handle |
+| `internal` | a recovered Go panic (a FluxDocs bug) |
+| `unknown` | any other error |
 
 | Function | Returns |
 |---|---|
@@ -44,7 +62,15 @@ success) plus result fields — no exceptions to catch.
 | `getAnnotations(handle, pageIndex)` | `{error, annotations: []}` |
 | `exportAnnotations(handle)` | `{error, json}` |
 
-`renderPage` opts: `{ dpi?, format?: "png"|"jpeg", quality?, skipAnnotations?: bool }`.
+`renderPage` opts: `{ dpi?, format?: "png"|"jpeg", quality?, skipAnnotations?: bool,
+maxPaintPixels?, maxOperators?, timeoutMs? }`. Every page render runs under a
+per-page budget (SECURITY.md §2): `maxPaintPixels` (raster work in pixel visits;
+default 32 × the canvas pixels, clamped to [16 Mi, 1 Gi]) and `maxOperators`
+(content operators plus glyphs; default 8 Mi). `0` or absent = default, negative
+= unlimited (unsafe for untrusted input), positive = absolute; NaN, infinite or
+out-of-range values are ignored. `timeoutMs` (finite, > 0) bounds the render's
+wall clock; the renderer checks the clock itself, because a synchronous call
+never yields to Go's timer.
 `addAnnotation` ann: `{ pageIndex, type, rect:{x,y,width,height}, color?, opacity?, content?, points?:[{x,y}] }`.
 
 Documents are referenced by an integer `handle`; call `close(handle)` to release
@@ -60,4 +86,7 @@ node wasm/smoke_test.mjs   # requires Node + a Go toolchain
 ```
 
 It is intentionally a standalone script (not a `go test`), so CI's `go build
-./core/... ./wasm/...` under `GOOS=js GOARCH=wasm` remains the compile gate.
+./core/... ./wasm/...` under `GOOS=js GOARCH=wasm` remains the compile gate. It
+builds with `-tags smoketest`, which adds one test-only export, `_testPanic`
+(`testexport_smoketest.go`), to exercise the panic-recovery envelope; a normal
+build does not contain it.

@@ -106,9 +106,71 @@ test("open failure throws FluxDocsError", () => {
   assert.throws(() => runtime.open(new Uint8Array([1, 2, 3])), FluxDocsError);
 });
 
+test("open failure carries code invalid_pdf", () => {
+  assert.throws(
+    () => runtime.open(new Uint8Array([1, 2, 3])),
+    (err) => err instanceof FluxDocsError && err.code === "invalid_pdf",
+  );
+});
+
 test("use after close throws", () => {
   const doc = runtime.open(sample);
   doc.close();
   assert.throws(() => doc.extractText(), FluxDocsError);
   doc.close(); // idempotent, no throw
+});
+
+test("use after close carries code invalid_handle", () => {
+  const doc = runtime.open(sample);
+  doc.close();
+  assert.throws(
+    () => doc.renderPage(0),
+    (err) => err instanceof FluxDocsError && err.code === "invalid_handle",
+  );
+});
+
+// hasCode returns an assert.throws validator for a FluxDocsError with `code`.
+function hasCode(code) {
+  return (err) => {
+    assert.ok(err instanceof FluxDocsError, `not a FluxDocsError: ${err}`);
+    assert.equal(err.code, code, err.message);
+    assert.ok(err.message.length > 0);
+    return true;
+  };
+}
+
+test("error codes from the real core", () => {
+  const doc = runtime.open(sample);
+  try {
+    assert.throws(() => doc.pageSize(99), hasCode("page_not_found"));
+    assert.throws(() => doc.renderPage(0, { format: "gif" }), hasCode("unsupported_format"));
+    assert.throws(() => doc.renderPage(0, { dpi: 1e6 }), hasCode("canvas_too_large"));
+    assert.throws(() => doc.renderPage(0, { dpi: 72, maxOperators: 1 }), hasCode("budget_exceeded"));
+    assert.throws(
+      () => doc.renderPage(0, { dpi: 72, maxPaintPixels: 1 }),
+      hasCode("budget_exceeded"),
+    );
+    // A 1 ns deadline has passed by the render's first clock check.
+    assert.throws(() => doc.renderPage(0, { dpi: 72, timeoutMs: 1e-6 }), hasCode("timeout"));
+  } finally {
+    doc.close();
+  }
+});
+
+test("render budget options: unlimited, ignored, and default values still render", () => {
+  const doc = runtime.open(sample);
+  try {
+    for (const opts of [
+      { maxPaintPixels: -1, maxOperators: -1 },
+      { maxPaintPixels: 0, maxOperators: 0, timeoutMs: 0 },
+      { maxPaintPixels: Number.NaN, maxOperators: Infinity, timeoutMs: -5 },
+      { maxPaintPixels: 1e300, timeoutMs: Infinity },
+      { timeoutMs: 60_000 },
+    ]) {
+      const png = doc.renderPage(0, { dpi: 72, ...opts });
+      assert.equal(png[0], 0x89, JSON.stringify(opts));
+    }
+  } finally {
+    doc.close();
+  }
 });

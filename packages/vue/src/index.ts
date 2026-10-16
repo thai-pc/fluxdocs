@@ -13,6 +13,7 @@ export type {
   AnnotationType,
   FluxDoc,
   FluxDocs,
+  FluxDocsErrorCode,
   PageSize,
   Point,
   Rect,

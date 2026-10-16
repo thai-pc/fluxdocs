@@ -106,6 +106,14 @@ jobs:
       # and run client-side. This build must always stay green.
       - name: Build core + wasm entry for js/wasm
         run: go build ./core/... ./wasm/...
+      # Runs the compiled module under Node: the syscall/js glue, the error
+      # envelope codes, and the render deadline that must fire inside a
+      # synchronous export (render-budget.md §5).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: WASM smoke test (Node)
+        run: node wasm/smoke_test.mjs
 
   web:
     name: JS wrappers & demos (typecheck + test)

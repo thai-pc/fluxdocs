@@ -57,6 +57,81 @@ describe("FluxDocsViewer", () => {
   });
 });
 
+describe("FluxDocsViewer error codes", () => {
+  const alertText = () => screen.getByRole("alert").textContent;
+  const errorP = () => document.querySelector(".fd-viewer__error");
+
+  it("shows the too-complex text for budget_exceeded", () => {
+    render(
+      <FluxDocsViewer
+        runtime={mockRuntime({ renderError: "renderPage: over budget", renderErrorCode: "budget_exceeded" })}
+        data={data}
+      />,
+    );
+    expect(alertText()).toBe("This page is too complex to display.");
+    expect(errorP()?.textContent).toBe("This page is too complex to display.");
+    expect(screen.getByRole("alert").classList.contains("fd-viewer")).toBe(true);
+    expect(alertText()).not.toContain("over budget");
+  });
+
+  it("shows the pixel-budget pre-check's too-large text for canvas_too_large", () => {
+    render(
+      <FluxDocsViewer
+        runtime={mockRuntime({ renderError: "renderPage: canvas exceeds cap", renderErrorCode: "canvas_too_large" })}
+        data={data}
+      />,
+    );
+    expect(alertText()).toBe("Failed to display PDF: page is too large to render");
+    expect(errorP()?.textContent).toBe("Failed to display PDF: page is too large to render");
+    expect(screen.getByRole("alert").classList.contains("fd-viewer")).toBe(true);
+    expect(alertText()).not.toContain("exceeds cap");
+  });
+
+  it("shows the took-too-long text for timeout", () => {
+    render(
+      <FluxDocsViewer
+        runtime={mockRuntime({ renderError: "renderPage: deadline", renderErrorCode: "timeout" })}
+        data={data}
+      />,
+    );
+    expect(alertText()).toBe("Rendering this page took too long.");
+    expect(errorP()?.textContent).toBe("Rendering this page took too long.");
+  });
+
+  it.each(["unknown", "internal", "page_not_found"] as const)(
+    "falls back to the raw message for %s",
+    (code) => {
+      render(
+        <FluxDocsViewer
+          runtime={mockRuntime({ renderError: "renderPage: raw text", renderErrorCode: code })}
+          data={data}
+        />,
+      );
+      expect(alertText()).toBe("Failed to display PDF: renderPage: raw text");
+    },
+  );
+
+  it("keeps the raw message for a coded open failure", () => {
+    render(
+      <FluxDocsViewer
+        runtime={mockRuntime({ openError: "open: bad xref", openErrorCode: "invalid_pdf" })}
+        data={data}
+      />,
+    );
+    expect(alertText()).toBe("Failed to display PDF: open: bad xref");
+  });
+
+  it("keeps the client-side pixel-budget message", () => {
+    render(
+      <FluxDocsViewer
+        runtime={mockRuntime({ pageSize: { width: 1e18, height: 1e18, rotation: 0 } })}
+        data={data}
+      />,
+    );
+    expect(alertText()).toBe("Failed to display PDF: page is too large to render");
+  });
+});
+
 describe("FluxDocsViewer chrome (zoom, keyboard, a11y)", () => {
   const q = <T extends Element = HTMLElement>(sel: string) =>
     document.querySelector(sel) as T;

@@ -3,9 +3,14 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { FluxDocsError } from "@fluxdocs/core";
+
 import {
   CSS_PX_PER_PT,
+  PAGE_TOO_COMPLEX_MESSAGE,
+  PAGE_TOO_LARGE_MESSAGE,
   RENDER_BUDGET_PX,
+  RENDER_TIMEOUT_MESSAGE,
   ZOOM_MAX,
   ZOOM_MIN,
   ZOOM_STEPS,
@@ -16,6 +21,7 @@ import {
   clampZoom,
   classifyKey,
   displaySize,
+  errorText,
   fitZoom,
   fitsBudget,
   isEditable,
@@ -475,5 +481,58 @@ describe("keyContext / isEditable", () => {
     expect(mid.atBottom).toBe(false);
     Object.defineProperty(vp, "scrollTop", { value: 599.5, configurable: true });
     expect(keyContext(vp, vp, true, true).atBottom).toBe(true);
+  });
+});
+
+describe("errorText", () => {
+  it("maps the budget code to the too-complex text", () => {
+    expect(PAGE_TOO_COMPLEX_MESSAGE).toBe("This page is too complex to display.");
+    expect(errorText(new FluxDocsError("renderPage: budget", "budget_exceeded"))).toBe(
+      PAGE_TOO_COMPLEX_MESSAGE,
+    );
+  });
+
+  it("maps the canvas code to the pixel-budget pre-check's too-large text", () => {
+    expect(errorText(new FluxDocsError("renderPage: canvas exceeds", "canvas_too_large"))).toBe(
+      `Failed to display PDF: ${PAGE_TOO_LARGE_MESSAGE}`,
+    );
+    expect(errorText(new FluxDocsError("renderPage: canvas exceeds", "canvas_too_large"))).toBe(
+      errorText(new Error(PAGE_TOO_LARGE_MESSAGE)),
+    );
+  });
+
+  it("maps timeout to the took-too-long text", () => {
+    expect(RENDER_TIMEOUT_MESSAGE).toBe("Rendering this page took too long.");
+    expect(errorText(new FluxDocsError("renderPage: deadline", "timeout"))).toBe(
+      RENDER_TIMEOUT_MESSAGE,
+    );
+  });
+
+  it("falls back to the raw message for every other code and for uncoded errors", () => {
+    for (const code of [
+      "canceled",
+      "invalid_pdf",
+      "encrypted",
+      "page_not_found",
+      "unsupported_format",
+      "invalid_annotation",
+      "invalid_argument",
+      "invalid_handle",
+      "internal",
+      "unknown",
+    ] as const) {
+      expect(errorText(new FluxDocsError(`x: ${code}`, code))).toBe(
+        `Failed to display PDF: x: ${code}`,
+      );
+    }
+    expect(errorText(new Error("plain"))).toBe("Failed to display PDF: plain");
+    expect(errorText(new FluxDocsError("no code"))).toBe("Failed to display PDF: no code");
+  });
+
+  it("reads the code by shape, not instanceof", () => {
+    const foreign = Object.assign(new Error("other copy"), { code: "timeout" });
+    expect(errorText(foreign)).toBe(RENDER_TIMEOUT_MESSAGE);
+    const odd = Object.assign(new Error("odd"), { code: 7 });
+    expect(errorText(odd)).toBe("Failed to display PDF: odd");
   });
 });

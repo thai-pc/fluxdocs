@@ -44,7 +44,45 @@ and `$(go env GOROOT)/lib/wasm/wasm_exec.js`).
 ```
 
 Every method throws `FluxDocsError` on failure (the core reports errors via a
-result envelope, which the wrapper unwraps).
+result envelope, which the wrapper unwraps). Branch on `err.code`, not on the
+message text:
+
+```ts
+import { FluxDocsError } from "@fluxdocs/core";
+
+try {
+  doc.renderPage(0, { dpi: 150, timeoutMs: 2000 });
+} catch (err) {
+  if (err instanceof FluxDocsError && err.code === "budget_exceeded") {
+    // the page is too costly to render with these limits; retrying won't help
+  }
+}
+```
+
+`code` is a `FluxDocsErrorCode`: `canvas_too_large`, `budget_exceeded`,
+`timeout`, `canceled`, `invalid_pdf`, `encrypted`, `page_not_found`,
+`unsupported_format`, `invalid_annotation`, `invalid_argument`,
+`invalid_handle` (also: any call on a closed `FluxDoc`), `internal` (a FluxDocs
+bug, or the runtime failed to load), or `unknown` (anything else, including a
+code from a mismatched `.wasm` build). New codes may be added.
+
+### Render limits
+
+Every `renderPage` call runs under a resource budget, so a hostile or
+pathological PDF fails fast with a `FluxDocsError` instead of freezing the tab.
+The defaults suit untrusted input; tune them per call:
+
+| Option | Unit | Default | |
+|---|---|---|---|
+| `maxPaintPixels` | pixel visits (overdraw counts each time) | 32 × the page's canvas pixels, clamped to [16 Mi, 1 Gi] | Over it: `budget_exceeded`. A positive value is absolute, not scaled by DPI. |
+| `maxOperators` | interpreter steps (content operators at every Form XObject depth, plus glyphs) | 8 Mi | Over it: `budget_exceeded`. |
+| `timeoutMs` | milliseconds of wall clock | none | Applied only when finite and > 0. Past it: `timeout`. |
+
+For `maxPaintPixels` and `maxOperators`, absent or `0` means the default and
+`< 0` means unlimited, which is unsafe for untrusted input. NaN, ±Infinity, and
+out-of-range values are ignored. A page too large for the canvas cap at the
+requested DPI fails with `canvas_too_large`. Rendering is synchronous, so a
+render keeps the main thread busy until it finishes or hits a limit.
 
 ## API
 

@@ -17,6 +17,7 @@ import {
   classifyKey,
   currentDpr,
   displaySize,
+  errorText,
   fitZoom,
   fitsBudget,
   keyContext,
@@ -182,7 +183,7 @@ export function FluxDocsViewer({
   if (error) {
     return (
       <div className={root} role="alert">
-        <p className="fd-viewer__error">Failed to display PDF: {error.message}</p>
+        <p className="fd-viewer__error">{errorText(error)}</p>
       </div>
     );
   }

@@ -11,6 +11,7 @@ import {
   classifyKey,
   currentDpr,
   displaySize,
+  errorText,
   fitZoom,
   fitsBudget,
   keyContext,
@@ -261,11 +262,7 @@ export const FluxDocsViewer = defineComponent({
 
       if (error.value) {
         return h("div", { class: rootClass, role: "alert" }, [
-          h(
-            "p",
-            { class: "fd-viewer__error" },
-            `Failed to display PDF: ${error.value.message}`,
-          ),
+          h("p", { class: "fd-viewer__error" }, errorText(error.value)),
         ]);
       }
       if (!doc.value) {
