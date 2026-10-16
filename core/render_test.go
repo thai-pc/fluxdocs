@@ -7,6 +7,8 @@ import (
 	"image/png"
 	"strings"
 	"testing"
+
+	"github.com/thai-pc/fluxdocs/core/render"
 )
 
 // renderTestDoc builds a multi-page document where each page fills itself with
@@ -140,6 +142,9 @@ func TestRenderPage_HostileMediaBoxReturnsError(t *testing.T) {
 		if !strings.Contains(err.Error(), "exceeds") {
 			t.Errorf("DPI %d: err = %v, want canvas-too-large (\"exceeds\")", dpi, err)
 		}
+		if !errors.Is(err, ErrRenderBudgetExceeded) || !errors.Is(err, render.ErrCanvasTooLarge) {
+			t.Errorf("DPI %d: err = %v, want ErrRenderBudgetExceeded and render.ErrCanvasTooLarge", dpi, err)
+		}
 		if img != nil {
 			t.Errorf("DPI %d: got %d image bytes alongside an error, want nil", dpi, len(img))
 		}
@@ -173,6 +178,9 @@ func TestRenderAllPages_HostilePageFailsWholeBatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exceeds") {
 		t.Errorf("err = %v, want canvas-too-large (\"exceeds\")", err)
+	}
+	if !errors.Is(err, ErrRenderBudgetExceeded) || !errors.Is(err, render.ErrCanvasTooLarge) {
+		t.Errorf("err = %v, want ErrRenderBudgetExceeded and render.ErrCanvasTooLarge", err)
 	}
 	if imgs != nil {
 		t.Errorf("got %d images alongside an error, want nil", len(imgs))

@@ -183,6 +183,23 @@ type RenderOptions struct {
 	// annotation layer. By default (false) annotations for the page are drawn as
 	// a non-destructive overlay — annotations are applied at render time (§9).
 	SkipAnnotations bool
+
+	// MaxPaintPixels bounds the raster work of one page render, in pixel visits
+	// (fills, strokes, images, glyphs, and the annotation overlay; overdraw
+	// counts every time). 0 = default: 32 × the page's canvas pixels, clamped to
+	// [16 Mi, 1 Gi]. < 0 = unlimited (unsafe for untrusted input). A positive
+	// value is an absolute limit, not scaled by DPI. Exceeding it returns
+	// ErrRenderBudgetExceeded. The default fits ordinary pages with an order of
+	// magnitude of headroom, but very dense vector pages may need more: 100k
+	// short hairline segments on a Letter page at 150 DPI fit, 1M do not (they
+	// cost about 5.5× the default).
+	MaxPaintPixels int64
+
+	// MaxOperators bounds the interpreter steps of one page render: content
+	// operators at every Form XObject depth plus every glyph shown. 0 = default
+	// (8 Mi); < 0 = unlimited (unsafe for untrusted input). Exceeding it
+	// returns ErrRenderBudgetExceeded.
+	MaxOperators int64
 }
 
 // ExtractOptions controls text/table extraction.

@@ -31,6 +31,14 @@ var (
 	// ErrPageNotFound — the page index is outside [0, PageCount).
 	ErrPageNotFound = errors.New("fluxdocs: page not found")
 
+	// ErrRenderBudgetExceeded — a page render hit a resource limit: raster
+	// work, interpreter steps, image samples, content bytes, decoded bytes,
+	// path size, or the canvas-size cap (RenderOptions.MaxPaintPixels / MaxOperators; SECURITY.md
+	// §2). It is a deterministic property of the document and options, so
+	// retrying does not help: raise the limit or reject the document. A context
+	// deadline is NOT this error; it stays context.DeadlineExceeded.
+	ErrRenderBudgetExceeded = errors.New("fluxdocs: render budget exceeded")
+
 	// ErrInvalidPageOrder — a page-organization argument is malformed: a Reorder
 	// permutation of the wrong length or with a duplicate/missing index, or a
 	// Rotate angle that is not a multiple of 90 degrees. An out-of-range page
@@ -79,7 +87,8 @@ var (
 	// still terminate the process. The concrete error is an
 	// *InternalError naming the operation (errors.As). Every entry point that
 	// parses, renders, extracts from, or rebuilds a document reports panics this
-	// way: OpenBytes/OpenDocument, RenderPage, RenderAllPages, the extraction,
+	// way: OpenBytes/OpenDocument, RenderPage, RenderAllPages (and their Context
+	// variants), the extraction,
 	// form, redaction, flatten, watermark, PDF/A, signing, and Merge/Split/Save
 	// operations.
 	ErrInternal = errors.New("fluxdocs: internal error")

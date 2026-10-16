@@ -574,6 +574,12 @@ type RenderOptions struct {
 	Format      string // "png" | "jpeg" | "svg"
 	PageRange   []int  // empty = all pages
 	Quality     int    // 1-100, applies to jpeg
+
+	// Per-page render budget (SECURITY.md §2; design: docs/design/render-budget.md).
+	// 0 = default, < 0 = unlimited (unsafe for untrusted input), > 0 = absolute limit.
+	MaxPaintPixels int64 // raster work in pixel visits; default 32 × canvas px, clamped to [16 Mi, 1 Gi];
+	                     // very dense vector pages (≈ 1M stroke segments) may need a higher limit
+	MaxOperators   int64 // content operators (all form depths) + glyphs shown; default 8 Mi
 }
 
 type ExtractOptions struct {
@@ -645,7 +651,9 @@ func main() {
 doc.GetPage(index int) (*Page, error)
 doc.GetPageCount() int
 doc.RenderPage(index int, opts RenderOptions) ([]byte, error)
+doc.RenderPageContext(ctx context.Context, index int, opts RenderOptions) ([]byte, error)
 doc.RenderAllPages(opts RenderOptions) ([][]byte, error)
+doc.RenderAllPagesContext(ctx context.Context, opts RenderOptions) ([][]byte, error)
 doc.Merge(other *Document) (*Document, error)
 doc.Split(pageRanges [][2]int) ([]*Document, error)
 doc.Rotate(pageIndex int, degrees int) error
@@ -654,6 +662,14 @@ doc.Save(path string) error
 doc.SaveTo(w io.Writer) error
 doc.Close() error
 ```
+
+`RenderPage` / `RenderAllPages` are `RenderPageContext` / `RenderAllPagesContext`
+with `context.Background()`. Every page render runs under the per-page budget in
+`RenderOptions` (on by default). Exceeding the budget or the canvas-size cap
+returns `ErrRenderBudgetExceeded`. A done `ctx` returns its error
+(`context.DeadlineExceeded` / `context.Canceled`). In both cases no partial image
+is returned and `OnPageRendered` does not fire for that page. Server render paths
+(HTTP, MCP, Cloud) must call the `…Context` variants with a deadline.
 
 ### 7.3 Annotation Operations
 
@@ -1167,6 +1183,12 @@ var (
 	ErrPageNotFound      = errors.New("fluxdocs: page not found")
 	ErrEncryptedDocument = errors.New("fluxdocs: document is encrypted")
 	ErrInvalidPDF        = errors.New("fluxdocs: invalid PDF structure")
+
+	// A page render hit a resource limit: raster work, interpreter steps, image
+	// samples, content bytes, decoded bytes, path size, or the canvas-size cap. It is a
+	// deterministic property of the document and options, so retrying does not
+	// help. A context deadline is NOT this error (it stays context.DeadlineExceeded).
+	ErrRenderBudgetExceeded = errors.New("fluxdocs: render budget exceeded")
 )
 ```
 
@@ -1522,10 +1544,48 @@ state changes with operator order), rendering a single page cannot be
 parallelized internally — but **across pages** it is fully independent, which is
 where the goroutine pool shines (see 13.3).
 
+**Render budget (SECURITY.md §2):** the content stream is untrusted, so the loop
+above runs under a per-page budget (design: `docs/design/render-budget.md`).
+
+- **What is charged:**
+  - raster work (pixel visits and scanline edge visits, charged per row, never
+    per pixel);
+  - interpreter steps (operators at every Form XObject depth, plus glyphs shown);
+  - internal caps on decoded image samples, decoded content bytes, bytes
+    decoded for images and fonts beyond their samples (every decode is capped
+    at what is left, so a Flate bomb behind a 1×1 image re-decoded on each `Do`
+    is bounded), and current path points.
+- **Graphics-state stack:** `q` nesting is capped at 1024 saved states. Past
+  the cap a `q` is counted, not saved, and its matching `Q` is swallowed, so a
+  flood of `q` cannot exhaust memory.
+- **On a trip:** the first trip is sticky. It stops the operator loop and every
+  paint routine at the next row or operator. The page fails with
+  `ErrRenderBudgetExceeded`; nothing is encoded.
+- **Context:** the render polls `ctx` every 2^20 work units or 4096 steps. The
+  poll checks `ctx.Err()` and compares `time.Now()` with `ctx.Deadline()`. The
+  clock check is required under WASM, where a synchronous JS→Go call never yields
+  to the timer goroutine.
+- **Calibration:** each paint routine is charged per call, per row, and per
+  pixel in units calibrated to cost about one pixel visit each (a fill row with
+  k crossings is charged k·log k for its sort). The default leaves an order of
+  magnitude of headroom for ordinary pages, but very dense vector pages may need
+  a higher `MaxPaintPixels`: 100k short hairline segments on a Letter page at
+  150 DPI use about half the default, 1M segments about 5.5× it.
+- **Not yet covered:** tokenizing the content stream (`ScanContent`) runs before
+  the budget is consulted, and a page's `/Contents` array is concatenated
+  without a total cap. Both are bounded only by the per-stream decode cap
+  (256 MiB); tracked as R1/R2 in `docs/design/render-budget.md` §9.
+
 ### 13.3 Parallel Multi-Page Rendering (a Go advantage)
 
 ```go
-func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
+// RenderAllPages(opts) is RenderAllPagesContext(context.Background(), opts).
+func (d *Document) RenderAllPagesContext(parent context.Context, opts RenderOptions) ([][]byte, error) {
+	// The first page error cancels the rest of the batch, so a hostile N-page file
+	// costs about NumCPU × the per-page budget, not N × budget.
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+
 	results := make([][]byte, d.PageCount)
 	errs := make([]error, d.PageCount)
 
@@ -1539,22 +1599,32 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			img, err := d.RenderPage(idx, opts)
+			img, err := d.RenderPageContext(ctx, idx, opts) // returns at once if ctx is done
 			results[idx] = img
 			errs[idx] = err
+			if err != nil {
+				cancel(errBatchAborted) // unexported sentinel: "aborted by another page"
+			}
 		}(i)
 	}
 
 	wg.Wait()
 
-	for _, err := range errs {
-		if err != nil {
+	if err := parent.Err(); err != nil {
+		return nil, parentError(parent) // the caller's deadline/cancel wins; errors.Is matches ctx.Err() and the cause
+	}
+	for _, err := range errs { // lowest-index root cause, never the internal abort
+		if err != nil && !errors.Is(err, errBatchAborted) {
 			return nil, err
 		}
 	}
 	return results, nil
 }
 ```
+
+The batch fails as a whole: on any error the results are `nil`. Pages that
+finished before the failure may already have fired `OnPageRendered`; the failing
+page never does.
 
 This is where Go has a natural advantage over Node.js (which needs the more
 complex Worker Threads) or Python (whose GIL limits true CPU-bound parallelism).

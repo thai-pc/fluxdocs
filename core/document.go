@@ -44,7 +44,10 @@ func (d *Document) GetPage(index int) (*Page, error) {
 }
 
 // RenderPage renders one page to a buffer in opts.Format ("png"|"jpeg"; "svg"
-// is not yet supported and returns render.ErrUnsupportedFormat).
+// is not yet supported and returns render.ErrUnsupportedFormat). It is
+// RenderPageContext with context.Background(): the per-page budget in opts still
+// applies, but there is no deadline. Server render paths should call
+// RenderPageContext with one.
 //
 // Wave 1 rasterizes vector graphics and text glyphs from embedded TrueType/CFF
 // fonts; image XObjects, Type1 fonts, and non-embedded fonts are not yet drawn
@@ -54,12 +57,34 @@ func (d *Document) GetPage(index int) (*Page, error) {
 // overlay on top of the content (§9); set opts.SkipAnnotations to render the
 // bare page. The source PDF is never modified.
 //
-// Returns the encoded image bytes, ErrPageNotFound if index is out of range, a
-// render error, or ErrInternal (an *InternalError carrying the page index) if
-// rendering panicked. The OnPageRendered callback runs after rendering, outside
-// that recovery: a panic in the caller's callback propagates to the caller.
+// Returns the encoded image bytes, ErrPageNotFound if index is out of range,
+// ErrRenderBudgetExceeded if the render exceeds its budget or the canvas-size
+// cap, another render error, or ErrInternal (an *InternalError carrying the page
+// index) if rendering panicked. The OnPageRendered callback runs after
+// rendering, outside that recovery: a panic in the caller's callback propagates
+// to the caller.
 func (d *Document) RenderPage(index int, opts RenderOptions) ([]byte, error) {
-	img, err := d.renderPage(index, opts)
+	return d.RenderPageContext(context.Background(), index, opts)
+}
+
+// RenderPageContext is RenderPage under ctx. The render polls ctx every 2^20
+// raster-work units or 4096 interpreter steps and also compares the clock with
+// ctx's deadline (the only check that fires under js/wasm, where a synchronous
+// call never yields to the timer goroutine), so it stops within about one poll
+// quantum of a cancel or deadline.
+//
+// Returns the same results as RenderPage, plus the ctx error when ctx is done
+// before or during the render: errors.Is(err, context.DeadlineExceeded) or
+// errors.Is(err, context.Canceled) holds, and the error is NOT
+// ErrRenderBudgetExceeded (a deadline depends on load and may pass on retry; a
+// budget trip is a property of the document). On any error the bytes are nil (no
+// partial image) and OnPageRendered does not fire. A nil ctx is treated as
+// context.Background().
+func (d *Document) RenderPageContext(ctx context.Context, index int, opts RenderOptions) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	img, err := d.renderPage(ctx, index, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -69,10 +94,10 @@ func (d *Document) RenderPage(index int, opts RenderOptions) ([]byte, error) {
 	return img, nil
 }
 
-// renderPage is RenderPage without the OnPageRendered callback: the guarded
-// render of one page, so a recovered panic is attributed to FluxDocs only when
-// FluxDocs code raised it.
-func (d *Document) renderPage(index int, opts RenderOptions) (_ []byte, err error) {
+// renderPage is RenderPageContext without the OnPageRendered callback: the
+// guarded render of one page, so a recovered panic is attributed to FluxDocs
+// only when FluxDocs code raised it.
+func (d *Document) renderPage(ctx context.Context, index int, opts RenderOptions) (_ []byte, err error) {
 	defer guard("RenderPage", index, &err)
 	if index < 0 || index >= len(d.Pages) {
 		return nil, ErrPageNotFound
@@ -88,12 +113,18 @@ func (d *Document) renderPage(index int, opts RenderOptions) (_ []byte, err erro
 		}
 	}
 	img, err := render.Page(d.resolver, d.pageInfos[index], render.Options{
-		DPI:         opts.DPI,
-		Format:      opts.Format,
-		Quality:     opts.Quality,
-		Annotations: overlay,
+		DPI:            opts.DPI,
+		Format:         opts.Format,
+		Quality:        opts.Quality,
+		Annotations:    overlay,
+		MaxPaintPixels: opts.MaxPaintPixels,
+		MaxOperators:   opts.MaxOperators,
+		Context:        ctx,
 	})
 	if err != nil {
+		if errors.Is(err, render.ErrBudgetExceeded) || errors.Is(err, render.ErrCanvasTooLarge) {
+			return nil, fmt.Errorf("%w: page %d: %w", ErrRenderBudgetExceeded, index, err)
+		}
 		return nil, err
 	}
 	return img, nil
@@ -136,16 +167,49 @@ func renderAnnotations(anns []Annotation) []render.Annotation {
 
 // RenderAllPages renders every page in parallel via a goroutine pool bounded by
 // runtime.NumCPU() (§13.3). Each page is independent — a natural advantage of
-// Go over single-threaded JS.
-//
-// Returns one buffer per page in order, or the first error encountered in page
-// order. A page whose rendering panics fails with ErrInternal (an
-// *InternalError carrying its index) like any other page error; the other
-// workers and the process are unaffected. OnPageRendered runs on the worker
-// goroutines; if it panics, the first such panic is re-raised on the calling
-// goroutine once every worker has finished, so a caller bug surfaces where the
-// caller can recover it instead of killing the process from a worker.
+// Go over single-threaded JS. It is RenderAllPagesContext with
+// context.Background(); see that method for the results and error contract.
 func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
+	return d.RenderAllPagesContext(context.Background(), opts)
+}
+
+// errBatchAborted is the cancellation cause RenderAllPagesContext gives the
+// pages still running or waiting when another page fails. It is internal: the
+// batch never returns it, it returns the failure that caused it.
+var errBatchAborted = errors.New("fluxdocs: render batch aborted by another page's error")
+
+// RenderAllPagesContext renders every page in parallel under ctx, each page with
+// its own budget from opts, via a goroutine pool bounded by runtime.NumCPU()
+// (§13.3).
+//
+// Returns one buffer per page in order. The batch fails as a whole: on any error
+// the result is nil, and the first failure cancels the pages still running or
+// waiting, so a hostile N-page document costs about NumCPU × the per-page
+// budget, not N × it. Pages that finished before the failure may already have
+// fired OnPageRendered; a failed page never does. The error is, in order:
+//   - ctx's error, if ctx is done when the batch ends (the caller's deadline or
+//     cancel wins, even when every page had already rendered: the results are
+//     then discarded). It matches context.Canceled or context.DeadlineExceeded
+//     with errors.Is, and also the cause given to context.WithCancelCause /
+//     WithTimeoutCause when there is a distinct one;
+//   - otherwise the lowest-index page error that is a root cause (e.g.
+//     ErrRenderBudgetExceeded or ErrInternal), never the internal cancellation
+//     of the pages it aborted.
+//
+// A page whose rendering panics fails with ErrInternal (an *InternalError
+// carrying its index) like any other page error; the other workers and the
+// process are unaffected. OnPageRendered runs on the worker goroutines; if it
+// panics, the first such panic is re-raised on the calling goroutine once every
+// worker has finished, so a caller bug surfaces where the caller can recover it
+// instead of killing the process from a worker. A nil ctx is treated as
+// context.Background().
+func (d *Document) RenderAllPagesContext(parent context.Context, opts RenderOptions) ([][]byte, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+
 	results := make([][]byte, d.PageCount)
 	errs := make([]error, d.PageCount)
 
@@ -162,12 +226,19 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			// Runs first (defers are LIFO), so the page's error is recorded
-			// before the slot is released and Wait returns.
+			// Defers run LIFO: guard records a panic as the page's error first,
+			// then any page error cancels the rest of the batch.
+			defer func() {
+				if errs[idx] != nil {
+					cancel(errBatchAborted)
+				}
+			}()
 			defer guard("RenderAllPages", idx, &errs[idx])
 			injectTestPanic("RenderAllPages", idx)
 
-			img, err := d.renderPage(idx, opts)
+			// A page that waited for its slot while the batch failed or ctx
+			// ended starts no work: render.Page returns the ctx error at once.
+			img, err := d.renderPage(ctx, idx, opts)
 			results[idx] = img
 			errs[idx] = err
 			if err == nil && d.onPageRendered != nil {
@@ -187,12 +258,37 @@ func (d *Document) RenderAllPages(opts RenderOptions) ([][]byte, error) {
 		panic(cbPanic) // the caller's callback panicked: re-raise on its goroutine
 	}
 
+	if parent.Err() != nil {
+		return nil, parentError(parent)
+	}
+	var first error
 	for _, err := range errs {
-		if err != nil {
-			return nil, err
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, errBatchAborted) {
+			return nil, err // lowest-index root cause
+		}
+		if first == nil {
+			first = err
 		}
 	}
+	if first != nil {
+		return nil, first // unreachable in practice: an abort always has a root cause
+	}
 	return results, nil
+}
+
+// parentError returns a done ctx's error for RenderAllPagesContext: ctx.Err(),
+// wrapped together with the cancel cause when the canceler supplied a distinct
+// one, so errors.Is matches context.Canceled / context.DeadlineExceeded and the
+// cause alike (as RenderPageContext's errors do).
+func parentError(ctx context.Context) error {
+	err := ctx.Err()
+	if cause := context.Cause(ctx); cause != nil && cause != err {
+		return fmt.Errorf("fluxdocs: %w: %w", err, cause)
+	}
+	return err
 }
 
 // Merge appends other's pages after d's pages and returns a new document; d and
