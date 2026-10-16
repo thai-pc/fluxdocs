@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -21,26 +22,59 @@ const maxDecoded = 256 << 20
 // Returns the decoded bytes, or an error if a filter is unsupported or decoding
 // fails (including exceeding maxDecoded).
 func DecodeStream(s *Stream) ([]byte, error) {
+	data, _, err := DecodeStreamLimit(s, math.MaxInt64)
+	return data, err
+}
+
+// ErrDecodeLimit is returned (wrapped) by DecodeStreamLimit when the filters
+// would produce more than the caller's limit.
+var ErrDecodeLimit = errors.New("parse: decoded stream exceeds the caller's limit")
+
+// DecodeStreamLimit is DecodeStream for a caller that meters decode work, such
+// as the renderer's per-page budget, which decodes the same image or form on
+// every Do. It stops as soon as the filters have produced more than limit
+// bytes in total and returns an error wrapping ErrDecodeLimit, so one call
+// never inflates past what the caller has left. When everything the filters
+// output fits within the limit — counting every stage and every inflate
+// attempt, a failed zlib attempt before the raw-DEFLATE fallback included —
+// its data and error are exactly DecodeStream's.
+//
+// produced counts every byte the filters output, the intermediate stages of a
+// chain and an inflate attempt that failed part-way included — the work done —
+// whether or not err is nil. The allowance is shared by all stages and
+// attempts, so produced is at most limit+1 in total.
+func DecodeStreamLimit(s *Stream, limit int64) (data []byte, produced int64, err error) {
 	filters := nameList(s.Dict["Filter"])
-	data := s.Raw
+	data = s.Raw
+	lim := &decodeLimit{left: limit}
 
 	for i, f := range filters {
 		switch f {
 		case "FlateDecode", "Fl":
-			dec, err := flateDecode(data)
+			dec, err := flateDecode(data, lim)
 			if err != nil {
-				return nil, fmt.Errorf("%w: FlateDecode: %v", errLex, err)
+				if errors.Is(err, ErrDecodeLimit) {
+					return nil, lim.produced, err
+				}
+				return nil, lim.produced, fmt.Errorf("%w: FlateDecode: %v", errLex, err)
 			}
 			dec, err = applyPredictor(dec, parmsAt(s.Dict["DecodeParms"], i))
 			if err != nil {
-				return nil, err
+				return nil, lim.produced, err
 			}
 			data = dec
 		default:
-			return nil, fmt.Errorf("%w: unsupported filter /%s", errLex, f)
+			return nil, lim.produced, fmt.Errorf("%w: unsupported filter /%s", errLex, f)
 		}
 	}
-	return data, nil
+	return data, lim.produced, nil
+}
+
+// decodeLimit tracks DecodeStreamLimit's output allowance across filter stages
+// and inflate attempts.
+type decodeLimit struct {
+	left     int64 // bytes still allowed; < 0 once exceeded
+	produced int64 // bytes output so far
 }
 
 // nameList normalizes a /Filter (or similar) entry that may be a single Name or
@@ -81,13 +115,15 @@ func parmsAt(o Object, i int) Dict {
 }
 
 // flateDecode inflates zlib- or raw-deflate-compressed data, capped at
-// maxDecoded bytes.
-func flateDecode(data []byte) ([]byte, error) {
-	if out, err := inflate(zlibReader(data)); err == nil {
-		return out, nil
+// maxDecoded bytes and at lim. Exceeding lim ends the decode: it does not fall
+// back to raw DEFLATE.
+func flateDecode(data []byte, lim *decodeLimit) ([]byte, error) {
+	out, err := inflate(zlibReader(data), lim)
+	if err == nil || errors.Is(err, ErrDecodeLimit) {
+		return out, err
 	}
 	// Some producers omit the zlib header; fall back to raw DEFLATE.
-	return inflate(flate.NewReader(bytes.NewReader(data)))
+	return inflate(flate.NewReader(bytes.NewReader(data)), lim)
 }
 
 func zlibReader(data []byte) io.ReadCloser {
@@ -98,9 +134,21 @@ func zlibReader(data []byte) io.ReadCloser {
 	return zr
 }
 
-func inflate(rc io.ReadCloser) ([]byte, error) {
+// inflate reads rc to the end, up to maxDecoded bytes and lim's allowance,
+// charging what it read to lim (also when the read fails part-way).
+func inflate(rc io.ReadCloser, lim *decodeLimit) ([]byte, error) {
 	defer rc.Close()
-	out, err := io.ReadAll(io.LimitReader(rc, maxDecoded+1))
+	n := int64(maxDecoded + 1)
+	capped := lim.left < maxDecoded
+	if capped {
+		n = max(lim.left, 0) + 1
+	}
+	out, err := io.ReadAll(io.LimitReader(rc, n))
+	lim.produced += int64(len(out))
+	lim.left -= int64(len(out))
+	if capped && int64(len(out)) == n {
+		return nil, fmt.Errorf("%w: more than %d bytes", ErrDecodeLimit, n-1)
+	}
 	if err != nil {
 		return nil, err
 	}

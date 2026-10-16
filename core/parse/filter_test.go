@@ -2,6 +2,8 @@ package parse
 
 import (
 	"bytes"
+	"compress/flate"
+	"errors"
 	"math"
 	"testing"
 )
@@ -234,5 +236,66 @@ func TestParmInt_ClampsBeforeNarrowing(t *testing.T) {
 				t.Errorf("parmInt = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDecodeStreamLimit checks the metered decode: within the limit it returns
+// exactly DecodeStream's data and error; past it, ErrDecodeLimit after at most
+// limit+1 bytes, with no raw-DEFLATE retry; produced counts every byte the
+// filters output, chain stages and a part-way failure included.
+func TestDecodeStreamLimit(t *testing.T) {
+	payload := bytes.Repeat([]byte("abcdefgh"), 1<<14) // 128 KiB
+	flate1 := zlibBytes(payload)
+	flate2 := zlibBytes(flate1) // [Fl Fl]: the outer stage outputs flate1
+	var raw bytes.Buffer        // raw DEFLATE, no zlib header: the fallback path
+	fw, _ := flate.NewWriter(&raw, flate.BestCompression)
+	fw.Write(payload)
+	fw.Close()
+	corrupt := append([]byte(nil), flate1...)
+	corrupt[len(corrupt)/2] ^= 0xff // fails part-way, after producing some bytes
+
+	one := Dict{"Filter": Name("FlateDecode")}
+	two := Dict{"Filter": Array{Name("FlateDecode"), Name("FlateDecode")}}
+	n := int64(len(payload))
+	tests := []struct {
+		name         string
+		st           *Stream
+		limit        int64
+		wantLimit    bool
+		wantProduced int64 // -1: only bounds are checked
+	}{
+		{"unfiltered", &Stream{Dict: Dict{}, Raw: payload}, 0, false, 0},
+		{"flate at the limit", &Stream{Dict: one, Raw: flate1}, n, false, n},
+		{"flate one under", &Stream{Dict: one, Raw: flate1}, n - 1, true, n},
+		{"flate unlimited", &Stream{Dict: one, Raw: flate1}, math.MaxInt64, false, n},
+		{"chain counts both stages", &Stream{Dict: two, Raw: flate2}, math.MaxInt64, false, int64(len(flate1)) + n},
+		{"chain limit spans stages", &Stream{Dict: two, Raw: flate2}, n, true, n + 1},
+		{"raw DEFLATE fallback", &Stream{Dict: one, Raw: raw.Bytes()}, n, false, n},
+		{"raw DEFLATE past the limit", &Stream{Dict: one, Raw: raw.Bytes()}, 100, true, 101},
+		{"part-way failure is counted", &Stream{Dict: one, Raw: corrupt}, math.MaxInt64, false, -1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data, produced, err := DecodeStreamLimit(tc.st, tc.limit)
+			if tc.wantLimit {
+				if !errors.Is(err, ErrDecodeLimit) || data != nil {
+					t.Fatalf("err = %v (%d bytes), want ErrDecodeLimit and no data", err, len(data))
+				}
+			} else {
+				wantData, wantErr := DecodeStream(tc.st)
+				if !bytes.Equal(data, wantData) || (err == nil) != (wantErr == nil) {
+					t.Fatalf("got %d bytes, err %v; DecodeStream gives %d bytes, err %v", len(data), err, len(wantData), wantErr)
+				}
+			}
+			if tc.wantProduced >= 0 && produced != tc.wantProduced {
+				t.Errorf("produced = %d, want %d", produced, tc.wantProduced)
+			}
+		})
+	}
+
+	// A stream that fails part-way still reports the work it did.
+	_, produced, err := DecodeStreamLimit(&Stream{Dict: one, Raw: corrupt}, math.MaxInt64)
+	if err == nil || produced == 0 {
+		t.Errorf("corrupt stream: err %v, produced %d; want an error after producing bytes", err, produced)
 	}
 }
