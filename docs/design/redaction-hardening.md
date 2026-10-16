@@ -1,7 +1,8 @@
 # Design: redaction hardening (one model instead of per-leak patches)
 
-Status: design (docs only); Phase 1 batch A in review. Base: `master` at
-446eaea (design). Batch A baselines: 71de860.
+Status: design; Phase 1 batch A landed (cbf7348), batch B (steps 1.3–1.7)
+in review. Base: `master` at 446eaea (design). Batch A baselines: 71de860;
+batch B baselines: cbf7348.
 Tier: **Pro** for the redaction engine (`core/docops/redact`, `core/redact.go`,
 `core/pii.go`). It also touches **Core (MIT)** code in `core/parse` (strict
 scanner, copier) and a new shared font model, which Core callers (render,
@@ -75,6 +76,29 @@ were recorded at **71de860** (HEAD at the time), not 446eaea.
 | C9 | Corpus coverage. `scratchpad/r2/list.txt` is mostly icons: 13 inline images and 21 stream joins in 2,598 pages, all accepted. A text-heavy corpus is needed to judge the D1-A refusal rate | §12.4, §13 |
 | C10 | Suggestion, **not decided**: the *lenient* scanner (render, extract) should also use the exact inline-image end where it can be computed. In `ii_tight_EI`, gs renders text that our renderer and extractor hide | §13 Q1, Phase 2 candidates |
 | C11 | N5 needed minimal wiring in 1.2, not later: batch A wired `core/redact.go` `redactionContent` to use `PageContentSegments` + `ScanContentStrict` when the page has joins | §11 step 1.2 |
+
+## Design corrections from batch B implementation (2026-10-16)
+
+Batch B (steps 1.3–1.7) and its go-reviewer round found these. Baselines were
+recorded at **cbf7348**. Measurements: 3,100 pages (the 735-file macOS list
+plus 23 generated text-heavy files) strict-scan the same at cbf7348 and after
+C12–C14; the regression outcomes and the extract/render hashes are identical.
+
+| # | Correction | Applied in |
+|---|---|---|
+| C12 | **Numeric operand types.** Strict scanning requires numbers for every operator whose operands are numbers (`cm`, `Tm`, `Td`, `TD`, `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`, `w`, `J`, `j`, `M`, `i`, `d0`, `d1`, path construction, `g G rg RG k K`). Ghostscript ignores an operator with a wrong-type operand; reading it as 0 placed text elsewhere (`(x) 0 0 1 200 100 Tm`). A mismatch is `content_ambiguous` | §5.1 |
+| C13 | **Text-object rules (ISO 32000-1 Figure 9).** Strict scanning refuses `q`, `Q`, `cm` and `BT` inside BT…ET, and the text-showing and text-positioning operators outside it (`content_ambiguous`). Ghostscript saves and restores the text matrices with `q`/`Q`, ignores `cm` until ET, and starts text shown outside a text object from the identity matrix; our model did none of these | §5.1 |
+| C14 | **Font candidates are capped.** When scopes bind a `Tf`/`gs` name differently, the text model keeps every font a reader may select (readings and boxes cover each). More than 8 candidates is `budget_exceeded`, not a collapse to "no font", which would make `RedactText` silently miss text (F3). Building the readings is charged to `maxRedactOpVisits` | §6.2, §6.4 |
+| C15 | **Readings.** A run matches if any reading matches: per candidate font the `/ToUnicode` text as `ExtractText` reads it (strings at any TJ depth), the `/Differences` glyph-name reading, and for simple fonts a one-byte-per-code reading (`/ToUnicode` lookup of the single byte, else glyph name, else Latin-1); extraction's own reading with TJ word gaps; and the raw bytes as Latin-1 (the behaviour before 1.5). A simple font whose `/ToUnicode` declares two-byte codes otherwise read as nothing | §5.3, §6.11 |
+| C16 | **NFKC and the skeleton move out of 1.5 into 1.13.** Matching in 1.5 does not need them; `golang.org/x/text` is not yet a direct dependency. Glyph-name ligatures (`/fi`) read as their letters in the `/Differences` reading; a `/ToUnicode` mapping to U+FB01 still needs NFKC (`lig_fi`) | §6.11, §11 steps 1.5, 1.13 |
+| C17 | **Match rects are display only (S1).** `RedactText` rects are the em vertical extent around the run's pen positions and are only painted; matched runs are removed by their span marks. Only `RedactArea` rects are removal regions, intersected with boxes that use `/FontBBox` too. Using the `/FontBBox` match box as a region removed the lines above and below | §5.4, §5.5 |
+| C18 | **Quote operators.** Removing `'` or `"` keeps their side effects: `T*`, and `aw Tw ac Tc T*` for `"` (operand bytes copied), so later text keeps its line | §6.8 |
+| C19 | **Widths (1.7 stopgap).** fontmodel v1 already carries the §8 "v2" metrics as over-approximations: `/Widths`, `/W`, `/DW`, `/FontBBox`, the Type 3 `/FontMatrix`, WMode. A Type 0 font whose CIDs are unknown (non-Identity encoding) advances by the hull of 0, 1.1 em, `/DW` and every `/W`; a simple font with an embedded program and no `/Widths`, a Type 0 font whose `/W` cannot be read to its end, and a Type 3 font without `/FontMatrix`/`/FontBBox` are unbounded (their runs meet every region). Type 3 advances also cover each glyph procedure's `d0`/`d1` width, which Ghostscript uses instead of `/Widths` | §5.3, §6.6, §8 |
+| C20 | **`PageSource.ReplaceResources` is pulled forward from 2.3 into 1.6**: stripping a named `/Properties` entry needs a page-private resource copy, and the original must not be written. A matched entry still reachable through another reference (an alias, a form's resources) survives until resource GC (1.9) and the verifier (1.12): rows `actualtext_alias`, `actualtext_shared_form` | §5.5, §6.7 |
+| C21 | **Inline colour-space scopes.** `InlineColorSpace` resolves a name only in the unit's innermost scope; a name only an outer scope defines refuses (readers disagree on the fallback). An abbreviation (G, RGB, CMYK) defined anywhere refuses; a family name (`I`, `Indexed`, …) never resolves | §5.1, §6.1 |
+| C22 | **Non-finite match rects.** A matched run whose box overflowed is returned (and painted) as the page's MediaBox, never as NaN/Inf | §6.5 |
+| C23 | **Walker.** It lives in `core/docops/redact` (`walk.go`), one interpreter with the page's text model. A memoized revisit costs one operator visit (units are check-only in Phase 1). Tiling patterns are reached from the page's scopes and each unit's *own* `/Resources`. A refusal names the innermost unit that shows text. An untyped XObject is a form unless it has `/Width`, `/Height` and no `/BBox` | §5.2, §6.2–6.4 |
+| C24 | **Interim refusal type.** Until 1.8, refusals are `*redact.RefusalError{Reason, Detail}` with a typed `redact.Reason`; `form_text` and `unsupported_xobject` match `redact.ErrFormXObjectText`. Decision D14 strips only the matched key; stripping on area redaction is D7 (1.10) | §9 P1, §11 step 1.8 |
 
 ---
 
@@ -1161,7 +1185,7 @@ Batch A (in review) covers 1.0–1.2, with corrections C1–C11.
 | 1.5 | Text model and matching: Unicode via the font model, one run per TJ (elements concatenated, glyph index map kept, **strings read at any nesting depth inside the TJ operand**, `tj_nested`, C6), skeleton normalization (§6.11); span marks; closed intervals; non-finite boxes intersect everything; rect validation | N1, 5, D12, P2, P6 |
 | 1.6 | **Property-list matching (D14, moved from Phase 2):** `RedactText`/`AutoRedactPII` match `/ActualText`, `/Alt` and `/E` (inline `BDC`/`DP` dicts and page `/Properties`). A match marks the page (a property mark, even with no runs), span-marks the `BDC…EMC` runs, and strips the key. Builds the property-list rewriter (inline re-emit and page-private `/Properties` clone) | 7, D14 |
 | 1.7 | `Tc`/`Tw`/1.1 em stopgap boxes and the interval pen (§6.6, last bullet) | 6 (stopgap) |
-| 1.8 | `ErrRedactionUnsupported` + `RedactionError` + `ErrRedactionVerification` (wraps `ErrInternal`) in `core/errors.go`, rebased on render-budget's sentinels. Drop `ErrInvalidPDF` from the redaction chain; keep `redact.ErrFormXObjectText` via `Unwrap`; update the cloud (422), MCP and CLI callers. **Collapse the duplicated reason classifiers** in the leak corpus and the regression harness into `RedactionError.Reason` (C8) | 9, P1, P3, D2, D3 |
+| 1.8 | `ErrRedactionUnsupported` + `RedactionError` + `ErrRedactionVerification` (wraps `ErrInternal`) in `core/errors.go`, rebased on render-budget's sentinels. Drop `ErrInvalidPDF` from the redaction chain; keep `redact.ErrFormXObjectText` via `Unwrap`; update the cloud (422), MCP and CLI callers. **Collapse the duplicated reason classifiers** in the leak corpus and the regression harness into `RedactionError.Reason` (C8). **Engine API (batch B review):** move the engine to `core/internal/redact`; replace `redact.RefusalError`/`redact.Reason*` with `core.RedactionError` (`ErrFormXObjectText` stays reachable one more release); unexport or delete `RedactContent`, `FindTextRects` and `CheckFormXObjects` | 9, P1, P3, D2, D3 |
 | 1.9 | Builder (`core/parse/copy.go`): `Redacted` page-dict allow-list; `PageRefs` back-reference remap, **also for Merge/Split**; resource GC on marked pages (the page's own resources only; text-bearing forms are refused in Phase 1, so no COW yet) | N2, N3, N4, D11 |
 | 1.10 | D7: strip `/ActualText`, `/Alt` and `/E` on every marked page, reusing the 1.6 rewriter; collect the stripped values as needles | 7, D7 |
 | 1.11 | D5: remove image `Do`, inline images, text-free forms, painted paths and `sh` whose bbox meets a rect (§6.10 Phase 1 rules) | D5 |

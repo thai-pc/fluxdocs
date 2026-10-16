@@ -50,6 +50,14 @@ type PageSource struct {
 	// yields an empty page.
 	ReplaceContent []byte
 
+	// ReplaceResources, when non-nil, REPLACES the copied page's /Resources:
+	// the page's own /Resources entry and its inherited resources are not
+	// copied (so objects reachable only through them are not written), and
+	// this dictionary is copied in their place, its references resolved
+	// against the source as usual. Redaction uses it for a page-private copy
+	// of the resources with stripped marked-content property lists.
+	ReplaceResources Dict
+
 	// DropAnnots, when true, removes the copied page's /Annots. Redaction sets it
 	// so annotation objects that may carry the redacted text are not copied.
 	DropAnnots bool
@@ -90,14 +98,27 @@ func NewCopier(w *Writer, src *Resolver) *Copier {
 // Returns a wrapped errLex if the closure violates a copy guard or a source
 // object fails to resolve.
 func (c *Copier) CopyPage(pi PageInfo) (Reference, error) {
+	return c.copyPage(pi, nil)
+}
+
+// copyPage is CopyPage with the page's resources replaced by resources when
+// it is non-nil (PageSource.ReplaceResources).
+func (c *Copier) copyPage(pi PageInfo, resources Dict) (Reference, error) {
 	// Clone the page's own dictionary minus back-pointers, then copy its closure.
 	stripped := make(Dict, len(pi.Dict))
 	for k, v := range pi.Dict {
 		switch k {
 		case "Parent", "StructParents", "StructParent", "B":
 			continue
+		case "Resources":
+			if resources != nil {
+				continue
+			}
 		}
 		stripped[k] = v
+	}
+	if resources != nil {
+		stripped["Resources"] = resources
 	}
 
 	copied, err := c.copyValue(stripped, 0)
@@ -321,7 +342,7 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 			cp = NewCopier(w, s.Resolver)
 			copiers[s.Resolver] = cp
 		}
-		pageRef, err := cp.CopyPage(s.Page)
+		pageRef, err := cp.copyPage(s.Page, s.ReplaceResources)
 		if err != nil {
 			return nil, Reference{}, err
 		}

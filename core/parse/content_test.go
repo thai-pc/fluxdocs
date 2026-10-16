@@ -317,9 +317,9 @@ func TestScanContentSpansStrict(t *testing.T) {
 		wantErr bool
 	}{
 		{"well-formed text", "BT /F1 12 Tf 100 700 Td (Hello) Tj [(A) -250 (B)] TJ ET", false},
-		{"inline image", "q BI /W 3 /H 2 /BPC 8 /CS /G ID \x00(\xffE\x80\x10 EI Q (Text) Tj", false},
-		{"marked content dictionary", "/Span << /ActualText (x) /MCID 3 >> BDC (x) Tj EMC", false},
-		{"comments and empty array", "% hi\n[] 0 d (x) Tj % bye", false},
+		{"inline image", "q BI /W 3 /H 2 /BPC 8 /CS /G ID \x00(\xffE\x80\x10 EI Q BT (Text) Tj ET", false},
+		{"marked content dictionary", "/Span << /ActualText (x) /MCID 3 >> BDC BT (x) Tj ET EMC", false},
+		{"comments and empty array", "% hi\n[] 0 d BT (x) Tj ET % bye", false},
 		{"empty stream", "", false},
 		{"token error in TJ array", "[(SECRET) <zz>] TJ", true},
 		{"unterminated string", "(SECRET) Tj (oops", true},
@@ -336,10 +336,19 @@ func TestScanContentSpansStrict(t *testing.T) {
 		{"stream keyword after a dictionary", "<< >> stream\n(SECRET) Tj\nendstream", true},
 		{"operator inside an over-deep array", strings.Repeat("[", 300) + "(SECRET) Tj" + strings.Repeat("]", 300) + " TJ", true},
 		{"over-deep array closed by '>>'", "[" + strings.Repeat("[", 300) + strings.Repeat("]", 299) + ">>] TJ", true},
-		{"balanced over-deep TJ element", "[(SECRET) " + strings.Repeat("[", 300) + strings.Repeat("]", 300) + "] TJ", false},
+		{"balanced over-deep TJ element", "BT [(SECRET) " + strings.Repeat("[", 300) + strings.Repeat("]", 300) + "] TJ ET", false},
 		{"surplus operand", "(SECRET) 72 700 Td Tj", true},
 		{"unknown operator with an operand", "(SECRET) Xq Tj", true},
-		{"unknown operator without operands", "Xq BX Yq EX (x) Tj", false},
+		{"unknown operator without operands", "Xq BX Yq EX BT (x) Tj ET", false},
+		{"string operand of a numeric operator", "BT 20 Tc (x) Tc (SECRET) Tj ET", true},
+		{"q inside a text object", "BT 10 700 Td q 200 0 Td Q (SECRET) Tj ET", true},
+		{"Q inside a text object", "q BT Q (SECRET) Tj ET", true},
+		{"q and Q around a text object", "q BT (SECRET) Tj ET Q q BT ET Q", false},
+		{"cm inside a text object", "BT 1 0 0 1 200 0 cm (SECRET) Tj ET", true},
+		{"nested text object", "BT BT (SECRET) Tj ET ET", true},
+		{"Tj outside a text object", "BT ET (SECRET) Tj", true},
+		{"Tm outside a text object", "1 0 0 1 9 9 Tm BT (SECRET) Tj ET", true},
+		{"text state outside a text object", "/F1 12 Tf 2 Tc 100 Tz 14 TL BT (x) Tj ET", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -413,6 +422,19 @@ func TestOperandsFit(t *testing.T) {
 		{"Xq", nil, true},
 		{"Xq", []Object{num}, false},
 		{"{", []Object{str}, false},
+		// Numeric operators take numbers only (B1).
+		{"Tc", []Object{str}, false},
+		{"Tz", []Object{name}, false},
+		{"Ts", []Object{str}, false},
+		{"Tc", []Object{num}, true},
+		{"cm", []Object{str, num, num, num, num, num}, false},
+		{"Tm", []Object{num, num, num, num, num, str}, false},
+		{"Td", []Object{arr, num}, false},
+		{"TD", []Object{num, name}, false},
+		{"re", []Object{num, num, num, Null{}}, false},
+		{"rg", []Object{num, num, Boolean(true)}, false},
+		{"d1", []Object{num, num, num, num, num, str}, false},
+		{"w", []Object{num}, true},
 	}
 	for _, tc := range tests {
 		if got := operandsFit(tc.op, tc.operands); got != tc.want {

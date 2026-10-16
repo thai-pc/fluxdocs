@@ -102,6 +102,10 @@ type StrictOptions struct {
 //   - an operator whose operands do not match ISO 32000-1 Annex A (operandsFit:
 //     the count, and the types of the operands that name resources or carry
 //     text; any operand on an unknown operator);
+//   - an operator ISO 32000-1 Figure 9 does not allow where it stands, when
+//     readers place text differently around it (textObjectLoss): q, Q, cm or
+//     BT inside a text object, a text-showing or text-positioning operator
+//     outside one;
 //   - an inline image inside a text object (BT … ET), or one whose
 //     dictionary, data or terminator strictInlineImage does not accept;
 //   - a token, comment or inline image that spans a join between two streams
@@ -262,6 +266,11 @@ func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
 				if strict != nil && lossErr == nil && !operandsFit(t.kw, operands) {
 					loss(opStart, "operands do not match their operator", nil)
 				}
+				if strict != nil && lossErr == nil {
+					if what := textObjectLoss(t.kw, strict.inText); what != "" {
+						loss(opStart, what, nil)
+					}
+				}
 				if strict != nil && (t.kw == "BT" || t.kw == "ET") {
 					strict.inText = t.kw == "BT"
 				}
@@ -294,6 +303,33 @@ func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
 		return nil, lossErr
 	}
 	return ops, lossErr
+}
+
+// textObjectLoss describes an operator that ISO 32000-1 Figure 9 does not
+// allow where it stands and around which readers place text differently, or
+// returns "". Inside a text object (BT … ET): q and Q (Ghostscript also saves
+// and restores the text matrices), cm (Ghostscript ignores it until ET; others
+// apply it at once) and a nested BT. Outside one: the text-showing and
+// text-positioning operators (Ghostscript starts from the identity text
+// matrix; others keep the last one). Other misplaced operators do not move
+// text, and redaction does not refuse them.
+func textObjectLoss(op string, inText bool) string {
+	if inText {
+		switch op {
+		case "q", "Q":
+			return "graphics state save or restore inside a text object"
+		case "cm":
+			return "transformation inside a text object"
+		case "BT":
+			return "text object inside a text object"
+		}
+		return ""
+	}
+	switch op {
+	case "Tj", "TJ", "'", "\"", "Td", "TD", "Tm", "T*":
+		return "text showing or positioning outside a text object"
+	}
+	return ""
 }
 
 // skipInlineImage advances past an inline image body. i points just after the

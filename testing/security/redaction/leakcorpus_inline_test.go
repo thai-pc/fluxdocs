@@ -176,5 +176,23 @@ func inlineImageCases() []leakCase {
 	refused("indexed_lookup_crlf", img("/W 1 /H 1 /BPC 8 /CS [/I /RGB 1 (ab\r\ncd)]", "a")+"\n"+show(S)) // S4
 	refused("decode_doubled_sign", img(gray+" /D [--1]", "A")+"\n"+show(S))                              // S5
 	refused("inside_text_object", "BT /F1 24 Tf 72 700 Td BI "+gray+" ID A EI "+S+" Tj ET")              // S6
+
+	// Named colour spaces, resolved through the page's resource scopes since
+	// step 1.4 (C7): a name the page defines as a device colour space is
+	// accepted; one only a /Pages ancestor defines is ambiguous (ISO readers
+	// find nothing, falling-back readers find it), and a family name such as
+	// /I is not a colour space on its own.
+	named := func(name, cs string, pagesRes string, want leakExpect) {
+		lc := leakCase{name: "inline/" + name, ops: both, want: want,
+			pdf: onePage{content: []string{img("/W 1 /H 1 /BPC 8 /CS "+cs, "A") + "\n" + show(S)},
+				res: "<< /Font << /F1 5 0 R >> /ColorSpace << /CS0 /DeviceGray /I /DeviceGray >> >>", pagesRes: pagesRes}.pdf}
+		if want == refuse {
+			lc.reason = "inline_image"
+		}
+		cases = append(cases, lc)
+	}
+	named("clean_named_cs", "/CS0", "", clean)
+	named("named_cs_ancestor_only", "/CS1", "<< /ColorSpace << /CS1 /DeviceGray >> >>", refuse)
+	named("named_cs_family_I", "/I", "", refuse)
 	return cases
 }

@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thai-pc/fluxdocs/core/docops/redact"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
@@ -52,10 +53,28 @@ type Document struct {
 	layerVisible   bool
 	layerCreatedAt time.Time
 
-	// redactions is the pending redaction plan: page index -> regions to remove.
-	// It is populated by RedactText/RedactArea and consumed (permanently) by
-	// RedactAndFlatten. Guarded by mu.
+	// redactions is the pending redaction plan's black boxes: page index ->
+	// every rect RedactText matched and RedactArea marked, painted over the
+	// page by RedactAndFlatten. Guarded by mu.
 	redactions map[int][]Rect
+
+	// redactRegions are the plan's removal regions: the RedactArea rects
+	// (normalized), whose intersecting text RedactAndFlatten removes.
+	// RedactText's rects are display only; its matches are removed by their
+	// marks (docs/design/redaction-hardening.md §5.4). Guarded by mu.
+	redactRegions map[int][]Rect
+
+	// redactMarks are the span marks of the plan, per page: operators
+	// RedactText matched, removed whatever their geometry, and property-list
+	// keys it matched, stripped (docs/design/redaction-hardening.md §5.4). A
+	// page with marks is redacted even when it has no regions. Guarded by mu.
+	redactMarks map[int][]redact.Mark
+
+	// redactNeedles are the substrings RedactText matched, per page: the
+	// needles automatic plan extension (step 1.13, §6.11) will search for;
+	// recorded now so 1.13 only adds the search. They are document text and
+	// are never logged. Guarded by mu.
+	redactNeedles map[int][]string
 
 	// redactErr, once set, marks the redaction plan as incomplete: a marking
 	// call (RedactText, AutoRedactPII) failed after its arguments were accepted,

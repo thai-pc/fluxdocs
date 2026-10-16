@@ -40,7 +40,7 @@ func TestScanContentStrict_Joins(t *testing.T) {
 		{"split after a name before a delimiter", []string{"/Span", "<< /MCID 1 >> BDC EMC"}, true},
 		{"comment ended before the join", []string{"BT %c\n", "/F1 12 Tf ET"}, true},
 		{"comment in the next stream", []string{"BT", "%c\n/F1 12 Tf ET"}, true},
-		{"empty stream between tokens", []string{"(x)", "", "Tj"}, true},
+		{"empty stream between tokens", []string{"BT (x)", "", "Tj ET"}, true},
 		{"inline image inside one stream", []string{"BI /W 1 /H 1 /BPC 8 /CS /G ID A EI", " Q"}, true},
 		{"EI merged with the next stream's operator", []string{"BI /W 1 /H 1 /BPC 8 /CS /G ID A EI", "Q"}, false},
 

@@ -1,6 +1,9 @@
 package parse
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 // TestBuildDocument_CycleTerminates is the critical security pin for the
 // reserve-before-recurse copier. The source page's /Resources references an
@@ -132,5 +135,56 @@ func TestBuildDocument_SharedObjectDedup(t *testing.T) {
 	}
 	if bf, _ := fd.GetName("BaseFont"); bf != "Helvetica" {
 		t.Errorf("copied font /BaseFont = %q, want Helvetica", bf)
+	}
+}
+
+// TestBuildDocument_ReplaceResources: a page built with ReplaceResources gets
+// those resources, and objects reachable only through its original
+// /Resources (indirect or inherited) are not written at all — redaction uses
+// it to drop a stripped property list's original from the output.
+func TestBuildDocument_ReplaceResources(t *testing.T) {
+	pdf := buildPDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Resources 4 0 R /Contents 5 0 R >>",
+		4: "<< /Font << /F1 6 0 R >> /Properties << /MC0 7 0 R >> >>",
+		5: "<< /Length 4 >>\nstream\nnoop\nendstream",
+		6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		7: "<< /ActualText (ORIGINAL-ONLY) >>",
+	}, "<< /Size 8 /Root 1 0 R >>")
+	r, err := NewResolver(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, err := r.Pages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced := Dict{"Font": Dict{"F1": Reference{Number: 6}}, "Properties": Dict{"MC0": Dict{"MCID": Integer(1)}}}
+	built, err := BuildDocument([]PageSource{{Resolver: r, Page: pages[0], ReplaceResources: replaced}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(built, []byte("ORIGINAL-ONLY")) {
+		t.Error("an object reachable only through the replaced /Resources was written")
+	}
+	r2, err := NewResolver(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages2, err := r2.Pages()
+	if err != nil || len(pages2) != 1 {
+		t.Fatalf("re-open: %d pages, %v", len(pages2), err)
+	}
+	font, ok, err := r2.ResolveDict(pages2[0].Resources["Font"])
+	if err != nil || !ok {
+		t.Fatalf("/Font = %v, %v", font, err)
+	}
+	if f, ok, _ := r2.ResolveDict(font["F1"]); !ok || f["BaseFont"] != Name("Helvetica") {
+		t.Errorf("/F1 = %v, want the copied font", f)
+	}
+	props, _, _ := r2.ResolveDict(pages2[0].Resources["Properties"])
+	if mc, _, _ := r2.ResolveDict(props["MC0"]); mc["MCID"] != Integer(1) {
+		t.Errorf("/Properties /MC0 = %v, want the replacement", mc)
 	}
 }

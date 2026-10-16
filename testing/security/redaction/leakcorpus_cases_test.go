@@ -167,6 +167,35 @@ func identityHFont() map[int]string {
 	}
 }
 
+// type0DW returns objects 6–9: a Type 0 font /F2 with the given /Encoding (a
+// name, or "9 0 R" for the embedded CMap 9 mapping codes to CIDs), a
+// descendant with /DW 3000 (three em per glyph), and an identity /ToUnicode.
+func type0DW(encoding string) map[int]string {
+	return map[int]string{
+		6: "<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding " + encoding + " /DescendantFonts [7 0 R] /ToUnicode 8 0 R >>",
+		7: "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 3000 >>",
+		8: stm("", "1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfrange <0000> <FFFF> <0000> endbfrange"),
+		9: stm("/Type /CMap /CMapName /Custom /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>",
+			"1 begincodespacerange <0000> <FFFF> endcodespacerange 1 begincidrange <0000> <FFFF> 0 endcidrange"),
+	}
+}
+
+// type3ZeroWidths returns a Type 3 font /T3 (object 6) whose /Widths are all
+// 0 while every glyph procedure's d1 sets a width of one em.
+func type3ZeroWidths() map[int]string {
+	names := []string{"S", "E", "C", "R", "T", "hyphen", "one", "two", "three", "four"}
+	m := map[int]string{}
+	procs := ""
+	for i, n := range names {
+		procs += fmt.Sprintf("/%s %d 0 R ", n, 10+i)
+		m[10+i] = stm("", "1000 0 0 0 800 800 d1 0 0 800 800 re f")
+	}
+	m[6] = "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << " + procs + ">> " +
+		"/Encoding << /Differences [45 /hyphen 49 /one /two /three /four 67 /C 69 /E 82 /R /S /T] >> /FirstChar 45 /LastChar 84 /Widths [" +
+		strings.Repeat("0 ", 40) + "] >>"
+	return m
+}
+
 // utf16Hex is s as a hex string of 2-byte codes equal to its code points.
 func utf16Hex(s string) string {
 	var b strings.Builder
@@ -220,7 +249,7 @@ func leakCases() []leakCase {
 		{name: "form_indirect_subtype", pdf: onePage{content: []string{"q /Fm1 Do Q"},
 			res:   "<< /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >>",
 			extra: map[int]string{6: textForm("/Width 1 /Height 1 /Subtype 7 0 R"), 7: "/Form"}}.pdf,
-			ops: both, want: knownLeak, closesIn: "1.4 (walker resolves an indirect /Subtype) -> refuse form_text"},
+			ops: both, want: refuse, reason: "form_text"}, // step 1.4: the walker resolves an indirect /Subtype
 		{name: "form_indirect_subtype_noWH", pdf: onePage{content: []string{"q /Fm1 Do Q"},
 			res:   "<< /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >>",
 			extra: map[int]string{6: textForm("/Subtype 7 0 R"), 7: "/Form"}}.pdf,
@@ -230,7 +259,7 @@ func leakCases() []leakCase {
 			extra: map[int]string{
 				6: stm("/Type /XObject /Subtype /Form /BBox [0 0 400 800] /Resources << /ProcSet [/PDF] >>", "/Fm2 Do"),
 				7: textForm("")}}.pdf,
-			ops: both, want: knownLeak, closesIn: "1.4 (candidate scopes fall back to page resources) -> refuse form_text"},
+			ops: both, want: refuse, reason: "form_text"}, // step 1.4: candidate scopes fall back to page resources
 		{name: "form_pages_inherited", pdf: onePage{content: []string{"q /Fm1 Do Q"}, res: "NONE",
 			pagesRes: "<< /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >>", extra: map[int]string{6: textForm("")}}.pdf,
 			ops: both, want: refuse, reason: "form_text"},
@@ -246,30 +275,33 @@ func leakCases() []leakCase {
 			res: "<< /Font << /F1 5 0 R >> /Pattern << /P1 6 0 R >> >>",
 			extra: map[int]string{6: stm("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 400 800] "+
 				"/XStep 400 /YStep 800 /Resources << /Font << /F1 5 0 R >> >>", "BT /F1 24 Tf 72 500 Td "+S+" Tj ET")}}.pdf,
-			ops: both, want: knownLeak, closesIn: "1.4 (tiling pattern route) -> refuse pattern_text"},
+			ops: both, want: refuse, reason: "pattern_text"}, // step 1.4: tiling pattern route
 		{name: "smask_text", pdf: onePage{content: []string{"/GS1 gs 0 0 0 rg 0 0 400 800 re f"},
 			res: "<< /Font << /F1 5 0 R >> /ExtGState << /GS1 << /SMask << /S /Luminosity /G 6 0 R >> >> >> >>",
 			extra: map[int]string{6: stm("/Type /XObject /Subtype /Form /BBox [0 0 400 800] /Group << /S /Transparency /CS /DeviceGray >> "+
 				"/Resources << /Font << /F1 5 0 R >> >>", "1 g BT /F1 24 Tf 72 500 Td "+S+" Tj ET")}}.pdf,
-			ops: both, want: knownLeak, closesIn: "1.4 (soft-mask group route) -> refuse softmask_text"},
+			ops: both, want: refuse, reason: "softmask_text"}, // step 1.4: soft-mask group route
 		{name: "type3_text", pdf: onePage{content: []string{"BT /T3 24 Tf 72 700 Td (a) Tj ET"},
 			res: "<< /Font << /F1 5 0 R /T3 6 0 R >> >>",
 			extra: map[int]string{
 				6: "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 7 0 R >> " +
 					"/Encoding << /Differences [97 /a] >> /FirstChar 97 /LastChar 97 /Widths [1000] /Resources << /Font << /F1 5 0 R >> >> >>",
 				7: stm("", "1000 0 0 0 1000 1000 d1 BT /F1 200 Tf 0 0 Td "+S+" Tj ET")}}.pdf,
-			ops: both, want: knownLeak, closesIn: "1.4 (Type 3 /CharProcs route) -> refuse type3_text"},
+			ops: both, want: refuse, reason: "type3_text"}, // step 1.4: Type 3 /CharProcs route
 
-		// Marked-content property text (item 7). RedactText matches only shown
-		// glyphs, so it leaves the page unmarked and D7 (strip on marked pages)
-		// does not apply; property-list matching (D14) closes the text rows.
+		// Marked-content property text (item 7). Property-list matching (D14,
+		// step 1.6) closes the text rows: RedactText matches the /ActualText,
+		// marks the page, strips the key and removes the sequence's runs. The
+		// area rows wait for D7 (strip on marked pages). Ghostscript txtwrite
+		// does not show /ActualText even in the input (gsBlind, C1); the rows
+		// model a reader whose copy/paste does (Acrobat, pdf.js).
 		{name: "actualtext", pdf: page("/Span << /ActualText " + S + " >> BDC " + show("(XXXXXXXXXXX)") + " EMC"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.6 (property-list matching, D14) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true},
 		{name: "actualtext", pdf: page("/Span << /ActualText " + S + " >> BDC " + show("(XXXXXXXXXXX)") + " EMC"),
 			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.10 (D7 strips /ActualText on marked pages) -> clean"},
 		{name: "actualtext_props", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC"},
 			res: "<< /Font << /F1 5 0 R >> /Properties << /MC0 << /ActualText " + S + " >> >> >>"}.pdf,
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.6 (property-list matching, D14) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true},
 		{name: "actualtext_props", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC"},
 			res: "<< /Font << /F1 5 0 R >> /Properties << /MC0 << /ActualText " + S + " >> >> >>"}.pdf,
 			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.10 (D7 strips named /Properties entries) -> clean"},
@@ -280,7 +312,7 @@ func leakCases() []leakCase {
 
 		// TJ, compatibility sections, quote operators, comments.
 		{name: "tj_nested", pdf: page("BT /F1 24 Tf 72 700 Td [ (A) [ " + S + " ] ] TJ ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.5 (text model must read strings nested in TJ elements) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true}, // step 1.5 (C6); gs ignores nested strings, others may not
 		{name: "tj_nested", pdf: page("BT /F1 24 Tf 72 700 Td [ (A) [ " + S + " ] ] TJ ET"),
 			ops: []leakOp{opArea}, want: clean, gsBlind: true},
 		{name: "bx_known", pdf: page("BX " + show(S) + " EX"), ops: both, want: clean},
@@ -292,17 +324,19 @@ func leakCases() []leakCase {
 		{name: "tc_spread_60Tc", pdf: page("BT /F1 24 Tf 60 Tc 10 700 Td " + S + " Tj ET"),
 			ops: []leakOp{opText}, want: clean},
 		{name: "tc_spread_60Tc", pdf: page("BT /F1 24 Tf 60 Tc 10 700 Td " + S + " Tj ET"), area: partial(300, 680, 100, 60),
-			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.7 (Tc/Tw in the glyph box, interval pen) -> clean"},
+			ops: []leakOp{opArea}, want: clean}, // step 1.7: Tc in the glyph box, interval pen
 		{name: "wide_glyphs", pdf: page("BT /F1 24 Tf 10 700 Td (WWWWWWWWWWWWWWW" + secret + ") Tj ET"),
 			area: partial(330, 680, 70, 60), ops: both, want: clean},
+		// Zero-size runs (step 1.5): a matched run is removed by span whatever
+		// its box. gs shows none of them (gsBlind, C1).
 		{name: "zero_tf", pdf: page("BT /F1 0 Tf 72 700 Td " + S + " Tj ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.5 (span marks remove matched runs whatever their box) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true},
 		{name: "zero_tf", pdf: page("BT /F1 0 Tf 72 700 Td " + S + " Tj ET"), ops: []leakOp{opArea}, want: clean, gsBlind: true},
 		{name: "zero_tz", pdf: page("BT /F1 24 Tf 0 Tz 72 700 Td " + S + " Tj ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.5 (span marks) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true},
 		{name: "zero_tz", pdf: page("BT /F1 24 Tf 0 Tz 72 700 Td " + S + " Tj ET"), ops: []leakOp{opArea}, want: clean, gsBlind: true},
 		{name: "degenerate_tm", pdf: page("BT /F1 24 Tf 0 0 0 0 72 700 Tm " + S + " Tj ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.5 (span marks) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true},
 		{name: "degenerate_tm", pdf: page("BT /F1 24 Tf 0 0 0 0 72 700 Tm " + S + " Tj ET"), ops: []leakOp{opArea}, want: clean, gsBlind: true},
 
 		// N5: a token across two /Contents streams (step 1.2).
@@ -317,6 +351,89 @@ func leakCases() []leakCase {
 		{name: "split_between_tokens", pdf: onePage{content: []string{"BT /F1 24 Tf 72 700 Td " + S, "Tj ET"}}.pdf,
 			ops: both, want: clean},
 
+		// --- batch B review (go-reviewer rvC) ---
+		// B1: a numeric operator with a non-numeric operand. Ghostscript ignores
+		// the operator; reading the operand as 0 would place the text elsewhere.
+		{name: "tc_badtype", pdf: page("BT /F1 24 Tf 20 Tc (x) Tc 10 700 Td " + S + " Tj ET"), area: partial(310, 680, 90, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "tz_badtype", pdf: page("BT /F1 24 Tf 250 Tz /x Tz 10 700 Td " + S + " Tj ET"), area: partial(310, 680, 90, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "cm_badtype", pdf: page("q 1 0 0 1 200 0 cm (x) 0 0 1 0 0 cm BT /F1 24 Tf 10 700 Td " + S + " Tj ET Q"), area: partial(220, 680, 180, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "tm_badtype", pdf: page("BT /F1 24 Tf 1 0 0 1 10 700 Tm (x) 0 0 1 200 100 Tm " + S + " Tj ET"), area: partial(0, 680, 400, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "td_badtype", pdf: page("BT /F1 24 Tf 10 700 Td [1] -600 Td " + S + " Tj ET"), area: partial(0, 680, 400, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "ts_badtype", pdf: page("BT /F1 24 Tf 10 400 Td 300 Ts (x) Ts " + S + " Tj ET"), area: partial(0, 680, 400, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		// B2 and the rest of ISO 32000-1 Figure 9: Ghostscript saves the text
+		// matrices with q, ignores cm inside BT, and starts text shown outside
+		// BT … ET from the identity matrix; we would place the text elsewhere.
+		{name: "bt_q_td", pdf: page("BT /F1 24 Tf 10 700 Td q 200 0 Td Q " + S + " Tj ET"), area: partial(0, 680, 190, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "bt_q_tj_pen", pdf: page("BT /F1 24 Tf 10 700 Td q (WWWWWWW) Tj Q " + S + " Tj ET"), area: partial(0, 680, 190, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "bt_q_tc", pdf: page("BT /F1 24 Tf 10 700 Td q 20 Tc Q " + S + " Tj ET"), area: partial(200, 680, 200, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "tm_in_q", pdf: page("BT /F1 24 Tf 1 0 0 1 10 700 Tm q 1 0 0 1 200 0 Tm Q " + S + " Tj ET"), area: partial(0, 680, 190, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "bt_cm_inside", pdf: page("BT /F1 24 Tf 1 0 0 1 10 700 Tm 1 0 0 1 200 0 cm " + S + " Tj ET"), area: partial(0, 680, 190, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "outside_bt_after_et", pdf: page("BT /F1 24 Tf 1 0 0 1 200 400 Tm ET " + S + " Tj"), area: partial(0, 0, 190, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "outside_bt_noBT", pdf: page("/F1 24 Tf 1 0 0 1 200 400 Tm " + S + " Tj"), area: partial(0, 0, 190, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "nested_bt", pdf: page("BT /F1 24 Tf 1 0 0 1 200 400 Tm BT " + S + " Tj ET ET"), area: partial(0, 0, 190, 60),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		// B4: a simple font whose /ToUnicode declares two-byte codes; extraction
+		// reads the string in pairs (no text), Ghostscript byte by byte.
+		{name: "simple_tounicode2", pdf: onePage{content: []string{"BT /F2 24 Tf 10 700 Td " + S + " Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
+				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 8 0 R >>",
+				8: stm("", "1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0000> <0041> endbfchar")}}.pdf,
+			ops: both, want: clean},
+		// /Differences glyph names: the codes read "SECRET?1234" raw, the glyph
+		// names "SECRET-1234".
+		{name: "differences_glyph_names", pdf: onePage{content: []string{"BT /F2 24 Tf 10 700 Td (SECRET\0011234) Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
+				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Differences [1 /hyphen] >> >>"}}.pdf,
+			ops: both, want: clean},
+		// S2: removing a quote operator keeps its line move, so later text stays
+		// on its own line (the region covers the secret's line only).
+		{name: "quote_layout", pdf: page("BT /F1 24 Tf 30 TL 72 700 Td (keep1) Tj 0 0 " + S + " \" (keep2) ' ET"),
+			area: partial(60, 662, 300, 30), ops: both, want: clean},
+		// S3: wide glyphs by /DW in Type 0 fonts whose CIDs are unknown (a
+		// UCS2 or an embedded encoding). Ghostscript has no font program here
+		// and shows nothing even in the input (gsBlind); readers with one
+		// advance by /DW.
+		{name: "type0_ucs2_dw", pdf: onePage{content: []string{"BT /F2 10 Tf 10 700 Td " + utf16Hex(secret) + " Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: type0DW("/UniGB-UCS2-H")}.pdf,
+			area: partial(150, 680, 250, 60), ops: []leakOp{opArea}, want: clean, gsBlind: true},
+		{name: "type0_embcmap_dw", pdf: onePage{content: []string{"BT /F2 10 Tf 10 700 Td " + utf16Hex(secret) + " Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: type0DW("9 0 R")}.pdf,
+			area: partial(150, 680, 250, 60), ops: []leakOp{opArea}, want: clean, gsBlind: true},
+		// Type 3 glyphs advance by their d1 width in Ghostscript, whatever
+		// /Widths says.
+		{name: "t3_widths_vs_d1", pdf: onePage{content: []string{"BT /T3 20 Tf 10 700 Td (SECRET-1234) Tj ET"},
+			res: "<< /Font << /T3 6 0 R >> >>", extra: type3ZeroWidths()}.pdf,
+			area: partial(100, 690, 300, 40), ops: []leakOp{opArea}, want: clean},
+		// S4: a matched /ActualText survives through another reference to the
+		// same /Properties entry (an unused alias, or a text-free form's
+		// resources): resource GC and verification close these. Ghostscript
+		// does not show /ActualText.
+		{name: "actualtext_alias", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC"},
+			res: "<< /Font << /F1 5 0 R >> /Properties << /MC0 6 0 R /MC1 6 0 R >> >>", extra: map[int]string{6: "<< /ActualText " + S + " >>"}}.pdf,
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.9 (resource GC drops the unused alias) / 1.12 (verifier) -> clean"},
+		{name: "actualtext_shared_form", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC q /Fm Do Q"},
+			res: "<< /Font << /F1 5 0 R >> /Properties 7 0 R /XObject << /Fm 8 0 R >> >>",
+			extra: map[int]string{6: "<< /ActualText " + S + " >>", 7: "<< /MC0 6 0 R >>",
+				8: stm("/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /Properties 7 0 R >>", "0 0 1 1 re f")}}.pdf,
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.9 (COW of shared /Properties) / 1.12 (verifier) -> clean"},
+		// A match split across two text objects (Phase 2 matches across
+		// operators on a line).
+		{name: "split_bt", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET BT /F1 24 Tf 177.4 700 Td (1234) Tj ET"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+
 		// --- rv5 ---
 		{name: "rv5_b1_deep_sibling", pdf: page("BT /F1 24 Tf 72 700 Td [ " + S + " " + openArrays(overDeep) + "1" + closeArrays(overDeep) + " ] TJ ET"),
 			ops: both, want: clean},
@@ -327,12 +444,12 @@ func leakCases() []leakCase {
 		// --- N1: RedactText matches raw bytes, not /ToUnicode text, per TJ element ---
 		{name: "n1_identity_h", pdf: onePage{content: []string{"BT /F2 24 Tf 72 700 Td " + utf16Hex(secret) + " Tj ET"},
 			res: "<< /Font << /F1 5 0 R /F2 6 0 R >> >>", extra: identityHFont()}.pdf,
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.5 (Unicode via the font model, D12) -> clean"},
+			ops: []leakOp{opText}, want: clean}, // step 1.5: Unicode via the font model (D12)
 		{name: "n1_identity_h", pdf: onePage{content: []string{"BT /F2 24 Tf 72 700 Td " + utf16Hex(secret) + " Tj ET"},
 			res: "<< /Font << /F1 5 0 R /F2 6 0 R >> >>", extra: identityHFont()}.pdf,
 			ops: []leakOp{opArea}, want: clean},
 		{name: "n1_kerned_tj", pdf: page("BT /F1 24 Tf 72 700 Td [(SEC) -20 (RET-1234)] TJ ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.5 (one run per TJ, elements concatenated) -> clean"},
+			ops: []leakOp{opText}, want: clean}, // step 1.5: one run per TJ, elements concatenated
 		{name: "n1_kerned_tj", pdf: page("BT /F1 24 Tf 72 700 Td [(SEC) -20 (RET-1234)] TJ ET"),
 			ops: []leakOp{opArea}, want: clean},
 
@@ -364,11 +481,11 @@ func leakCases() []leakCase {
 		// --- N6: gs /Font sets the font and size, which the scanner ignores ---
 		{name: "n6_gs_font", pdf: onePage{content: []string{"BT /GS1 gs 72 700 Td " + S + " Tj ET"},
 			res: "<< /Font << /F1 5 0 R >> /ExtGState << /GS1 << /Font [5 0 R 24] >> >> >>"}.pdf,
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.5 (span marks remove the matched zero-size run) -> clean"},
+			ops: []leakOp{opText}, want: clean}, // step 1.5: span marks
 		{name: "n6_gs_font", pdf: onePage{content: []string{"BT /GS1 gs 72 700 Td " + S + " Tj ET"},
 			res: "<< /Font << /F1 5 0 R >> /ExtGState << /GS1 << /Font [5 0 R 24] >> >> >>"}.pdf,
 			area: partial(100, 690, 200, 40), ops: []leakOp{opArea},
-			want: knownLeak, closesIn: "1.4 + 1.7 (walker reads gs /Font; boxes from its size) -> clean"},
+			want: clean}, // steps 1.4 + 1.7: gs /Font sets the font and size of the box
 
 		// --- D4: the secret elsewhere in the document (automatic extension) ---
 		{name: "d4_other_page", pdf: twoPages(show(S), "", show(S), "", nil, ""),

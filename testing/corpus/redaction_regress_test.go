@@ -53,15 +53,20 @@ var inlineImageLoss = regexp.MustCompile(`content stream: (malformed inline imag
 
 // refusalReason classifies a redaction error into the reason codes of the
 // design (§9 P1). Until core.RedactionError carries the reason (step 1.8), it
-// is derived from the error chain and the scanner's loss description, which
-// never holds document bytes.
+// is derived from the error chain — a *redact.RefusalError carries its reason
+// (form_text, pattern_text, softmask_text, type3_text, budget_exceeded,
+// unsupported_xobject) — and the scanner's loss description, which never
+// holds document bytes.
 func refusalReason(err error) string {
 	var ie *core.InternalError
+	var re *redact.RefusalError
 	switch {
 	case err == nil:
 		return "ok"
 	case errors.As(err, &ie):
 		return "internal"
+	case errors.As(err, &re):
+		return string(re.Reason)
 	case errors.Is(err, redact.ErrFormXObjectText):
 		return "form_text"
 	case inlineImageLoss.MatchString(err.Error()):

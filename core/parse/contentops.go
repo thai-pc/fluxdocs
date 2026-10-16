@@ -42,7 +42,8 @@ var fixedOperands = map[string]int{
 // count, operators whose operands could hold text are type-checked: Tj and '
 // take a string, " two numbers and a string, TJ an array, d an array and a
 // number, SC/sc one to four numbers, SCN/scn numbers optionally followed by a
-// pattern name. So are the operators that name a resource, since a viewer
+// pattern name; every other operator with numeric operands (numericOperands)
+// takes numbers only. So are the operators that name a resource, since a viewer
 // that coerces a string to a name would paint a resource the scan never looks
 // up (§7.8.3): Do, gs, sh, ri, cs, CS, MP and BMC take a name, Tf a name and a
 // number, BDC and DP a name and a property list (a dictionary, or a name in
@@ -80,7 +81,24 @@ func operandsFit(op string, operands []Object) bool {
 	if !known {
 		return n == 0
 	}
+	if numericOperands[op] && !allNumbers(operands) {
+		return false
+	}
 	return n == want
+}
+
+// numericOperands are the fixed-arity operators whose every operand is a
+// number (Annex A). A reader that meets another type ignores the operator
+// (Ghostscript does), while a scan reading it as 0 would place text elsewhere
+// than that reader shows it: "(x) 0 0 1 200 100 Tm" moves no text for the
+// reader, but would move it out of a region for us.
+var numericOperands = map[string]bool{
+	"w": true, "J": true, "j": true, "M": true, "i": true, "cm": true,
+	"m": true, "l": true, "c": true, "v": true, "y": true, "re": true,
+	"Tc": true, "Tw": true, "Tz": true, "TL": true, "Tr": true, "Ts": true,
+	"Td": true, "TD": true, "Tm": true,
+	"d0": true, "d1": true,
+	"G": true, "g": true, "RG": true, "rg": true, "K": true, "k": true,
 }
 
 func isNumber(o Object) bool {
