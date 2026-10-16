@@ -4,7 +4,8 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"sort"
+	"math/bits"
+	"slices"
 )
 
 // matrix is a 2x3 affine transform [a b c d e f] representing
@@ -143,16 +144,24 @@ type raster struct {
 	// canvas and is narrowed only while a Form XObject's /BBox is in effect. A
 	// page is interpreted sequentially, so mutating this shared field is safe.
 	clip clipRect
+
+	// b meters the raster work (budget.go). Every paint routine charges it per
+	// row or per call, never per pixel, and returns early once it is stopped.
+	b *budget
+
+	// fill is fillPath's scratch space, reused across calls on this raster.
+	fill fillScratch
 }
 
 // newRaster returns a w×h surface filled with opaque white (the default PDF
-// page background), with the clip set to the whole canvas.
+// page background), with the clip set to the whole canvas and an unlimited
+// budget (render.Page installs the real one).
 func newRaster(w, h int) *raster {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for i := range img.Pix {
 		img.Pix[i] = 0xff // R=G=B=A=255
 	}
-	return &raster{img: img, w: w, h: h, clip: fullClip(w, h)}
+	return &raster{img: img, w: w, h: h, clip: fullClip(w, h), b: unlimitedBudget()}
 }
 
 // blend composites src (source-over) onto the pixel at (x, y). Pixels outside
@@ -182,11 +191,93 @@ func (r *raster) blend(x, y int, src color.RGBA) {
 	})
 }
 
+// fillEdge is one non-horizontal polygon edge, from subpaths[sp][i] to the
+// next point of that subpath (wrapping to its first point, which closes it), in
+// path order, which fixes the crossing formula and the winding direction. It
+// refers to the path instead of copying the endpoints: a path at the
+// maxPathPoints cap has millions of edges, and 8 bytes each keeps the fill's
+// scratch memory well below the path's own.
+type fillEdge struct{ sp, i int32 }
+
+// ends returns the edge's endpoints a (path-order start) and b in subpaths.
+func (e fillEdge) ends(subpaths [][]point) (a, b point) {
+	sp := subpaths[e.sp]
+	j := int(e.i) + 1
+	if j == len(sp) {
+		j = 0
+	}
+	return sp[e.i], sp[j]
+}
+
+// fillCrossing is where an active edge crosses the current sample row.
+type fillCrossing struct{ x, dir float64 }
+
+// fillScratch holds fillPath's buffers so repeated fills (glyphs, hatching) do
+// not reallocate them.
+type fillScratch struct {
+	edges     []fillEdge
+	start     []int32 // per edge: first row index (from y0) whose center reaches it
+	bucket    []int32 // counting-sort offsets, one per row (only when rows ≲ 2E)
+	order     []int32 // edge indices sorted by start row
+	active    []int32 // indices of the edges crossing the current row
+	crossings []fillCrossing
+}
+
+// fillRowCost is the raster work charged for one fillPath row with k active
+// edges, before the row is processed: the row itself, fillCrossingCost per edge
+// (filtering it and computing its crossing), and k·bits.Len(k) for sorting the
+// crossings, an upper bound on the comparisons in O(k log k). The work grows
+// faster than k, so charging k alone let a path whose edges all span the page
+// (a zigzag) run 10–50× past the budget (render-budget.md §10).
+func fillRowCost(k int) int64 {
+	return 1 + int64(k)*(fillCrossingCost+int64(bits.Len(uint(k))))
+}
+
+// fillStartRow returns the first row y in [y0, y1] whose center y+0.5 satisfies
+// y+0.5 >= ymin — the exact predicate the scan uses — or y1 when no row in range
+// does. The float estimate is corrected by the predicate itself, so rounding in
+// ymin-0.5 cannot move an edge to the wrong row.
+func fillStartRow(ymin float64, y0, y1 int) int {
+	if float64(y0)+0.5 >= ymin {
+		return y0
+	}
+	s := clampToInt(math.Ceil(ymin-0.5), float64(y0), float64(y1))
+	for s > y0 && float64(s-1)+0.5 >= ymin {
+		s--
+	}
+	for s < y1 && !(float64(s)+0.5 >= ymin) {
+		s++
+	}
+	return s
+}
+
 // fillPath fills the subpaths (already in device space) with col, using the
-// even-odd rule when evenOdd is true, otherwise the nonzero winding rule. It
-// uses a simple scanline algorithm sampling at pixel-row centers.
+// even-odd rule when evenOdd is true, otherwise the nonzero winding rule. It is
+// a scanline fill sampling at pixel-row centers.
+//
+// Edges are ordered by the row they enter on and kept in an active-edge table,
+// so each row examines only the edges that cross it — about O(E + rows +
+// Σ k log k + pixels), k the edges crossing a row, instead of rows × E
+// (render-budget.md §2.1). The sampling rule is unchanged: an edge crosses row y
+// when y+0.5 lies in its half-open [ymin, ymax), tested with the same
+// comparisons, and the crossing x uses the same formula from the edge's
+// path-order start, so the painted pixels are identical to a full scan.
+//
+// Charges: fillPointCost per point up front (edge setup and ordering), then
+// fillRowCost(k) per row before the row's crossings are computed and sorted;
+// spans charge their widths. Scratch memory is ≈ 20 bytes per point (edge
+// reference, entry row, order, active index) plus 16 bytes per crossing on the
+// widest row, each buffer sized once, so a path at the maxPathPoints cap
+// allocates no doubling garbage.
 func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
-	if len(subpaths) == 0 {
+	if len(subpaths) == 0 || r.b.stopped() {
+		return
+	}
+	npts := 0
+	for _, sp := range subpaths {
+		npts += len(sp)
+	}
+	if !r.b.chargePaint(int64(npts) * fillPointCost) { // setup: edges, entry rows, ordering
 		return
 	}
 	minY, maxY := math.Inf(1), math.Inf(-1)
@@ -206,51 +297,130 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 	// covers the same rows on every target.
 	y0 := clampToInt(math.Floor(minY), 0, float64(r.h))
 	y1 := clampToInt(math.Ceil(maxY), 0, float64(r.h))
+	if y0 >= y1 {
+		return
+	}
 
-	type edge struct{ x, dir float64 }
-	for y := y0; y < y1; y++ {
-		sy := float64(y) + 0.5
-		var xs []edge
-		located := true
-		for _, sp := range subpaths {
-			n := len(sp)
-			if n < 2 {
+	// Each point starts at most one edge, so npts bounds the edge count: size
+	// the buffers once.
+	edges := slices.Grow(r.fill.edges[:0], npts)
+	start := slices.Grow(r.fill.start[:0], npts)
+	for si, sp := range subpaths {
+		n := len(sp)
+		if n < 2 {
+			continue
+		}
+		for i := 0; i < n; i++ {
+			a := sp[i]
+			b := sp[(i+1)%n] // implicitly close each subpath
+			if a.Y == b.Y {
 				continue
 			}
-			for i := 0; i < n; i++ {
-				a := sp[i]
-				b := sp[(i+1)%n] // implicitly close each subpath
-				if a.Y == b.Y {
-					continue
-				}
-				// Half-open [min,max) test avoids double-counting shared vertices.
-				if (sy >= a.Y && sy < b.Y) || (sy >= b.Y && sy < a.Y) {
-					// A vertical edge crosses at its own x. Taking it directly
-					// also keeps an edge at x=±Inf exact, where the general
-					// form computes Inf−Inf = NaN.
-					x := a.X
-					if b.X != a.X {
-						t := (sy - a.Y) / (b.Y - a.Y)
-						x = a.X + t*(b.X-a.X)
-					}
-					if math.IsNaN(x) {
-						located = false
-					}
-					dir := 1.0
-					if b.Y < a.Y {
-						dir = -1.0
-					}
-					xs = append(xs, edge{x: x, dir: dir})
-				}
+			edges = append(edges, fillEdge{sp: int32(si), i: int32(i)})
+			start = append(start, int32(fillStartRow(math.Min(a.Y, b.Y), y0, y1)-y0))
+		}
+	}
+
+	// Order the edges by the row they enter on. Usually that is a counting sort,
+	// O(E + rows) with no comparisons; when the rows far outnumber the edges
+	// (a few edges over a tall canvas) an integer sort keeps the scratch memory
+	// proportional to E instead. Edges entering at rows (y1) never cross a row
+	// center and sort last, past every row the scan visits.
+	rows := y1 - y0
+	order := slices.Grow(r.fill.order[:0], len(edges))[:len(edges)]
+	bucket := r.fill.bucket[:0]
+	if rows <= 2*len(edges)+64 {
+		bucket = slices.Grow(bucket, rows+2)[:rows+2]
+		clear(bucket)
+		for _, k := range start {
+			bucket[k+1]++
+		}
+		for k := 1; k < len(bucket); k++ {
+			bucket[k] += bucket[k-1] // bucket[k] = first slot of row k's group
+		}
+		for i, k := range start {
+			order[bucket[k]] = int32(i)
+			bucket[k]++
+		}
+	} else {
+		for i := range order {
+			order[i] = int32(i)
+		}
+		slices.SortFunc(order, func(p, q int32) int { return int(start[p]) - int(start[q]) })
+	}
+
+	active := slices.Grow(r.fill.active[:0], len(edges))
+	xs := r.fill.crossings[:0]
+	defer func() {
+		r.fill = fillScratch{edges: edges[:0], start: start[:0], bucket: bucket[:0], order: order[:0], active: active[:0], crossings: xs[:0]}
+	}()
+
+	next := 0
+	for y := y0; y < y1; y++ {
+		sy := float64(y) + 0.5
+		// Enter the edges whose top the row center has reached (exactly the
+		// rows where sy >= ymin first holds), then drop the ones it has passed.
+		// sy only grows, so an entered edge never re-enters and a dropped one
+		// never returns: membership matches the half-open [min,max) test.
+		for next < len(order) && int(start[order[next]]) <= y-y0 {
+			active = append(active, order[next])
+			next++
+		}
+		live := 0
+		for _, ei := range active {
+			if a, b := edges[ei].ends(subpaths); sy < a.Y || sy < b.Y { // sy < ymax
+				active[live] = ei
+				live++
 			}
+		}
+		active = active[:live]
+		if !r.b.chargePaint(fillRowCost(len(active))) {
+			return
+		}
+		if len(active) < 2 {
+			continue
+		}
+
+		// Grown only once the row is paid for, so a path that trips the budget
+		// on its first row never allocates its crossings.
+		xs = slices.Grow(xs[:0], len(active))
+		located := true
+		for _, ei := range active {
+			a, b := edges[ei].ends(subpaths)
+			// A vertical edge crosses at its own x. Taking it directly also
+			// keeps an edge at x=±Inf exact, where the general form computes
+			// Inf−Inf = NaN.
+			x := a.X
+			if b.X != a.X {
+				t := (sy - a.Y) / (b.Y - a.Y)
+				x = a.X + t*(b.X-a.X)
+			}
+			if math.IsNaN(x) {
+				located = false
+			}
+			dir := -1.0 // +1 when the edge runs down (b.Y > a.Y)
+			if b.Y > a.Y {
+				dir = 1
+			}
+			xs = append(xs, fillCrossing{x: x, dir: dir})
 		}
 		// A crossing that cannot be located (NaN, e.g. from an Inf−Inf
 		// interpolation) would also break the sort order the pairing relies on:
 		// the row gets no ink rather than guessed spans.
-		if len(xs) < 2 || !located {
+		if !located {
 			continue
 		}
-		sort.Slice(xs, func(i, j int) bool { return xs[i].x < xs[j].x })
+		// The order of equal crossings does not matter: the span between them
+		// is empty, and the winding count after them is the same either way.
+		slices.SortFunc(xs, func(p, q fillCrossing) int {
+			switch {
+			case p.x < q.x:
+				return -1
+			case p.x > q.x:
+				return 1
+			}
+			return 0
+		})
 
 		if evenOdd {
 			for i := 0; i+1 < len(xs); i += 2 {
@@ -264,6 +434,9 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 					r.span(xs[i].x, xs[i+1].x, y, col)
 				}
 			}
+		}
+		if r.b.stopped() {
+			return
 		}
 	}
 }
@@ -281,6 +454,9 @@ func (r *raster) span(x0, x1 float64, y int, col color.RGBA) {
 	lo, hi := float64(r.clip.x0), float64(r.clip.x1)
 	ix0 := clampToInt(math.Round(x0), lo, hi)
 	ix1 := clampToInt(math.Round(x1), lo, hi)
+	if ix1 <= ix0 || !r.b.chargePaint(int64(ix1-ix0)) {
+		return
+	}
 	for x := ix0; x < ix1; x++ {
 		r.blend(x, y, col)
 	}
@@ -301,6 +477,9 @@ func (r *raster) strokePath(subpaths [][]point, closed []bool, col color.RGBA, w
 		if si < len(closed) && closed[si] && n > 2 {
 			r.line(sp[n-1], sp[0], col, width)
 		}
+		if r.b.stopped() {
+			return
+		}
 	}
 }
 
@@ -316,16 +495,28 @@ func (r *raster) strokePath(subpaths [][]point, closed []bool, col color.RGBA, w
 //     region where a sample's square can reach a pixel;
 //   - the union is painted row by row instead of stamp by stamp. The samples
 //     whose square reaches a row form one contiguous index range (cy is
-//     monotonic in the sample index), found by bisection, and their squares
-//     overlap along x (samples <1px apart; width ≥1 makes each square's pixel
-//     footprint floor(c−h)..ceil(c+h) span ≥2 pixels), so the row's ink
-//     is the single span between the first and last such sample.
+//     monotonic in the sample index), and their squares overlap along x
+//     (samples <1px apart; width ≥1 makes each square's pixel footprint
+//     floor(c−h)..ceil(c+h) span ≥2 pixels), so the row's ink is the single
+//     span between the first and last such sample.
+//
+// The range's ends move monotonically from row to row, so each is searched
+// from where the previous row left it (firstTrueNear, lastTrueNear): a thin
+// segment costs O(1) predicate calls per row, and no row costs more than about
+// two bisections.
 //
 // Work per segment is O(rows × (log steps + span)) ≤ O(canvas pixels), whatever
 // the segment length, coordinate magnitude or line width. Each pixel is
 // composited once per segment; for opaque color the result is pixel-identical
 // to stamping every sample.
+//
+// Budget: lineCallCost per call (segments clipped away entirely still cost
+// their setup), lineRowCost per row for the range search, and the row's span
+// width before it is painted.
 func (r *raster) line(a, b point, col color.RGBA, width float64) {
+	if !r.b.chargePaint(lineCallCost) {
+		return
+	}
 	if !isFinite(a.X) || !isFinite(a.Y) || !isFinite(b.X) || !isFinite(b.Y) || !isFinite(width) {
 		return // e.g. an overflowing cm: such a point has no place on the canvas
 	}
@@ -361,7 +552,20 @@ func (r *raster) line(a, b point, col color.RGBA, width float64) {
 	if yLo > yHi {
 		return
 	}
+	// Search hints: the first row is the segment's top, at s = 0 when it runs
+	// down and s = steps when it runs up; later rows predict the previous
+	// row's result plus its last move. The hints only speed the searches up;
+	// the results do not depend on them.
+	start := 0.0
+	if dy < 0 {
+		start = steps
+	}
+	var lo, hi float64
+	loPrev, hiPrev, loMove, hiMove := start, start, 0.0, 0.0
 	for oy := int(yLo); oy <= int(yHi); oy++ {
+		if !r.b.chargePaint(lineRowCost) {
+			return
+		}
 		fy := float64(oy)
 		// A sample's square reaches row oy iff it starts at or above the row
 		// (above) and ends at or below it (below). As cy moves monotonically one
@@ -369,15 +573,29 @@ func (r *raster) line(a, b point, col color.RGBA, width float64) {
 		// constant when dy == 0).
 		above := func(s float64) bool { return math.Floor(cy(s)-half) <= fy }
 		below := func(s float64) bool { return fy <= math.Ceil(cy(s)+half) }
-		var lo, hi float64
+		// The row's samples are lo..hi: the first that reaches past the row's
+		// near side and the last that has not left its far side. The sample at
+		// lo satisfies the predicate it was found with; it also satisfies the
+		// other one, which is monotone the other way, exactly when lo ≤ hi —
+		// except past maxExactInt, where hi is only as exact as the plain
+		// bisection, so the old explicit check is kept there.
+		var reaches bool
 		if dy >= 0 {
-			lo, ok = firstTrue(steps, below)
-			hi = lastTrue(steps, above)
+			lo, ok = firstTrueNear(steps, below, loPrev+loMove)
+			hi = lastTrueNear(steps, above, hiPrev+hiMove)
+			reaches = ok && (steps <= maxExactInt || above(lo))
 		} else {
-			lo, ok = firstTrue(steps, above)
-			hi = lastTrue(steps, below)
+			lo, ok = firstTrueNear(steps, above, loPrev+loMove)
+			hi = lastTrueNear(steps, below, hiPrev+hiMove)
+			reaches = ok && (steps <= maxExactInt || below(lo))
 		}
-		if !ok || hi < lo || !above(lo) || !below(lo) {
+		if ok {
+			loMove, loPrev = lo-loPrev, lo
+		}
+		if hi >= 0 {
+			hiMove, hiPrev = hi-hiPrev, hi
+		}
+		if !reaches || hi < lo {
 			continue
 		}
 		x0, x1 := cx(lo), cx(hi)
@@ -385,6 +603,9 @@ func (r *raster) line(a, b point, col color.RGBA, width float64) {
 		xHi := math.Min(math.Ceil(math.Max(x0, x1)+half), float64(box.x1-1))
 		if xLo > xHi {
 			continue
+		}
+		if !r.b.chargePaint(int64(xHi-xLo) + 1) {
+			return
 		}
 		for ox := int(xLo); ox <= int(xHi); ox++ {
 			r.blend(ox, oy, col)
@@ -430,6 +651,125 @@ func lastTrue(n float64, pred func(float64) bool) float64 {
 		return -1
 	}
 	return s - 1
+}
+
+// maxExactInt is 2^53: every integer in [0, maxExactInt] is a float64.
+const maxExactInt = 1 << 53
+
+// firstTrueNear returns exactly firstTrue(n, pred), searching outward from hint,
+// an integer-valued float64 in [0, n] (clamped otherwise): it gallops from hint
+// in steps of 1, 2, 4, … until pred changes, then bisects that last step, so it
+// costs O(1 + log |result − hint|) calls instead of O(log n). The result does not
+// depend on hint. Above maxExactInt, where not every integer is representable,
+// it falls back to firstTrue's plain bisection.
+func firstTrueNear(n float64, pred func(float64) bool, hint float64) (float64, bool) {
+	if n > maxExactInt {
+		return firstTrue(n, pred)
+	}
+	hint = math.Min(math.Max(hint, 0), n)
+	var lo, hi float64 // pred(lo) false, pred(hi) true, lo < hi
+	if pred(hint) {
+		// The answer is in [0, hint]: gallop down.
+		hi = hint
+		for step := 1.0; ; step *= 2 {
+			c := hi - step
+			if c <= 0 {
+				if pred(0) {
+					return 0, true
+				}
+				lo = 0
+				break
+			}
+			if !pred(c) {
+				lo = c
+				break
+			}
+			hi = c
+		}
+	} else {
+		// The answer, if any, is in (hint, n]: gallop up.
+		lo = hint
+		for step := 1.0; ; step *= 2 {
+			c := lo + step
+			if c >= n {
+				if !pred(n) {
+					return 0, false
+				}
+				hi = n
+				break
+			}
+			if pred(c) {
+				hi = c
+				break
+			}
+			lo = c
+		}
+	}
+	for hi-lo > 1 {
+		mid := math.Floor(lo + (hi-lo)/2)
+		if pred(mid) {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return hi, true
+}
+
+// lastTrueNear returns exactly lastTrue(n, pred), searching outward from hint
+// like firstTrueNear (pred is true…true false…false).
+func lastTrueNear(n float64, pred func(float64) bool, hint float64) float64 {
+	if n > maxExactInt {
+		return lastTrue(n, pred)
+	}
+	hint = math.Min(math.Max(hint, 0), n)
+	var lo, hi float64 // pred(lo) true, pred(hi) false, lo < hi
+	if pred(hint) {
+		// The answer is in [hint, n]: gallop up.
+		lo = hint
+		for step := 1.0; ; step *= 2 {
+			c := lo + step
+			if c >= n {
+				if pred(n) {
+					return n
+				}
+				hi = n
+				break
+			}
+			if !pred(c) {
+				hi = c
+				break
+			}
+			lo = c
+		}
+	} else {
+		// The answer, if any, is in [0, hint): gallop down.
+		hi = hint
+		for step := 1.0; ; step *= 2 {
+			c := hi - step
+			if c <= 0 {
+				if !pred(0) {
+					return -1
+				}
+				lo = 0
+				break
+			}
+			if pred(c) {
+				lo = c
+				break
+			}
+			hi = c
+		}
+	}
+	for hi-lo > 1 {
+		mid := math.Floor(lo + (hi-lo)/2)
+		if pred(mid) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo
 }
 
 // clipSegment clips segment ab to the closed rectangle [x0,x1]×[y0,y1]
@@ -518,13 +858,15 @@ func clampToInt(v, lo, hi float64) int {
 	return int(v)
 }
 
+// cubicSegments is the number of line segments a cubic Bézier flattens to.
+const cubicSegments = 16
+
 // flattenCubic appends a polyline approximation of the cubic Bézier from p0
 // through control points p1, p2 to p3 (all device space) to dst. The endpoint
 // p3 is included; p0 is assumed already present.
 func flattenCubic(dst []point, p0, p1, p2, p3 point) []point {
-	const segments = 16
-	for i := 1; i <= segments; i++ {
-		t := float64(i) / segments
+	for i := 1; i <= cubicSegments; i++ {
+		t := float64(i) / cubicSegments
 		u := 1 - t
 		a := u * u * u
 		b := 3 * u * u * t

@@ -12,6 +12,7 @@ package render
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image/jpeg"
@@ -41,13 +42,49 @@ type Options struct {
 	// matrix). Empty = no overlay, so a page renders identically to a plain
 	// content render.
 	Annotations []Annotation
+
+	// MaxPaintPixels bounds the raster work of the render in pixel visits
+	// (content and overlay; overdraw counts every time). 0 = default: 32 × the
+	// canvas pixels, clamped to [16 Mi, 1 Gi]; < 0 = unlimited (unsafe for
+	// untrusted input); > 0 = absolute limit.
+	MaxPaintPixels int64
+	// MaxOperators bounds the interpreter steps: content operators at every
+	// Form XObject depth plus every glyph shown or advanced and every TJ
+	// element. 0 = default (8 Mi); < 0 = unlimited (unsafe for untrusted input).
+	MaxOperators int64
+
+	// Context, when non-nil, cancels the render: it is polled every 2^20
+	// raster-work units or 4096 steps, and its deadline is also checked against
+	// the clock (required under js/wasm). nil = context.Background(). This is a
+	// field rather than a parameter because Page is internal plumbing; the
+	// public core API takes ctx as its first parameter.
+	Context context.Context
+
+	// testLimits, when non-nil, replaces the resolved limits (including the
+	// internal image, content and path caps) so unit tests can trip each
+	// counter with a small input. Never set outside tests.
+	testLimits *budgetLimits
 }
 
-// Page rasterizes one page to encoded image bytes in opts.Format.
+// Page rasterizes one page to encoded image bytes in opts.Format, under the
+// per-page budget in opts (SECURITY.md §2).
 //
 // Returns ErrUnsupportedFormat for a format other than png/jpeg, an error if the
-// resolved canvas size is degenerate or too large, or a content-decode error.
+// resolved canvas size is degenerate, ErrCanvasTooLarge (wrapped) if it exceeds
+// the pixel cap, ErrBudgetExceeded (wrapped, naming the resource) if the render
+// exceeds a limit, the wrapped context error (matching context.Canceled or
+// context.DeadlineExceeded) if opts.Context is done before or during the render,
+// or a content-decode error. On any error the result is nil: no partial image is
+// encoded.
 func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil, contextError(ctx) // before any work
+	}
+
 	format := opts.Format
 	if format == "" {
 		format = "png"
@@ -67,17 +104,34 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 		return nil, err
 	}
 
+	lim := resolveLimits(opts.MaxPaintPixels, opts.MaxOperators, int64(pxW)*int64(pxH))
+	if opts.testLimits != nil {
+		lim = *opts.testLimits
+	}
+	b := newBudget(ctx, lim)
+	if !b.poll() {
+		return nil, b.err // a deadline already past by the clock
+	}
+
 	rs := newRaster(pxW, pxH)
+	rs.b = b
 	content, err := r.PageContent(pi)
 	if err != nil {
 		return nil, err
 	}
-	if len(content) > 0 {
-		fonts := loadFonts(r, pi.Resources)
+	// Charge the bytes before scanning them: ScanContent materializes every
+	// operator up front.
+	if len(content) > 0 && b.chargeContent(int64(len(content))) {
+		fonts := loadFonts(r, pi.Resources, b)
 		run(rs, base, parse.ScanContent(content), fonts, r, pi.Resources)
 	}
-	if len(opts.Annotations) > 0 {
+	if len(opts.Annotations) > 0 && !b.stopped() {
 		drawAnnotations(rs, base, opts.Annotations)
+	}
+	// Poll once more before encoding: the encode is not metered, and a render
+	// that ran past its deadline should not spend more time.
+	if !b.poll() {
+		return nil, b.err
 	}
 	return encode(rs, format, opts.Quality)
 }
@@ -121,7 +175,7 @@ func deviceMatrix(mb parse.Rectangle, rotate int, s float64) (matrix, int, int, 
 	// and clamped to 1px below. With both sides ≤ maxCanvasPixels the int64
 	// product cannot overflow.
 	if !(pxWf >= 0 && pxHf >= 0) || pxWf > maxCanvasPixels || pxHf > maxCanvasPixels {
-		return matrix{}, 0, 0, fmt.Errorf("render: canvas %gx%g exceeds %d pixels", pxWf, pxHf, maxCanvasPixels)
+		return matrix{}, 0, 0, fmt.Errorf("%w: %gx%g px exceeds %d pixels", ErrCanvasTooLarge, pxWf, pxHf, maxCanvasPixels)
 	}
 	pxW := int(math.Ceil(pxWf))
 	pxH := int(math.Ceil(pxHf))
@@ -132,7 +186,7 @@ func deviceMatrix(mb parse.Rectangle, rotate int, s float64) (matrix, int, int, 
 		pxH = 1
 	}
 	if int64(pxW)*int64(pxH) > maxCanvasPixels {
-		return matrix{}, 0, 0, fmt.Errorf("render: canvas %dx%d exceeds %d pixels", pxW, pxH, maxCanvasPixels)
+		return matrix{}, 0, 0, fmt.Errorf("%w: %dx%d px exceeds %d pixels", ErrCanvasTooLarge, pxW, pxH, maxCanvasPixels)
 	}
 	return m, pxW, pxH, nil
 }

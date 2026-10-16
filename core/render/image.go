@@ -39,8 +39,11 @@ func (d *decodedImage) at(col, row int) color.RGBA {
 // a stream and dispatches on its /Subtype. An /Image is decoded and drawn; a
 // /Form is interpreted recursively into the same surface (see form.go). Anything
 // the renderer cannot handle is a graceful no-op, so the rest of the page still
-// renders (§8.8).
+// renders (§8.8). Every Do is charged doCost before anything is resolved.
 func (in *interp) doXObject(name parse.Name) {
+	if !in.b.chargePaint(doCost) {
+		return
+	}
 	if in.res == nil || in.resources == nil {
 		return
 	}
@@ -80,7 +83,7 @@ func (in *interp) doXObject(name parse.Name) {
 		return
 	}
 
-	img, ok := decodeImage(in.res, st, in.gs.fill)
+	img, ok := decodeImage(in.res, st, in.gs.fill, in.rs.b)
 	if !ok {
 		return
 	}
@@ -96,14 +99,27 @@ func (in *interp) doXObject(name parse.Name) {
 // Supported in Wave 1: DCTDecode (baseline JPEG), and FlateDecode/no-filter raw
 // samples in DeviceRGB (3×8) and DeviceGray (1×8); plus /ImageMask (1 bpc) and
 // an optional DeviceGray /SMask. Everything else is skipped.
-func decodeImage(res *parse.Resolver, st *parse.Stream, fill color.RGBA) (*decodedImage, bool) {
+//
+// The decoded samples are charged to b before any decode, from the sizes
+// imageSize has already validated: the image's w×h plus its /SMask's (a JPEG
+// whose frame is larger than declared is charged the difference once its header
+// is checked). Every stream decode then goes through b.decode, which charges
+// the bytes the filters produce beyond the sample bytes (a Flate bomb behind a
+// 1×1 image) and caps the decode at what the budget has left; a JPEG's
+// compressed data beyond its frame's raw size is charged likewise. A trip
+// returns ok=false and stops the render.
+func decodeImage(res *parse.Resolver, st *parse.Stream, fill color.RGBA, b *budget) (*decodedImage, bool) {
 	w, h, ok := imageSize(res, st.Dict)
 	if !ok {
 		return nil, false // missing, degenerate or oversize: skip
 	}
+	declared := int64(w) * int64(h) // ≤ maxCanvasPixels after imageSize
+	if !b.chargeSamples(declared + smaskSamples(res, st)) {
+		return nil, false
+	}
 
 	if imageBool(res, st.Dict, "ImageMask", "IM") {
-		return decodeImageMask(res, st, w, h, fill)
+		return decodeImageMask(res, st, w, h, fill, b)
 	}
 
 	filters := imageFilters(st)
@@ -112,22 +128,22 @@ func decodeImage(res *parse.Resolver, st *parse.Stream, fill color.RGBA) (*decod
 		if len(filters) > 1 {
 			return nil, false // filter chain before JPEG: unsupported, skip
 		}
-		img, ok := decodeJPEG(st)
+		img, ok := decodeJPEG(st, declared, b)
 		if !ok {
 			return nil, false
 		}
-		applySMask(res, st, img)
+		applySMask(res, st, img, b)
 		return img, true
 	case "FlateDecode", "Fl", "":
 		csName, ok := colorSpaceName(res, st.Dict)
 		if !ok {
 			return nil, false // array color spaces (Indexed/ICCBased/…) deferred
 		}
-		img, ok := decodeRawImage(res, st, csName, w, h)
+		img, ok := decodeRawImage(res, st, csName, w, h, b)
 		if !ok {
 			return nil, false
 		}
-		applySMask(res, st, img)
+		applySMask(res, st, img, b)
 		return img, true
 	default:
 		// CCITTFaxDecode, JBIG2Decode, JPXDecode, LZWDecode, RunLengthDecode: skip.
@@ -140,8 +156,9 @@ func decodeImage(res *parse.Resolver, st *parse.Stream, fill color.RGBA) (*decod
 // grid may differ from /Width×/Height; the pixel-count bound is re-checked
 // against the decoded size. CMYK JPEGs are converted through image/color, which
 // matches interpret.go's cmyk() formula; Adobe-marker inversion is accepted as a
-// Wave-1 limitation.
-func decodeJPEG(st *parse.Stream) (*decodedImage, bool) {
+// Wave-1 limitation. declared is the /Width×/Height area the caller already
+// charged to bud; a larger frame is charged the excess before decoding.
+func decodeJPEG(st *parse.Stream, declared int64, bud *budget) (*decodedImage, bool) {
 	// The decoder allocates the whole frame from the SOF header before reading
 	// any scan data, so a few hostile header bytes claiming 65535×65535 would
 	// cost gigabytes (fatal under js/wasm's 4 GiB memory). Check the header's
@@ -168,6 +185,15 @@ func decodeJPEG(st *parse.Stream) (*decodedImage, bool) {
 	// Peak working set is this estimate plus the 4·W·H RGBA copy made below
 	// (bounded separately by the pixel cap), while the decoded image is live.
 	if jpegDecodeCost(cfg.Width, cfg.Height, nComp, jpegProgressive(st.Raw)) > maxImageBytes {
+		return nil, false
+	}
+	if extra := int64(cfg.Width)*int64(cfg.Height) - declared; extra > 0 && !bud.chargeSamples(extra) {
+		return nil, false
+	}
+	// The decoder's work also grows with the compressed data, which may far
+	// exceed what the frame needs (scans of a 1×1 frame, re-read on every Do):
+	// charge the bytes beyond the frame's raw size as decoded bytes.
+	if !bud.chargeDecoded(int64(len(st.Raw)) - int64(cfg.Width)*int64(cfg.Height)*int64(nComp)) {
 		return nil, false
 	}
 	img, err := jpeg.Decode(bytes.NewReader(st.Raw))
@@ -252,7 +278,7 @@ func jpegProgressive(raw []byte) bool {
 // RGBA grid. Rows are byte-aligned: stride = ceil(W * 8 * nComp / 8). Only
 // DeviceRGB (3 components) and DeviceGray (1 component) are supported; other
 // color spaces or bit depths return ok=false.
-func decodeRawImage(res *parse.Resolver, st *parse.Stream, csName parse.Name, w, h int) (*decodedImage, bool) {
+func decodeRawImage(res *parse.Resolver, st *parse.Stream, csName parse.Name, w, h int, b *budget) (*decodedImage, bool) {
 	var nComp int
 	switch csName {
 	case "DeviceRGB", "RGB":
@@ -274,9 +300,9 @@ func decodeRawImage(res *parse.Resolver, st *parse.Stream, csName parse.Name, w,
 		return nil, false
 	}
 	stride := int(stride64)
-	data, err := parse.DecodeStream(st)
-	if err != nil {
-		return nil, false // unsupported filter in the chain, or decode error
+	data, ok := b.decode(st, stride64*int64(h))
+	if !ok {
+		return nil, false // unsupported filter in the chain, decode error, or budget
 	}
 	if int64(len(data)) < int64(stride)*int64(h) {
 		return nil, false // truncated/hostile: skip rather than index out of range
@@ -302,7 +328,7 @@ func decodeRawImage(res *parse.Resolver, st *parse.Stream, csName parse.Name, w,
 // in fill. Per the default /Decode [0 1], sample bit 0 paints and bit 1 is
 // transparent; /Decode [1 0] inverts. Transparent samples get A=0 so blend
 // skips them. Only Flate/no-filter mask data is supported.
-func decodeImageMask(res *parse.Resolver, st *parse.Stream, w, h int, fill color.RGBA) (*decodedImage, bool) {
+func decodeImageMask(res *parse.Resolver, st *parse.Stream, w, h int, fill color.RGBA, b *budget) (*decodedImage, bool) {
 	// An image mask is 1 bpc by definition (§8.9.6.2). If /BitsPerComponent is
 	// present and not 1, reject rather than mis-slice the 1-bit-packed rows.
 	if bpc, present := imageInt(res, st.Dict, "BitsPerComponent", "BPC"); present && bpc != 1 {
@@ -322,8 +348,8 @@ func decodeImageMask(res *parse.Resolver, st *parse.Stream, w, h int, fill color
 	if int64(stride)*int64(h) > maxImageBytes {
 		return nil, false
 	}
-	data, err := parse.DecodeStream(st)
-	if err != nil {
+	data, ok := b.decode(st, int64(stride)*int64(h))
+	if !ok {
 		return nil, false
 	}
 	if int64(len(data)) < int64(stride)*int64(h) {
@@ -369,15 +395,30 @@ func maskDecodeInverted(res *parse.Resolver, d parse.Dict) bool {
 	return num(arr[0]) == 1 && num(arr[1]) == 0
 }
 
+// smaskSamples returns the sample count of an image's /SMask (w×h after
+// imageSize's validation), or 0 when there is none or it would be skipped for
+// its size.
+func smaskSamples(res *parse.Resolver, st *parse.Stream) int64 {
+	smSt, ok := resolveStream(res, st.Dict["SMask"])
+	if !ok {
+		return 0
+	}
+	w, h, ok := imageSize(res, smSt.Dict)
+	if !ok {
+		return 0
+	}
+	return int64(w) * int64(h)
+}
+
 // applySMask decodes an image's /SMask (DeviceGray, 8 bpc) and bakes it into img
 // as per-pixel alpha, sampled at the shared unit-square coordinate with
 // nearest-neighbour. A missing or unsupported SMask leaves img opaque.
-func applySMask(res *parse.Resolver, st *parse.Stream, img *decodedImage) {
+func applySMask(res *parse.Resolver, st *parse.Stream, img *decodedImage, b *budget) {
 	smSt, ok := resolveStream(res, st.Dict["SMask"])
 	if !ok {
 		return
 	}
-	alpha, ws, hs, ok := decodeSMask(res, smSt)
+	alpha, ws, hs, ok := decodeSMask(res, smSt, b)
 	if !ok {
 		return // treat the base image as opaque, do not skip it
 	}
@@ -394,7 +435,7 @@ func applySMask(res *parse.Resolver, st *parse.Stream, img *decodedImage) {
 
 // decodeSMask decodes a soft-mask stream to an 8-bpc gray alpha grid. Only
 // Flate/no-filter DeviceGray data is supported; anything else returns ok=false.
-func decodeSMask(res *parse.Resolver, st *parse.Stream) (alpha []uint8, w, h int, ok bool) {
+func decodeSMask(res *parse.Resolver, st *parse.Stream, b *budget) (alpha []uint8, w, h int, ok bool) {
 	w, h, ok = imageSize(res, st.Dict)
 	if !ok {
 		return nil, 0, 0, false
@@ -413,8 +454,8 @@ func decodeSMask(res *parse.Resolver, st *parse.Stream) (alpha []uint8, w, h int
 	if int64(stride)*int64(h) > maxImageBytes {
 		return nil, 0, 0, false
 	}
-	data, err := parse.DecodeStream(st)
-	if err != nil || int64(len(data)) < int64(stride)*int64(h) {
+	data, ok := b.decode(st, int64(stride)*int64(h))
+	if !ok || int64(len(data)) < int64(stride)*int64(h) {
 		return nil, 0, 0, false
 	}
 	alpha = make([]uint8, w*h)
@@ -428,7 +469,9 @@ func decodeSMask(res *parse.Resolver, st *parse.Stream) (alpha []uint8, w, h int
 // ctm (§8.9.5.2, row 0 is the top). It uses inverse mapping over the image's
 // clamped device bounding box with nearest-neighbour sampling and source-over
 // compositing, so gaps never appear on upscaling and total work is bounded by
-// the canvas size. A degenerate (zero-area) placement is skipped.
+// the canvas size. A degenerate (zero-area) placement is skipped. Each row of the
+// box is charged to the raster's budget (imagePixelCost per pixel) before it is
+// sampled.
 func drawImage(rs *raster, ctm matrix, img *decodedImage) {
 	// S maps sample (col,row) to the unit square (u,v) with the y-flip that puts
 	// row 0 at the top (v=1). Composed with ctm it maps samples to device pixels.
@@ -467,6 +510,9 @@ func drawImage(rs *raster, ctm matrix, img *decodedImage) {
 	}
 
 	for dy := y0; dy < y1; dy++ {
+		if !rs.b.chargePaint(int64(x1-x0) * imagePixelCost) {
+			return
+		}
 		for dx := x0; dx < x1; dx++ {
 			fcol, frow := inv.apply(float64(dx)+0.5, float64(dy)+0.5)
 			// -1 and img.w/img.h fall outside the grid, so an out-of-range or

@@ -40,6 +40,7 @@ type gstate struct {
 // ignored in Wave 1.
 type interp struct {
 	rs    *raster
+	b     *budget // == rs.b: interpreter steps, content bytes, path points (budget.go)
 	gs    gstate
 	stack []gstate
 
@@ -60,6 +61,7 @@ type interp struct {
 	formBudget int                                           // remaining form executions for this page render
 	fontCache  map[parse.Reference]map[parse.Name]*glyphFont // per-form fonts, keyed by XObject reference
 	stackFloor int                                           // Q may not pop below this stack length (form q/Q isolation)
+	skippedQ   int                                           // q operators ignored past maxSaveDepth, awaiting their Q
 
 	// Current path, in device space. Each subpath is a polyline; closed marks
 	// subpaths finished with h/re (relevant only to stroking).
@@ -70,7 +72,17 @@ type interp struct {
 	curY     float64
 	startX   float64 // current subpath start, for closepath (h)
 	startY   float64
+
+	// pathPoints counts the points in subpaths and cur, bounded by the budget's
+	// path cap; painting or n resets it.
+	pathPoints int64
 }
+
+// maxSaveDepth caps the graphics-state stack (q nesting). ISO 32000-1 Annex C
+// suggests a limit of 28 for conforming readers; real files rarely exceed a
+// few dozen. Without a cap 8 Mi q operators (well within MaxOperators) saved
+// 8 Mi graphics states, ≈ 3 GB, fatal under js/wasm's 4 GiB memory.
+const maxSaveDepth = 1024
 
 // run interprets a page's ops against the raster, using base as the initial CTM
 // (PDF user space to device pixels) and fonts for text. res and resources let
@@ -81,6 +93,7 @@ type interp struct {
 func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*glyphFont, res *parse.Resolver, resources parse.Dict) {
 	in := &interp{
 		rs: rs,
+		b:  rs.b,
 		gs: gstate{
 			ctm:       base,
 			fill:      color.RGBA{0, 0, 0, 0xff},
@@ -103,9 +116,13 @@ func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*g
 
 // interpret runs the operator loop. It is the shared interpretation core used by
 // both the page (from run) and every Form XObject (from execForm), so there is a
-// single operator switch reused at every nesting level.
+// single operator switch reused at every nesting level. Each operator is one
+// budget step; the loop stops at the first operator after the budget stops.
 func (in *interp) interpret(ops []parse.ContentOp) {
 	for _, op := range ops {
+		if !in.b.step() {
+			return
+		}
 		in.apply(op)
 	}
 }
@@ -115,8 +132,20 @@ func (in *interp) apply(op parse.ContentOp) {
 	switch op.Op {
 	// --- graphics state ---
 	case "q":
+		// Past maxSaveDepth a q saves nothing: it is counted, and the Q that
+		// matches it is swallowed, so a hostile stream of q cannot grow the
+		// stack without bound while a balanced deep nest still pairs up. State
+		// changes made inside such an ignored pair are not undone.
+		if len(in.stack) >= maxSaveDepth {
+			in.skippedQ++
+			break
+		}
 		in.stack = append(in.stack, in.gs)
 	case "Q":
+		if in.skippedQ > 0 {
+			in.skippedQ--
+			break
+		}
 		// Refuse to pop below stackFloor so a stray Q inside a Form XObject cannot
 		// steal a caller's saved frame (form q/Q isolation, form.go).
 		if n := len(in.stack); n > in.stackFloor {
@@ -307,7 +336,21 @@ func lastStr(o []parse.Object) []byte {
 
 // --- path helpers ---
 
+// addPathPoints reserves n more points in the current path. It reports false,
+// tripping the budget, when the path would exceed the path-point cap; the
+// caller then drops the operator.
+func (in *interp) addPathPoints(n int64) bool {
+	if !in.b.checkPathPoints(in.pathPoints + n) {
+		return false
+	}
+	in.pathPoints += n
+	return true
+}
+
 func (in *interp) moveTo(x, y float64) {
+	if !in.addPathPoints(1) {
+		return
+	}
 	in.flushSub(false)
 	dx, dy := in.gs.ctm.apply(x, y)
 	in.cur = []point{{dx, dy}}
@@ -320,6 +363,9 @@ func (in *interp) lineTo(x, y float64) {
 		in.moveTo(x, y)
 		return
 	}
+	if !in.addPathPoints(1) {
+		return
+	}
 	dx, dy := in.gs.ctm.apply(x, y)
 	in.cur = append(in.cur, point{dx, dy})
 	in.curX, in.curY = x, y
@@ -328,6 +374,12 @@ func (in *interp) lineTo(x, y float64) {
 func (in *interp) curveTo(x1, y1, x2, y2, x3, y3 float64) {
 	if in.cur == nil {
 		in.moveTo(in.curX, in.curY)
+		if in.cur == nil {
+			return // the cap refused the implicit moveto
+		}
+	}
+	if !in.addPathPoints(cubicSegments) {
+		return
 	}
 	p0x, p0y := in.gs.ctm.apply(in.curX, in.curY)
 	p1x, p1y := in.gs.ctm.apply(x1, y1)
@@ -338,6 +390,9 @@ func (in *interp) curveTo(x1, y1, x2, y2, x3, y3 float64) {
 }
 
 func (in *interp) rect(x, y, w, h float64) {
+	if !in.addPathPoints(4) {
+		return
+	}
 	in.flushSub(false)
 	pts := make([]point, 4)
 	xs := [4][2]float64{{x, y}, {x + w, y}, {x + w, y + h}, {x, y + h}}
@@ -372,6 +427,7 @@ func (in *interp) clearPath() {
 	in.subpaths = nil
 	in.closed = nil
 	in.cur = nil
+	in.pathPoints = 0
 }
 
 func (in *interp) fill(evenOdd bool) {

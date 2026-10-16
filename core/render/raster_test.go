@@ -215,6 +215,184 @@ func TestStroke_MatchesSampledStamps(t *testing.T) {
 	}
 }
 
+// TestStroke_DenseHairlinesMatchSampledStamps strokes a CAD-like drawing — many
+// short hairline segments in random directions, each in its own opaque color,
+// so later segments overwrite earlier ones as with real stamps — and requires
+// the sampled-stamp reference's pixels exactly. The row search resumes from the
+// previous row (firstTrueNear); this pins it on the dense-hairline case the
+// budget's lineRowCost is calibrated for.
+func TestStroke_DenseHairlinesMatchSampledStamps(t *testing.T) {
+	const w, h = 160, 120
+	rng := rand.New(rand.NewPCG(11, 12))
+	for _, clip := range []clipRect{fullClip(w, h), {13, 9, 141, 100}} {
+		want := newRaster(w, h)
+		want.clip = clip
+		got := newRaster(w, h)
+		got.clip = clip
+		// Endpoints stay on the paintable area, the reference's domain (a
+		// clipped segment is resampled; TestStroke_MatchesBisection covers it).
+		in := func(v float64, lo, hi int) float64 { return math.Min(math.Max(v, float64(lo)), float64(hi)-1e-9) }
+		for i := 0; i < 3000; i++ {
+			a := point{float64(clip.x0) + rng.Float64()*float64(clip.x1-clip.x0), float64(clip.y0) + rng.Float64()*float64(clip.y1-clip.y0)}
+			b := point{in(a.X+(rng.Float64()-0.5)*30, clip.x0, clip.x1), in(a.Y+(rng.Float64()-0.5)*30, clip.y0, clip.y1)}
+			width := 1.0 // a hairline: strokePath raises < 1 to 1
+			if i%4 == 0 {
+				width += rng.Float64() * 2
+			}
+			col := color.RGBA{uint8(rng.IntN(256)), uint8(rng.IntN(256)), uint8(rng.IntN(256)), 0xff}
+			lineBySamples(want, a, b, col, width)
+			got.line(a, b, col, width)
+		}
+		if !bytes.Equal(want.img.Pix, got.img.Pix) {
+			t.Fatalf("clip %v: dense hairlines differ from the sampled-stamp reference", clip)
+		}
+	}
+}
+
+// lineByBisection is line before its row search resumed from the previous row:
+// each row bisects the whole sample range with firstTrue/lastTrue. It is kept
+// as the oracle for the incremental search, which must paint the same pixels on
+// every input, including the huge and clipped ones lineBySamples cannot run.
+func lineByBisection(r *raster, a, b point, col color.RGBA, width float64) {
+	if !isFinite(a.X) || !isFinite(a.Y) || !isFinite(b.X) || !isFinite(b.Y) || !isFinite(width) {
+		return
+	}
+	box := r.clip.intersect(fullClip(r.w, r.h))
+	if box.empty() {
+		return
+	}
+	half := width / 2
+	a, b, ok := clipSegment(a, b,
+		float64(box.x0)-1-half, float64(box.y0)-1-half,
+		float64(box.x1)+half, float64(box.y1)+half)
+	if !ok {
+		return
+	}
+	dx := b.X - a.X
+	dy := b.Y - a.Y
+	steps := math.Ceil(math.Hypot(dx, dy)) + 1
+	if math.IsInf(steps, 0) {
+		return
+	}
+	cx := func(s float64) float64 { return a.X + s/steps*dx }
+	cy := func(s float64) float64 { return a.Y + s/steps*dy }
+	yLo := math.Max(math.Floor(math.Min(a.Y, b.Y)-half), float64(box.y0))
+	yHi := math.Min(math.Ceil(math.Max(a.Y, b.Y)+half), float64(box.y1-1))
+	if yLo > yHi {
+		return
+	}
+	for oy := int(yLo); oy <= int(yHi); oy++ {
+		fy := float64(oy)
+		above := func(s float64) bool { return math.Floor(cy(s)-half) <= fy }
+		below := func(s float64) bool { return fy <= math.Ceil(cy(s)+half) }
+		var lo, hi float64
+		if dy >= 0 {
+			lo, ok = firstTrue(steps, below)
+			hi = lastTrue(steps, above)
+		} else {
+			lo, ok = firstTrue(steps, above)
+			hi = lastTrue(steps, below)
+		}
+		if !ok || hi < lo || !above(lo) || !below(lo) {
+			continue
+		}
+		x0, x1 := cx(lo), cx(hi)
+		xLo := math.Max(math.Floor(math.Min(x0, x1)-half), float64(box.x0))
+		xHi := math.Min(math.Ceil(math.Max(x0, x1)+half), float64(box.x1-1))
+		if xLo > xHi {
+			continue
+		}
+		for ox := int(xLo); ox <= int(xHi); ox++ {
+			r.blend(ox, oy, col)
+		}
+	}
+}
+
+// TestStroke_MatchesBisection compares line with lineByBisection on random
+// segments of every scale: ordinary, far off the canvas, huge widths (where the
+// sample count passes 2^53 and the search falls back to plain bisection),
+// axis-aligned and degenerate, with and without a narrowed clip, in translucent
+// color so a pixel painted twice would show.
+func TestStroke_MatchesBisection(t *testing.T) {
+	const w, h = 48, 40
+	rng := rand.New(rand.NewPCG(21, 22))
+	clips := []clipRect{fullClip(w, h), {7, 5, 33, 31}}
+	coord := func(limit float64) float64 {
+		switch rng.IntN(8) {
+		case 0:
+			return (rng.Float64()*2 - 0.5) * limit * 1e6 // far off the canvas
+		case 1:
+			return math.Round(rng.Float64()*limit) + 0.5*float64(rng.IntN(2))
+		default:
+			return (rng.Float64()*1.4 - 0.2) * limit
+		}
+	}
+	widths := []func() float64{
+		func() float64 { return 1 },
+		func() float64 { return 1 + rng.Float64()*6 },
+		func() float64 { return rng.Float64() * 200 },
+		func() float64 { return math.Pow(10, 10+rng.Float64()*290) }, // steps past 2^53
+	}
+	col := color.RGBA{30, 140, 200, 0x80}
+	for i := 0; i < 6000; i++ {
+		clip := clips[i%len(clips)]
+		a := point{coord(w), coord(h)}
+		b := point{coord(w), coord(h)}
+		switch i % 7 {
+		case 1:
+			b.Y = a.Y
+		case 2:
+			b.X = a.X
+		case 3:
+			b = a
+		}
+		width := widths[i%len(widths)]()
+		want := newRaster(w, h)
+		want.clip = clip
+		lineByBisection(want, a, b, col, width)
+		got := newRaster(w, h)
+		got.clip = clip
+		got.line(a, b, col, width)
+		if !bytes.Equal(want.img.Pix, got.img.Pix) {
+			t.Fatalf("case %d: a=%v b=%v width=%v clip=%v: pixels differ from the bisection reference", i, a, b, width, clip)
+		}
+	}
+}
+
+// TestFirstTrueNear checks the hinted search returns exactly firstTrue's and
+// lastTrue's results for every boundary and every hint, including hints out of
+// range and n past 2^53 (the bisection fallback).
+func TestFirstTrueNear(t *testing.T) {
+	for _, n := range []float64{0, 1, 2, 3, 7, 64, 1000} {
+		for bound := -1.0; bound <= n+1; bound++ {
+			up := func(s float64) bool { return s >= bound }   // false…false true…true
+			down := func(s float64) bool { return s <= bound } // true…true false…false
+			wantS, wantOK := firstTrue(n, up)
+			wantLast := lastTrue(n, down)
+			for hint := -2.0; hint <= n+2; hint++ {
+				if s, ok := firstTrueNear(n, up, hint); s != wantS || ok != wantOK {
+					t.Fatalf("firstTrueNear(n=%g, s>=%g, hint=%g) = %g, %v; want %g, %v", n, bound, hint, s, ok, wantS, wantOK)
+				}
+				if s := lastTrueNear(n, down, hint); s != wantLast {
+					t.Fatalf("lastTrueNear(n=%g, s<=%g, hint=%g) = %g; want %g", n, bound, hint, s, wantLast)
+				}
+			}
+		}
+	}
+	for _, n := range []float64{maxExactInt, maxExactInt * 4, 1e300} {
+		for _, frac := range []float64{0, 0.25, 0.5, 0.999, 1} {
+			bound := math.Floor(n * frac)
+			up := func(s float64) bool { return s >= bound }
+			wantS, wantOK := firstTrue(n, up)
+			for _, hint := range []float64{0, bound, n} {
+				if s, ok := firstTrueNear(n, up, hint); s != wantS || ok != wantOK {
+					t.Fatalf("firstTrueNear(n=%g, s>=%g, hint=%g) = %g, %v; want %g, %v", n, bound, hint, s, ok, wantS, wantOK)
+				}
+			}
+		}
+	}
+}
+
 // Float→int conversions of out-of-range values are implementation-defined in Go:
 // amd64 yields MinInt64 for ±Inf, NaN and anything beyond the int range, while
 // js/wasm and arm64 saturate (NaN → 0). The tests below pin one exact,

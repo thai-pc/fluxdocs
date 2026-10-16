@@ -208,6 +208,9 @@ func TestDeviceMatrix_HostileSizesRejected(t *testing.T) {
 			if err == nil {
 				t.Fatalf("deviceMatrix accepted a %dx%d canvas, want error", pxW, pxH)
 			}
+			if !errors.Is(err, ErrCanvasTooLarge) {
+				t.Errorf("err = %v, want ErrCanvasTooLarge", err)
+			}
 		})
 	}
 }
@@ -228,8 +231,8 @@ func TestPage_HugeMediaBoxReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Page(r, pages[0], Options{DPI: 1, Format: "png"}); err == nil {
-		t.Fatal("Page rendered a 1e18 pt MediaBox, want canvas-too-large error")
+	if _, err := Page(r, pages[0], Options{DPI: 1, Format: "png"}); !errors.Is(err, ErrCanvasTooLarge) {
+		t.Fatalf("Page on a 1e18 pt MediaBox: err = %v, want ErrCanvasTooLarge", err)
 	}
 }
 
@@ -272,6 +275,9 @@ func TestDeviceMatrix_CanvasCapBoundary(t *testing.T) {
 				if !strings.Contains(err.Error(), "exceeds") {
 					t.Fatalf("err = %v, want a canvas-too-large (\"exceeds\") error", err)
 				}
+				if !errors.Is(err, ErrCanvasTooLarge) {
+					t.Errorf("err = %v, want ErrCanvasTooLarge", err)
+				}
 				return
 			}
 			if err != nil {
@@ -309,6 +315,9 @@ func TestDeviceMatrix_HostileBoxShapes(t *testing.T) {
 			_, pxW, pxH, err := deviceMatrix(tc.mb, tc.rot, tc.scale)
 			if err == nil {
 				t.Fatalf("deviceMatrix accepted a %dx%d canvas, want error", pxW, pxH)
+			}
+			if !errors.Is(err, ErrCanvasTooLarge) {
+				t.Errorf("err = %v, want ErrCanvasTooLarge", err)
 			}
 		})
 	}
@@ -370,8 +379,92 @@ func TestPage_DPIDefaultAndExtremesHitCanvasCap(t *testing.T) {
 	// At 150 DPI the page is 8334x8334 = 69.4M px > 64Mi px.
 	for _, dpi := range []int{0, -1, math.MinInt, math.MaxInt} {
 		_, err := Page(r, pages[0], Options{DPI: dpi, Format: "png"})
-		if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		if err == nil || !strings.Contains(err.Error(), "exceeds") || !errors.Is(err, ErrCanvasTooLarge) {
 			t.Errorf("DPI %d: err = %v, want canvas-too-large error", dpi, err)
 		}
 	}
+}
+
+// TestQ_SaveDepthIsCapped: a flood of q (8 Mi, well within MaxOperators) keeps
+// at most maxSaveDepth saved states; the excess is counted instead of saved.
+// Before the cap each q copied the graphics state onto the stack (≈ 3 GB for
+// 8 Mi q natively, fatal under js/wasm).
+func TestQ_SaveDepthIsCapped(t *testing.T) {
+	rs := newRaster(10, 10)
+	in := &interp{rs: rs, b: rs.b, gs: gstate{ctm: identity(), clip: fullClip(10, 10)}}
+	q := parse.ContentOp{Op: "q"}
+	const n = 8 << 20
+	for i := 0; i < n; i++ {
+		in.apply(q)
+	}
+	if len(in.stack) != maxSaveDepth || cap(in.stack) > 2*maxSaveDepth {
+		t.Errorf("stack len %d cap %d, want len %d and a bounded cap", len(in.stack), cap(in.stack), maxSaveDepth)
+	}
+	if in.skippedQ != n-maxSaveDepth {
+		t.Errorf("skippedQ = %d, want %d", in.skippedQ, n-maxSaveDepth)
+	}
+}
+
+// TestQ_IgnoredQSwallowsItsQ pins the lenient pairing past maxSaveDepth: the Q
+// matching an ignored q is swallowed (it restores nothing, so state set inside
+// stays), and the next Q pops the deepest saved state as usual.
+func TestQ_IgnoredQSwallowsItsQ(t *testing.T) {
+	const extra = 6
+	content := "1 0 0 rg " + strings.Repeat("q ", maxSaveDepth+extra) + "0 0 1 rg " +
+		strings.Repeat("Q ", extra) + "0 0 50 100 re f " + // blue: the swallowed Qs restore nothing
+		"Q 50 0 50 100 re f" // red: this Q pops the state saved by the last real q
+	img := renderRect(t, content, Options{DPI: 72})
+	blue, red := color.RGBA{0, 0, 255, 255}, color.RGBA{255, 0, 0, 255}
+	if c := img.At(25, 50); !nearlyEqual(c, blue, 2) {
+		t.Errorf("left half = %v, want blue", c)
+	}
+	if c := img.At(75, 50); !nearlyEqual(c, red, 2) {
+		t.Errorf("right half = %v, want red", c)
+	}
+}
+
+// saveDepthPage is content that fills the graphics-state stack to exactly
+// maxSaveDepth with distinct colours in the top two frames: green below,
+// yellow saved by the next-to-last q, cyan by the last. Any Q after it that is
+// not swallowed restores cyan, then yellow, then green.
+func saveDepthPage() string {
+	return "0 1 0 rg " + strings.Repeat("q ", maxSaveDepth-2) + "1 1 0 rg q 0 1 1 rg q "
+}
+
+// TestQ_FormSkippedQIsScoped pins how ignored q operators (past maxSaveDepth)
+// interact with a Form XObject: the form starts with none of the caller's
+// (form.go resets skippedQ), so its own Q pops its implicit frame rather than
+// consuming the caller's ignored q; and the caller's count is restored on exit,
+// in both directions — the caller's ignored q still pair with its Qs after the
+// Do, and an ignored q the form leaves open does not swallow a caller Q.
+func TestQ_FormSkippedQIsScoped(t *testing.T) {
+	cyan, red := color.RGBA{0, 255, 255, 255}, color.RGBA{255, 0, 0, 255}
+	form := func(content string) map[int]string {
+		return map[int]string{5: formStreamObj("/BBox [0 0 50 100]", content)}
+	}
+	t.Run("caller's ignored q survive a Do", func(t *testing.T) {
+		// Two ignored q (skippedQ 2), blue fill, Do, then Q Q (swallowed: they
+		// pair with the ignored q) and Q (pops the cyan frame).
+		content := saveDepthPage() + "q q 0 0 1 rg /Fm Do Q Q Q 0 0 10 10 re f"
+		img := renderFormPDF(t, "<< /XObject << /Fm 5 0 R >> >>", content,
+			form("Q Q 1 0 0 rg 0 0 100 100 re f"))
+		if c := img.At(5, 95); !nearlyEqual(c, cyan, 2) {
+			t.Errorf("caller fill after the Do = %v, want cyan (the caller's ignored q paired with its Qs)", c)
+		}
+		// The form's first Q popped the form's own implicit frame (dropping its
+		// /BBox clip) instead of consuming one of the caller's ignored q, so
+		// its red fill reaches the right half.
+		if c := img.At(75, 50); !nearlyEqual(c, red, 2) {
+			t.Errorf("form fill outside its /BBox = %v, want red (the form's Q must not consume the caller's ignored q)", c)
+		}
+	})
+	t.Run("form's ignored q does not leak", func(t *testing.T) {
+		// The stack is full on entry, so the form's q is ignored. After the Do
+		// the caller's Q must pop the cyan frame, not be swallowed.
+		content := saveDepthPage() + "0 0 1 rg /Fm Do Q 0 0 10 10 re f"
+		img := renderFormPDF(t, "<< /XObject << /Fm 5 0 R >> >>", content, form("q 1 0 0 rg"))
+		if c := img.At(5, 95); !nearlyEqual(c, cyan, 2) {
+			t.Errorf("caller fill after the Do = %v, want cyan (the form's ignored q leaked)", c)
+		}
+	})
 }

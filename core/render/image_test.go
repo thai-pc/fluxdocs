@@ -578,7 +578,7 @@ func TestDecodeJPEG_HeaderSizeCheckedBeforeDecode(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	_, ok := decodeJPEG(&parse.Stream{Raw: raw})
+	_, ok := decodeJPEG(&parse.Stream{Raw: raw}, 0, unlimitedBudget())
 	runtime.ReadMemStats(&after)
 	if ok {
 		t.Fatal("decodeJPEG accepted a 16384x16384 frame over the pixel cap")
@@ -636,7 +636,7 @@ func TestDecodeJPEG_DecoderBytesCheckedBeforeDecode(t *testing.T) {
 			var before, after runtime.MemStats
 			runtime.GC()
 			runtime.ReadMemStats(&before)
-			_, ok := decodeJPEG(&parse.Stream{Raw: tc.raw})
+			_, ok := decodeJPEG(&parse.Stream{Raw: tc.raw}, 0, unlimitedBudget())
 			runtime.ReadMemStats(&after)
 			if ok {
 				t.Fatal("decodeJPEG accepted a header-only frame")

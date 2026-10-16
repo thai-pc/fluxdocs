@@ -27,8 +27,10 @@ const (
 // ref is the XObject's indirect reference and hasRef reports whether the entry
 // was reached through one (rather than being a direct/inline stream); together
 // they key the font cache and the cycle guard. Any tripwire — depth, cycle,
-// budget, an undecodable content stream — is a silent no-op for this Do, leaving
-// the rest of the page intact.
+// form budget, an undecodable content stream — is a silent no-op for this Do,
+// leaving the rest of the page intact. The form's decoded bytes and operators
+// are also charged to the page's render budget (budget.go); exhausting that is
+// not silent: it stops the render with ErrBudgetExceeded.
 func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	// --- security guards (§6): depth, cycle, budget ---
 	if in.formBudget <= 0 || in.formDepth >= maxFormDepth {
@@ -38,10 +40,15 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 		return // direct or indirect self-reference (cycle)
 	}
 
-	// Decode the content stream up front; an unsupported filter or decode error
-	// is a graceful skip that consumes no budget and touches no state.
-	data, err := parse.DecodeStream(st)
-	if err != nil {
+	// Decode the content stream up front, charging every byte the filters
+	// produce to content bytes before anything is scanned, so a form whose
+	// content is empty of operators (whitespace, comments) but huge still costs
+	// its size on every Do, and the decode stops at what the budget has left. An
+	// unsupported filter or decode error is a graceful skip that touches no
+	// state (the bytes inflated before the error stay charged); a trip stops the
+	// render.
+	data, ok := in.b.decodeContent(st)
+	if !ok {
 		return
 	}
 
@@ -58,6 +65,7 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	baseLen := len(in.stack)
 	savedGS := in.gs
 	savedFloor := in.stackFloor
+	savedSkippedQ := in.skippedQ
 	savedResources := in.resources
 	savedFonts := in.fonts
 	savedTM := in.tm
@@ -65,6 +73,7 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	savedSubpaths := in.subpaths
 	savedClosed := in.closed
 	savedCur := in.cur
+	savedPathPoints := in.pathPoints
 	savedCurX, savedCurY := in.curX, in.curY
 	savedStartX, savedStartY := in.startX, in.startY
 
@@ -84,6 +93,7 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 		in.stack = in.stack[:baseLen]
 		in.gs = savedGS
 		in.stackFloor = savedFloor
+		in.skippedQ = savedSkippedQ
 		in.resources = savedResources
 		in.fonts = savedFonts
 		in.tm = savedTM
@@ -91,6 +101,7 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 		in.subpaths = savedSubpaths
 		in.closed = savedClosed
 		in.cur = savedCur
+		in.pathPoints = savedPathPoints
 		in.curX, in.curY = savedCurX, savedCurY
 		in.startX, in.startY = savedStartX, savedStartY
 		in.syncClip()
@@ -101,10 +112,12 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	in.subpaths = nil
 	in.closed = nil
 	in.cur = nil
+	in.pathPoints = 0
 
 	// --- implicit q: push graphics state; floor Q at the form's own frames ---
 	in.stack = append(in.stack, in.gs)
 	in.stackFloor = baseLen
+	in.skippedQ = 0 // the form's Q cannot consume the caller's ignored q
 
 	// --- concatenate the form /Matrix onto the CTM (§3.2) ---
 	in.gs.ctm = formMatrix(in.res, st.Dict).mul(in.gs.ctm)
@@ -141,12 +154,12 @@ func (in *interp) syncClip() {
 // not. An inline (reference-less) form reloads its fonts without caching.
 func (in *interp) formFonts(ref parse.Reference, hasRef bool, formRes parse.Dict) map[parse.Name]*glyphFont {
 	if !hasRef {
-		return loadFonts(in.res, formRes)
+		return loadFonts(in.res, formRes, in.b)
 	}
 	if cached, ok := in.fontCache[ref]; ok {
 		return cached
 	}
-	fonts := loadFonts(in.res, formRes)
+	fonts := loadFonts(in.res, formRes, in.b)
 	in.fontCache[ref] = fonts
 	return fonts
 }

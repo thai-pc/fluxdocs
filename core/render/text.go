@@ -8,7 +8,9 @@ import (
 
 // drawText rasterizes a shown string with the current font and text state,
 // advancing the text matrix by each glyph's width (plus character and word
-// spacing). Invisible render modes (3, 7) advance without drawing.
+// spacing). Invisible render modes (3, 7) advance without drawing. Every glyph,
+// drawn or only advanced, is one budget step, so one Tj with a huge string is
+// bounded like a huge operator list.
 func (in *interp) drawText(raw []byte) {
 	gf := in.gs.font
 	if gf == nil || len(raw) == 0 {
@@ -16,7 +18,10 @@ func (in *interp) drawText(raw []byte) {
 	}
 	invisible := in.gs.renderMode == 3 || in.gs.renderMode == 7
 
-	gf.forEachCode(raw, func(code uint32, isSpace bool) {
+	gf.forEachCode(raw, func(code uint32, isSpace bool) bool {
+		if !in.b.step() {
+			return false
+		}
 		gid, ok := gf.gid(code)
 		if ok && !invisible {
 			in.drawGlyph(gf, gid)
@@ -32,11 +37,13 @@ func (in *interp) drawText(raw []byte) {
 		}
 		tx *= in.gs.hScale
 		in.tm = translate(tx, 0).mul(in.tm)
+		return true
 	})
 }
 
 // drawTextArray handles TJ: strings interleaved with numeric position
-// adjustments. A number moves the pen by -adj/1000 * fontSize * hScale.
+// adjustments. A number moves the pen by -adj/1000 * fontSize * hScale. Each
+// array element is one budget step (on top of the glyphs its strings show).
 func (in *interp) drawTextArray(operands []parse.Object) {
 	var arr parse.Array
 	for i := len(operands) - 1; i >= 0; i-- {
@@ -46,6 +53,9 @@ func (in *interp) drawTextArray(operands []parse.Object) {
 		}
 	}
 	for _, el := range arr {
+		if !in.b.step() {
+			return
+		}
 		switch v := el.(type) {
 		case parse.String:
 			in.drawText(v.Value)
@@ -71,6 +81,16 @@ func (in *interp) drawGlyph(gf *glyphFont, gid sfnt.GlyphIndex) {
 	full := glyphToText.mul(in.tm).mul(in.gs.ctm)
 
 	subpaths := segmentsToSubpaths(segs, full)
+	// Loading and flattening an outline costs more per point than fillPath's
+	// fillPointCost setup charge: charge the difference, so a flood of tiny
+	// visible glyphs is bounded like any other raster work.
+	npts := 0
+	for _, sp := range subpaths {
+		npts += len(sp)
+	}
+	if !in.b.chargePaint(int64(npts) * glyphPointCost) {
+		return
+	}
 	if len(subpaths) > 0 {
 		in.rs.fillPath(subpaths, in.gs.fill, false) // nonzero winding (handles holes)
 	}

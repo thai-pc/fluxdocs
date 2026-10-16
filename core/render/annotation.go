@@ -48,9 +48,13 @@ const (
 // drawAnnotations paints every annotation over the raster using base (the PDF
 // user space → device pixel matrix already used for the page content). It is
 // called after the content is drawn, so annotations sit on top. A malformed
-// annotation is skipped, never a panic.
+// annotation is skipped, never a panic. The overlay draws through the same
+// raster, so it is charged to the page's budget and stops when that is spent.
 func drawAnnotations(rs *raster, base matrix, annots []Annotation) {
 	for i := range annots {
+		if rs.b.stopped() {
+			return
+		}
 		drawAnnotation(rs, base, annots[i])
 	}
 }

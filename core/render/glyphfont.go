@@ -28,7 +28,9 @@ type glyphFont struct {
 // loadFonts builds a glyphFont for each entry of a page's /Font resources.
 // Fonts that cannot be loaded (missing/embedded-only-unsupported program, parse
 // failure) are omitted; their text is skipped rather than failing the render.
-func loadFonts(r *parse.Resolver, resources parse.Dict) map[parse.Name]*glyphFont {
+// Font programs are decoded through b (budget.decode); once it stops, no more
+// fonts are loaded.
+func loadFonts(r *parse.Resolver, resources parse.Dict, b *budget) map[parse.Name]*glyphFont {
 	out := map[parse.Name]*glyphFont{}
 	if resources == nil {
 		return out
@@ -42,7 +44,10 @@ func loadFonts(r *parse.Resolver, resources parse.Dict) map[parse.Name]*glyphFon
 		if err != nil || !ok {
 			continue
 		}
-		if gf := loadOneFont(r, fd); gf != nil {
+		if b.stopped() {
+			break
+		}
+		if gf := loadOneFont(r, fd, b); gf != nil {
 			out[name] = gf
 		}
 	}
@@ -52,7 +57,7 @@ func loadFonts(r *parse.Resolver, resources parse.Dict) map[parse.Name]*glyphFon
 // loadOneFont resolves a font dictionary to an embedded program. For a Type0
 // composite font it follows /DescendantFonts to the CIDFont's descriptor and
 // treats codes as 2-byte glyph IDs (the Identity-H common case).
-func loadOneFont(r *parse.Resolver, fd parse.Dict) *glyphFont {
+func loadOneFont(r *parse.Resolver, fd parse.Dict, b *budget) *glyphFont {
 	subtype, _ := fd.GetName("Subtype")
 	twoByte := subtype == "Type0"
 
@@ -69,7 +74,7 @@ func loadOneFont(r *parse.Resolver, fd parse.Dict) *glyphFont {
 	if err != nil || !ok {
 		return nil
 	}
-	data, ok := fontProgram(r, fdesc)
+	data, ok := fontProgram(r, fdesc, b)
 	if !ok {
 		return nil
 	}
@@ -100,14 +105,15 @@ func descendantFont(r *parse.Resolver, fd parse.Dict) (parse.Dict, bool) {
 
 // fontProgram returns the decoded bytes of an embedded sfnt font program from a
 // FontDescriptor: /FontFile2 (TrueType) or /FontFile3 (OpenType/CFF). /FontFile
-// (Type1) is not supported by sfnt and is skipped.
-func fontProgram(r *parse.Resolver, fdesc parse.Dict) ([]byte, bool) {
+// (Type1) is not supported by sfnt and is skipped. The program is decoded
+// through b, which charges every byte as decoded bytes.
+func fontProgram(r *parse.Resolver, fdesc parse.Dict, b *budget) ([]byte, bool) {
 	for _, key := range []parse.Name{"FontFile2", "FontFile3"} {
 		st, ok := resolveStream(r, fdesc[key])
 		if !ok {
 			continue
 		}
-		if data, err := parse.DecodeStream(st); err == nil && len(data) > 0 {
+		if data, ok := b.decode(st, 0); ok && len(data) > 0 {
 			return data, true
 		}
 	}
@@ -152,15 +158,20 @@ func (gf *glyphFont) advanceEm(gid sfnt.GlyphIndex) float64 {
 
 // forEachCode iterates the character codes in a shown string, reporting whether
 // each is a single-byte space (for word spacing). Composite fonts read 2 bytes
-// per code; simple fonts read one.
-func (gf *glyphFont) forEachCode(raw []byte, fn func(code uint32, isSpace bool)) {
+// per code; simple fonts read one. The iteration stops early when fn returns
+// false (the render budget is spent).
+func (gf *glyphFont) forEachCode(raw []byte, fn func(code uint32, isSpace bool) bool) {
 	if gf.twoByte {
 		for i := 0; i+1 < len(raw); i += 2 {
-			fn(uint32(raw[i])<<8|uint32(raw[i+1]), false)
+			if !fn(uint32(raw[i])<<8|uint32(raw[i+1]), false) {
+				return
+			}
 		}
 		return
 	}
 	for _, b := range raw {
-		fn(uint32(b), b == 32)
+		if !fn(uint32(b), b == 32) {
+			return
+		}
 	}
 }
