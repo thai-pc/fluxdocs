@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // secretPDF builds a one-page PDF with a secret and public text.
@@ -90,5 +93,108 @@ func TestBadInput(t *testing.T) {
 	}
 	if rr := post(t, srv, "/redact", secretPDF()); rr.Code != http.StatusBadRequest {
 		t.Errorf("missing pattern status = %d, want 400", rr.Code)
+	}
+}
+
+// floodPDF builds a one-page PDF (w x h pt) whose content repeats a full-page
+// fill n times: cheap to send, but n canvases of raster work to render.
+func floodPDF(w, h, n int) []byte {
+	var b bytes.Buffer
+	content := strings.Repeat(fmt.Sprintf("0 0 %d %d re f\n", w, h), n)
+	objs := map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: fmt.Sprintf("<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 %d %d] >>", w, h),
+		3: "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+		4: fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+	}
+	b.WriteString("%PDF-1.7\n")
+	off := map[int]int{}
+	for i := 1; i <= 4; i++ {
+		off[i] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i, objs[i])
+	}
+	x := b.Len()
+	fmt.Fprintf(&b, "xref\n0 5\n0000000000 65535 f \n")
+	for i := 1; i <= 4; i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", off[i])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", x)
+	return b.Bytes()
+}
+
+// TestThumbnailBudgetExceeded: a page over the render budget is a property of
+// the document (422), with a fixed message, never document content.
+func TestThumbnailBudgetExceeded(t *testing.T) {
+	// Lift the deadline so the outcome cannot depend on host speed: under -race
+	// on a loaded host the 10 s default can fire (503) before the budget trips.
+	old := thumbnailTimeout
+	thumbnailTimeout = time.Hour
+	t.Cleanup(func() { thumbnailTimeout = old })
+	rr := post(t, NewServer(), "/thumbnail?page=0&dpi=72", floodPDF(300, 800, 500))
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (%s)", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != "page too complex to render" {
+		t.Errorf("body = %q, want the fixed message", got)
+	}
+}
+
+// TestThumbnailBadPage: any other render failure (here a page index out of
+// range) is a 400 with fixed text, never the error string.
+func TestThumbnailBadPage(t *testing.T) {
+	rr := post(t, NewServer(), "/thumbnail?page=99&dpi=72", secretPDF())
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != "cannot render page" {
+		t.Errorf("body = %q, want the fixed message", got)
+	}
+}
+
+// TestThumbnailDeadline: a render past the server deadline is load-dependent
+// (503), not a budget error.
+func TestThumbnailDeadline(t *testing.T) {
+	old := thumbnailTimeout
+	thumbnailTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { thumbnailTimeout = old })
+
+	// 2000 pt at 150 DPI: a 4167x4167 canvas whose default budget (≈ 556 M
+	// pixel visits) takes seconds to spend, far past 50 ms.
+	start := time.Now()
+	rr := post(t, NewServer(), "/thumbnail?page=0&dpi=150", floodPDF(2000, 2000, 100))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (%s)", rr.Code, rr.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("request took %v, want shortly after the 50ms deadline", elapsed)
+	}
+}
+
+// TestThumbnailClientGone: when the client has disconnected, nothing is written.
+func TestThumbnailClientGone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/thumbnail?page=0&dpi=150", bytes.NewReader(floodPDF(2000, 2000, 100))).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	NewServer().ServeHTTP(rr, req)
+	if rr.Body.Len() != 0 || rr.Header().Get("Content-Type") != "" {
+		t.Errorf("wrote %q (Content-Type %q) to a gone client, want nothing", rr.Body.String(), rr.Header().Get("Content-Type"))
+	}
+}
+
+// TestThumbnailClampsDPI: an absurd ?dpi is clamped to maxThumbnailDPI rather
+// than hitting the canvas cap.
+func TestThumbnailClampsDPI(t *testing.T) {
+	rr := post(t, NewServer(), "/thumbnail?page=0&dpi=100000", secretPDF())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	img, err := png.Decode(bytes.NewReader(rr.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 300 x 800 pt at 300 DPI.
+	if b := img.Bounds(); b.Dx() != 1250 || b.Dy() != 3334 {
+		t.Errorf("thumbnail = %dx%d, want 1250x3334 (dpi clamped to %d)", b.Dx(), b.Dy(), maxThumbnailDPI)
 	}
 }

@@ -1,12 +1,20 @@
 package mcp
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"sort"
+	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
 )
+
+// renderTimeout bounds one render_page call's wall clock, on top of the core's
+// per-page work budget. callTool has no request context yet (stdio, sequential),
+// so the deadline starts from context.Background(); wiring MCP
+// notifications/cancelled is a later follow-up.
+var renderTimeout = 10 * time.Second
 
 // tool is one MCP tool: its schema and a handler that returns result content
 // and whether the call errored.
@@ -174,7 +182,9 @@ func init() {
 			if !ok {
 				return errText("unknown document handle %d", a.Handle)
 			}
-			img, err := doc.RenderPage(a.Page, core.RenderOptions{DPI: a.DPI, Format: "png"})
+			ctx, cancel := context.WithTimeout(context.Background(), renderTimeout)
+			defer cancel()
+			img, err := doc.RenderPageContext(ctx, a.Page, core.RenderOptions{DPI: a.DPI, Format: "png"})
 			if err != nil {
 				return errText("render failed: %v", err)
 			}

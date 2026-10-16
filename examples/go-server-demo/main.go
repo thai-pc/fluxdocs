@@ -10,14 +10,25 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
 )
+
+// thumbnailTimeout bounds one /thumbnail render's wall clock, on top of the
+// core's per-page work budget (a variable so tests can shorten it).
+var thumbnailTimeout = 10 * time.Second
+
+// maxThumbnailDPI caps ?dpi: a thumbnail endpoint has no use for print
+// resolution, and the canvas (and the default budget) grows with DPI².
+const maxThumbnailDPI = 300
 
 func main() {
 	addr := ":8080"
@@ -65,7 +76,16 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, text)
 }
 
-// handleThumbnail renders a page (?page=N, default 0) to PNG.
+// handleThumbnail renders a page (?page=N, default 0; ?dpi=N, default 96,
+// clamped to maxThumbnailDPI) to PNG. The render runs under the core's per-page
+// budget and a thumbnailTimeout deadline derived from the request context, so a
+// client disconnect cancels it too:
+//   - over budget (a page too complex to render): 422, a property of the
+//     document, retrying does not help;
+//   - past the deadline: 503, load-dependent, a retry may succeed;
+//   - client gone: nothing is written.
+//
+// Error bodies are fixed text, never document content (SECURITY.md §4).
 func handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	doc, ok := readDoc(w, r)
 	if !ok {
@@ -82,9 +102,28 @@ func handleThumbnail(w http.ResponseWriter, r *http.Request) {
 			dpi = n
 		}
 	}
-	img, err := doc.RenderPage(page, core.RenderOptions{DPI: dpi, Format: "png"})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if dpi > maxThumbnailDPI {
+		dpi = maxThumbnailDPI
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), thumbnailTimeout)
+	defer cancel()
+	img, err := doc.RenderPageContext(ctx, page, core.RenderOptions{DPI: dpi, Format: "png"})
+	switch {
+	case err == nil:
+	case errors.Is(err, core.ErrRenderBudgetExceeded):
+		http.Error(w, "page too complex to render", http.StatusUnprocessableEntity)
+		return
+	case errors.Is(err, context.DeadlineExceeded):
+		http.Error(w, "render timed out", http.StatusServiceUnavailable)
+		return
+	case errors.Is(err, context.Canceled):
+		return // the client went away: nobody to answer
+	case errors.Is(err, core.ErrInternal):
+		log.Printf("thumbnail: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	default: // e.g. a page index out of range
+		http.Error(w, "cannot render page", http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
