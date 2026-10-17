@@ -121,7 +121,7 @@ func (r *Resolver) decodeObjStm(streamNum int) (*objStm, error) {
 	if e.Offset < 0 || e.Offset >= int64(len(r.data)) {
 		return nil, fmt.Errorf("%w: ObjStm %d offset out of range", errLex, streamNum)
 	}
-	_, gen, obj, _, err := ParseIndirectObjectAt(r.data, int(e.Offset))
+	_, gen, obj, _, err := parseIndirectObjectAt(r.data, int(e.Offset), r.directLength)
 	if err != nil {
 		return nil, fmt.Errorf("loading ObjStm %d: %w", streamNum, err)
 	}

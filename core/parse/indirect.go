@@ -26,6 +26,12 @@ type iparser struct {
 	// content stream, so `<< >> stream … endstream` there is a dictionary and
 	// unknown operators, not opaque bytes that would hide the operators within.
 	lenient bool
+
+	// length, when set, resolves an indirect /Length (a reference to an
+	// integer object) for a stream: without it the stream's end is found by
+	// scanning for endstream, which cannot tell a final CR or LF of the data
+	// from the end-of-line before endstream.
+	length func(Reference) (int, bool)
 }
 
 // maxNestingDepth bounds how deeply arrays and dictionaries may nest in one
@@ -249,7 +255,14 @@ func (p *iparser) maybeStream(d Dict) (Object, error) {
 	// Bound /Length by the remaining input in int64 before adding: a hostile
 	// MaxInt64 wrapped start+length negative and indexed data[-n] (SECURITY.md
 	// §2). An over-long /Length falls back to the endstream scan below.
-	if length, ok := d.GetInt("Length"); ok && length >= 0 && int64(length) <= int64(len(p.data)-start) {
+	length, ok := d.GetInt("Length")
+	if ref, isRef := d["Length"].(Reference); isRef && p.length != nil {
+		var n int
+		if n, ok = p.length(ref); ok {
+			length = Integer(n)
+		}
+	}
+	if ok && length >= 0 && int64(length) <= int64(len(p.data)-start) {
 		cand := start + int(length)
 		// Validate: after Length bytes (skipping EOL) must come 'endstream'.
 		probe := skipStreamEOL(p.data, cand)
@@ -308,7 +321,13 @@ func trimTrailingEOL(data []byte, start, end int) int {
 // past 'endobj' (or just past the object if 'endobj' is missing — lenient). On
 // failure it returns a wrapped errLex and next == off.
 func ParseIndirectObjectAt(data []byte, off int) (num, gen int, obj Object, next int, err error) {
-	p := &iparser{data: data, pos: off}
+	return parseIndirectObjectAt(data, off, nil)
+}
+
+// parseIndirectObjectAt is ParseIndirectObjectAt with an indirect /Length
+// resolver for a stream (see iparser.length; nil for none).
+func parseIndirectObjectAt(data []byte, off int, length func(Reference) (int, bool)) (num, gen int, obj Object, next int, err error) {
+	p := &iparser{data: data, pos: off, length: length}
 
 	t0, n0, e := nextToken(data, p.pos)
 	if e != nil || t0.kind != tokInt {

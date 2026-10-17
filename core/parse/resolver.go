@@ -51,6 +51,7 @@ type Resolver struct {
 	mu         sync.Mutex // guards the caches and counters below
 	cache      map[int]Object
 	errs       map[int]error         // object() failures, keyed by object number
+	lengths    map[int]int           // directLength results by object number; -1 for none
 	objstms    map[int]*list.Element // decoded /ObjStm (*cachedObjStm in objstmLRU), keyed by stream object number
 	objstmErrs map[int]error         // loadObjStm failures, keyed by stream object number
 
@@ -91,6 +92,7 @@ func NewResolver(data []byte) (*Resolver, error) {
 		xref:        x,
 		cache:       make(map[int]Object),
 		errs:        make(map[int]error),
+		lengths:     make(map[int]int),
 		objstms:     make(map[int]*list.Element),
 		objstmErrs:  make(map[int]error),
 		objstmLRU:   list.New(),
@@ -177,7 +179,7 @@ func (r *Resolver) loadObject(num int) (Object, error) {
 		return nil, fmt.Errorf("%w: object %d offset %d out of range", errLex, num, e.Offset)
 	}
 	r.loads++
-	_, gen, obj, _, err := ParseIndirectObjectAt(r.data, int(e.Offset))
+	_, gen, obj, _, err := parseIndirectObjectAt(r.data, int(e.Offset), r.directLength)
 	if err != nil {
 		return nil, fmt.Errorf("loading object %d: %w", num, err)
 	}
@@ -187,6 +189,53 @@ func (r *Resolver) loadObject(num int) (Object, error) {
 		obj = r.decrypt.decryptObject(num, gen, obj)
 	}
 	return obj, nil
+}
+
+// directLength resolves an indirect stream /Length: the integer object ref
+// names, when it is an uncompressed object written exactly as
+// "N G obj <integer> endobj" with ref's number and generation (a length in an
+// object stream, or anything else, is left to the endstream scan). It reads
+// only those tokens at the object's xref offset — never a whole object, so a
+// /Length that names a huge array or a stream costs a few tokens — and caches
+// the result per object number, failures included. It does not recurse into
+// object, so it is safe while r.mu is held (it must be held: it uses
+// r.lengths); integers are never encrypted. Returns false when ref is not
+// such an object.
+func (r *Resolver) directLength(ref Reference) (int, bool) {
+	if n, ok := r.lengths[ref.Number]; ok {
+		return n, n >= 0
+	}
+	n := r.readDirectLength(ref)
+	r.lengths[ref.Number] = n
+	return n, n >= 0
+}
+
+// readDirectLength is directLength's uncached read; -1 for none.
+func (r *Resolver) readDirectLength(ref Reference) int {
+	e, ok := r.xref.Entries[ref.Number]
+	if !ok || e.Free || e.InObjStm || e.Offset < 0 || e.Offset >= int64(len(r.data)) {
+		return -1
+	}
+	pos := int(e.Offset)
+	next := func(kind tokenKind) (token, bool) {
+		t, ni, err := nextToken(r.data, pos)
+		if err != nil || t.kind != kind {
+			return token{}, false
+		}
+		pos = ni
+		return t, true
+	}
+	num, ok1 := next(tokInt)
+	gen, ok2 := next(tokInt)
+	kw, ok3 := next(tokKeyword)
+	val, ok4 := next(tokInt)
+	end, ok5 := next(tokKeyword)
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || kw.kw != "obj" || end.kw != "endobj" ||
+		num.int != int64(ref.Number) || gen.int != int64(ref.Generation) ||
+		val.int < 0 || val.int > int64(len(r.data)) {
+		return -1
+	}
+	return int(val.int)
 }
 
 // EnableDecryption sets up the Standard Security Handler for an encrypted

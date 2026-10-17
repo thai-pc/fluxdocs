@@ -302,3 +302,36 @@ func TestDoS_RedactReachabilityBounded(t *testing.T) {
 		t.Errorf("took %v, want the reachability passes bounded", d)
 	}
 }
+
+// TestDoS_IndirectStreamLengthIsCheap: every page's content stream has
+// /Length 4 0 R, and object 4 is an array of 500,000 integers (about 1 MB).
+// Resolving the indirect length reads a few tokens once, not the whole
+// target per stream (batch D review round 2, BL1: 200 pages took 35.8 s and
+// 2,000 pages 7 min 37 s, against milliseconds without the target).
+func TestDoS_IndirectStreamLengthIsCheap(t *testing.T) {
+	skipUnlessTimed(t)
+	objs := []string{"<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		"[" + strings.Repeat("1 ", 500_000) + "]"}
+	var kids strings.Builder
+	const pages = 500
+	for p := 0; p < pages; p++ {
+		pn := len(objs) + 1
+		content := fmt.Sprintf("BT /F1 12 Tf 72 700 Td (page %d) Tj ET", p)
+		objs = append(objs, fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", pn+1),
+			fmt.Sprintf("<< /Length 4 0 R >>\nstream\n%s\nendstream", content))
+		fmt.Fprintf(&kids, "%d 0 R ", pn)
+	}
+	objs[1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", kids.String(), pages)
+	start := time.Now()
+	doc, err := core.OpenBytes(classicPDF(objs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := doc.ExtractText(core.ExtractOptions{})
+	if err != nil || !strings.Contains(text, "page 499") {
+		t.Fatalf("ExtractText: %v (text holds page 499: %v)", err, strings.Contains(text, "page 499"))
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("open and extract took %v, want the indirect lengths read once and cheaply", d)
+	}
+}

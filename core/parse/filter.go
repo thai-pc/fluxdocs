@@ -16,8 +16,10 @@ import (
 const maxDecoded = 256 << 20
 
 // DecodeStream applies a stream's /Filter chain to its raw bytes and returns the
-// decoded content. Currently supports FlateDecode (with PNG/TIFF predictors via
-// /DecodeParms). An unsupported filter yields a wrapped errLex.
+// decoded content. It supports FlateDecode and LZWDecode (with PNG/TIFF
+// predictors via /DecodeParms), ASCIIHexDecode, ASCII85Decode and
+// RunLengthDecode, in any chain. An unsupported filter (the image-only DCT,
+// JPX, JBIG2 and CCITT fax filters, Crypt) yields a wrapped errLex.
 //
 // Returns the decoded bytes, or an error if a filter is unsupported or decoding
 // fails (including exceeding maxDecoded).
@@ -62,6 +64,32 @@ func DecodeStreamLimit(s *Stream, limit int64) (data []byte, produced int64, err
 			dec, err = applyPredictor(dec, parmsAt(s.Dict["DecodeParms"], i))
 			if err != nil {
 				return nil, lim.produced, err
+			}
+			data = dec
+		case "ASCIIHexDecode", "AHx", "ASCII85Decode", "A85", "LZWDecode", "LZW", "RunLengthDecode", "RL":
+			var dec []byte
+			var err error
+			switch f {
+			case "ASCIIHexDecode", "AHx":
+				dec, err = asciiHexDecode(data, lim)
+			case "ASCII85Decode", "A85":
+				dec, err = ascii85Decode(data, lim)
+			case "LZWDecode", "LZW":
+				early := parmInt(parmsAt(s.Dict["DecodeParms"], i), "EarlyChange", 1) != 0
+				dec, err = lzwDecode(data, early, lim)
+			default:
+				dec, err = runLengthDecode(data, lim)
+			}
+			if err != nil {
+				if errors.Is(err, ErrDecodeLimit) {
+					return nil, lim.produced, err
+				}
+				return nil, lim.produced, fmt.Errorf("%w: %s: %v", errLex, f, err)
+			}
+			if f == "LZWDecode" || f == "LZW" {
+				if dec, err = applyPredictor(dec, parmsAt(s.Dict["DecodeParms"], i)); err != nil {
+					return nil, lim.produced, err
+				}
 			}
 			data = dec
 		default:
