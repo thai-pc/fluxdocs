@@ -264,3 +264,94 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestSplit_PageReferencesDoNotDragInPages: a split-off page whose link
+// points at another page does not carry that page (its content, annotations,
+// or the original page tree) into the output: the destination becomes null
+// (decision D11, docs/design/redaction-hardening.md §5.5). In a merge the
+// link points at the page's copy.
+func TestSplit_PageReferencesDoNotDragInPages(t *testing.T) {
+	pdf := buildCorePDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>",
+		3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		4: "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+		5: coreStreamObj("BT /F1 12 Tf 72 720 Td (PRIVATE-PAGE-ONE) Tj ET"),
+		6: "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R /Annots [8 0 R] >>",
+		7: coreStreamObj("BT /F1 12 Tf 72 720 Td (Page two) Tj ET"),
+		8: "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [4 0 R /Fit] /P 6 0 R >>",
+	}, "<< /Size 9 /Root 1 0 R >>")
+	doc, err := OpenBytes(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := doc.Split([][2]int{{1, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := parts[0].Bytes()
+	if bytes.Contains(raw, []byte("PRIVATE-PAGE-ONE")) {
+		t.Error("split-off page 1 carries page 0's content through its link")
+	}
+	if n := bytes.Count(raw, []byte("/Type /Pages")); n != 1 {
+		t.Errorf("%d page-tree nodes in the split output, want 1", n)
+	}
+
+	merged, err := doc.Merge(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.PageCount != 4 {
+		t.Fatalf("merged %d pages, want 4", merged.PageCount)
+	}
+	raw, _ = merged.Bytes()
+	if n := bytes.Count(raw, []byte("PRIVATE-PAGE-ONE")); n != 1 {
+		t.Errorf("page 0's content written %d times in Merge(d, d), want once (shared stream)", n)
+	}
+}
+
+// TestSplit_OrphanPagesAndForeignAnnotations: a link to a page object that is
+// not in the page tree, and a reply (/IRT) to an annotation of a page outside
+// the build, do not carry that page's content or annotation into the output
+// (D11; batch C review S1, N5).
+func TestSplit_OrphanPagesAndForeignAnnotations(t *testing.T) {
+	pdf := buildCorePDF(map[int]string{
+		1:  "<< /Type /Catalog /Pages 2 0 R >>",
+		2:  "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+		3:  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Annots [7 0 R] >>",
+		4:  coreStreamObj("BT /F1 12 Tf 72 720 Td (PAGE-ONE) Tj ET"),
+		5:  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Annots [8 0 R 9 0 R] >>",
+		6:  coreStreamObj("BT /F1 12 Tf 72 720 Td (PAGE-TWO) Tj ET"),
+		7:  "<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /Contents (ANNOT-OF-PAGE-ONE) /P 3 0 R >>",
+		8:  "<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /Contents (reply) /IRT 7 0 R /P 5 0 R >>",
+		9:  "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [10 0 R /Fit] >>",
+		10: "<< /Type /Page /MediaBox [0 0 612 792] /Contents 11 0 R >>",
+		11: coreStreamObj("BT /F1 12 Tf 72 720 Td (ORPHAN-PAGE) Tj ET"),
+	}, "<< /Size 12 /Root 1 0 R >>")
+	doc, err := OpenBytes(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := doc.Split([][2]int{{1, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := parts[0].Bytes()
+	for _, s := range []string{"ORPHAN-PAGE", "ANNOT-OF-PAGE-ONE", "PAGE-ONE"} {
+		if bytes.Contains(raw, []byte(s)) {
+			t.Errorf("split-off page 1 carries %s", s)
+		}
+	}
+	if !bytes.Contains(raw, []byte("reply")) {
+		t.Error("page 1's own annotation was lost")
+	}
+	// Both pages: the reply keeps its /IRT.
+	all, err := doc.Split([][2]int{{0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = all[0].Bytes()
+	if n := bytes.Count(raw, []byte("ANNOT-OF-PAGE-ONE")); n != 1 {
+		t.Errorf("page 0's annotation written %d times, want once", n)
+	}
+}

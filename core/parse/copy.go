@@ -58,9 +58,30 @@ type PageSource struct {
 	// of the resources with stripped marked-content property lists.
 	ReplaceResources Dict
 
-	// DropAnnots, when true, removes the copied page's /Annots. Redaction sets it
-	// so annotation objects that may carry the redacted text are not copied.
+	// DropAnnots, when true, removes the copied page's /Annots after the copy
+	// (the annotation objects are still written). Form flattening uses it;
+	// redaction uses Redacted, which copies no annotation at all.
 	DropAnnots bool
+
+	// Redacted marks a page whose content redaction removed (docs/design/
+	// redaction-hardening.md §5.5). Only the page-dictionary entries a viewer
+	// needs to paint the page are copied: /Type, the page boxes (/MediaBox,
+	// /CropBox, /BleedBox, /TrimBox, /ArtBox), /Rotate, /UserUnit, /Group,
+	// /Resources (or ReplaceResources) and /Contents (or ReplaceContent).
+	// Everything else — /Annots, /Thumb (a picture of the page), /Metadata,
+	// /PieceInfo, /AA, /VP, /SeparationInfo, … — is neither copied nor
+	// written. The page's original annotations are denied for the whole
+	// build: a reference to one from any other copied object (a widget's
+	// field /Kids, a popup's /Parent, …) is written as null, or dropped from
+	// an array.
+	Redacted bool
+
+	// Deny lists source objects (by object number) that no copy from this
+	// source may reach, for the whole build: a reference to one is written as
+	// null, or dropped from an array. Redaction denies the objects only
+	// removed content used (an image under a region), so a shared resource
+	// dictionary cannot carry them into the output.
+	Deny []int
 
 	// Fonts are named font dictionaries merged into the copied page's /Resources
 	// /Font (e.g. {"WMHelv": {"Type":"Font","Subtype":"Type1","BaseFont":
@@ -78,15 +99,145 @@ type PageSource struct {
 // A Copier is bound to a single source Resolver; use one Copier per source. All
 // copiers in a build share the same Writer, so the object and output-size caps
 // are enforced globally through it.
+//
+// References to the source's page objects and page-tree nodes are never
+// followed (docs/design/redaction-hardening.md §5.5, decision D11): a page
+// that is part of the build is referred to by its copy, and any other page or
+// page-tree node becomes null. Following them would copy the original page —
+// its content, resources and annotations, and through /Parent the whole
+// original page tree — into the output as an unreachable duplicate: a link
+// destination or an annotation's /P would drag in a page the output omits or
+// replaces (a split-off page, or one whose content redaction removed).
 type Copier struct {
 	w       *Writer
 	src     *Resolver
 	visited map[int]Reference // source object number -> new Reference in w
+
+	pageTree map[int]bool      // source page-tree objects (nodes and leaves); nil until known
+	pages    map[int]Reference // source page in this build -> its copy (zero until numbered)
+	placed   map[int]bool      // source pages whose copy has been written
+	deny     map[int]bool      // source objects written as null (Redacted pages' annotations)
 }
 
 // NewCopier returns a Copier that copies from src into w.
 func NewCopier(w *Writer, src *Resolver) *Copier {
-	return &Copier{w: w, src: src, visited: make(map[int]Reference)}
+	return &Copier{w: w, src: src, visited: make(map[int]Reference),
+		pages: map[int]Reference{}, placed: map[int]bool{}, deny: map[int]bool{}}
+}
+
+// pageTreeObjects returns the source's page-tree object numbers, reading the
+// tree once per Copier.
+func (c *Copier) pageTreeObjects() map[int]bool {
+	if c.pageTree == nil {
+		c.pageTree = c.src.pageTreeNumbers()
+	}
+	return c.pageTree
+}
+
+// addPage records that the source page pi is part of the build, so references
+// to it resolve to its copy.
+func (c *Copier) addPage(pi PageInfo) {
+	if pi.num > 0 {
+		if _, ok := c.pages[pi.num]; !ok {
+			c.pages[pi.num] = Reference{}
+		}
+	}
+}
+
+// denyAnnots records the annotations of a page, and their popups, as objects
+// no copy may reach (a Redacted page's, or the annotations of a page outside
+// the build: see denyForeignAnnots).
+func (c *Copier) denyAnnots(pi PageInfo) {
+	c.annotsOf(pi.Dict, func(n int) { c.deny[n] = true })
+}
+
+// annotsOf calls f with the object number of each annotation in a page's
+// /Annots and of each annotation's /Popup, for annotations referenced
+// indirectly or written directly in the array.
+func (c *Copier) annotsOf(page Dict, f func(int)) {
+	annots, err := c.src.Resolve(page["Annots"])
+	if err != nil {
+		return
+	}
+	arr, _ := annots.(Array)
+	for _, a := range arr {
+		if ref, ok := a.(Reference); ok {
+			f(ref.Number)
+		}
+		if d, ok, err := c.src.ResolveDict(a); err == nil && ok {
+			if p, ok := d["Popup"].(Reference); ok {
+				f(p.Number)
+			}
+		}
+	}
+}
+
+// denyForeignAnnots denies the annotations of every source page that is not
+// part of the build, unless a page of the build lists them too: a reply
+// (/IRT), popup or field reached from a copied annotation must not carry
+// another page's annotation — its text — into a split-off document.
+func (c *Copier) denyForeignAnnots() {
+	own := map[int]bool{}
+	for num := range c.pages {
+		if d, ok, err := c.src.ResolveDict(Reference{Number: num}); err == nil && ok {
+			c.annotsOf(d, func(n int) { own[n] = true })
+		}
+	}
+	for num := range c.pageTreeObjects() {
+		if _, inBuild := c.pages[num]; inBuild {
+			continue
+		}
+		d, ok, err := c.src.ResolveDict(Reference{Number: num})
+		if err != nil || !ok {
+			continue
+		}
+		if t, _ := d.GetName("Type"); t == "Pages" {
+			continue
+		}
+		c.annotsOf(d, func(n int) {
+			if !own[n] {
+				c.deny[n] = true
+			}
+		})
+	}
+}
+
+// IsPageTreeObject reports whether obj (resolved) is a page object or a
+// page-tree node: a dictionary whose /Type, resolved, is /Page or /Pages (ISO 32000-1
+// §7.7.3). A copy never follows a reference to one (see Copier).
+func IsPageTreeObject(r *Resolver, obj Object) bool {
+	d, ok := obj.(Dict)
+	if !ok {
+		return false
+	}
+	t, err := r.Resolve(d["Type"])
+	if err != nil {
+		return false
+	}
+	n, _ := t.(Name)
+	return n == "Page" || n == "Pages"
+}
+
+// pageRef is what a reference to the source page-tree object num copies as:
+// the page's copy if the page is part of the build (numbered on first use),
+// null otherwise.
+func (c *Copier) pageRef(num int) Object {
+	ref, ok := c.pages[num]
+	if !ok {
+		return Null{}
+	}
+	if ref.Number == 0 {
+		ref = c.w.Reserve()
+		c.pages[num] = ref
+	}
+	return ref
+}
+
+// redactedPageKeys are the page-dictionary entries a Redacted page keeps.
+var redactedPageKeys = map[Name]bool{
+	"Type": true, "MediaBox": true, "CropBox": true, "BleedBox": true, "TrimBox": true,
+	"ArtBox": true, "Rotate": true, "UserUnit": true, "Group": true, "Resources": true,
+	"Contents": true,
 }
 
 // CopyPage materializes a self-contained copy of one page into the Writer and
@@ -95,15 +246,27 @@ func NewCopier(w *Writer, src *Resolver) *Copier {
 // explicit; back-pointers (/Parent, tagged-PDF /StructParent(s), article /B)
 // are dropped so the copy drags in no foreign structure.
 //
+// References to page objects follow the Copier rule: a reference to a page
+// copied by an earlier CopyPage call on this Copier, or to pi itself, points
+// at that copy; a reference to any other page — including one a later
+// CopyPage call copies — is written as null, since the copier cannot know it
+// will be part of the output. Use BuildDocument, which registers every page
+// of the build first.
+//
 // Returns a wrapped errLex if the closure violates a copy guard or a source
 // object fails to resolve.
 func (c *Copier) CopyPage(pi PageInfo) (Reference, error) {
-	return c.copyPage(pi, nil)
+	c.pageTreeObjects()
+	c.addPage(pi)
+	return c.copyPage(PageSource{Page: pi})
 }
 
-// copyPage is CopyPage with the page's resources replaced by resources when
-// it is non-nil (PageSource.ReplaceResources).
-func (c *Copier) copyPage(pi PageInfo, resources Dict) (Reference, error) {
+// copyPage is CopyPage for a PageSource: the page's resources replaced by
+// ReplaceResources when it is non-nil, its original /Contents not copied when
+// ReplaceContent is non-nil (the caller sets the new one), and only the
+// allow-listed entries of a Redacted page copied.
+func (c *Copier) copyPage(s PageSource) (Reference, error) {
+	pi, resources := s.Page, s.ReplaceResources
 	// Clone the page's own dictionary minus back-pointers, then copy its closure.
 	stripped := make(Dict, len(pi.Dict))
 	for k, v := range pi.Dict {
@@ -114,6 +277,13 @@ func (c *Copier) copyPage(pi PageInfo, resources Dict) (Reference, error) {
 			if resources != nil {
 				continue
 			}
+		case "Contents":
+			if s.ReplaceContent != nil {
+				continue
+			}
+		}
+		if s.Redacted && !redactedPageKeys[k] {
+			continue
 		}
 		stripped[k] = v
 	}
@@ -151,6 +321,18 @@ func (c *Copier) copyPage(pi PageInfo, resources Dict) (Reference, error) {
 		page["Rotate"] = Integer(int64(pi.Rotate))
 	}
 
+	// The first copy of a page is the one references to it resolve to; a
+	// reference met while copying may already have numbered it.
+	if ref, ok := c.pages[pi.num]; ok && pi.num > 0 && !c.placed[pi.num] {
+		c.placed[pi.num] = true
+		if ref.Number != 0 {
+			c.w.Fill(ref, page)
+			return ref, nil
+		}
+		ref = c.w.Add(page)
+		c.pages[pi.num] = ref
+		return ref, nil
+	}
 	return c.w.Add(page), nil
 }
 
@@ -168,13 +350,16 @@ func (c *Copier) copyValue(obj Object, depth int) (Object, error) {
 	case Null, Boolean, Integer, Real, String, Name:
 		return v, nil // scalars hold no references
 	case Array:
-		out := make(Array, len(v))
-		for i, e := range v {
+		out := make(Array, 0, len(v))
+		for _, e := range v {
+			if ref, ok := e.(Reference); ok && c.deny[ref.Number] {
+				continue // a denied object is dropped from arrays (/Kids, /Annots)
+			}
 			ce, err := c.copyValue(e, depth+1)
 			if err != nil {
 				return nil, err
 			}
-			out[i] = ce
+			out = append(out, ce)
 		}
 		return out, nil
 	case Dict:
@@ -209,25 +394,37 @@ func (c *Copier) copyValue(obj Object, depth int) (Object, error) {
 
 // copyRef copies one indirect object (memoized). It RESERVES the new number
 // before recursing so a cycle that points back at this object finds the reserved
-// reference instead of recursing forever.
-func (c *Copier) copyRef(ref Reference, depth int) (Reference, error) {
+// reference instead of recursing forever. A page-tree object is not copied
+// (see Copier), and a denied object copies as null.
+func (c *Copier) copyRef(ref Reference, depth int) (Object, error) {
+	if c.pageTreeObjects()[ref.Number] {
+		return c.pageRef(ref.Number), nil
+	}
+	if c.deny[ref.Number] {
+		return Null{}, nil
+	}
 	if nr, ok := c.visited[ref.Number]; ok {
 		return nr, nil // already copied (dedup) or in-progress (cycle break)
 	}
+	resolved, err := c.src.Resolve(ref)
+	if err != nil {
+		return nil, err // do not emit a half object
+	}
+	// A page or page-tree node outside the catalog's tree (an orphan page a
+	// link points at) is no less a page: never copied (D11).
+	if IsPageTreeObject(c.src, resolved) {
+		return c.pageRef(ref.Number), nil
+	}
 	if c.w.count() >= maxCopyObjects {
-		return Reference{}, fmt.Errorf("%w: copied object count exceeds limit", errLex)
+		return nil, fmt.Errorf("%w: copied object count exceeds limit", errLex)
 	}
 
 	newRef := c.w.Reserve()
 	c.visited[ref.Number] = newRef
 
-	resolved, err := c.src.Resolve(ref)
-	if err != nil {
-		return Reference{}, err // do not emit a half object
-	}
 	body, err := c.copyValue(resolved, depth+1)
 	if err != nil {
-		return Reference{}, err
+		return nil, err
 	}
 	c.w.Fill(newRef, body)
 	return newRef, nil
@@ -326,13 +523,9 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 	copiers := make(map[*Resolver]*Copier)
 
 	kids := make(Array, 0, len(sources))
-	// replaced records the object numbers of original page-content streams that
-	// ReplaceContent (redaction) repointed away from. Their bytes still carry the
-	// removed text, so after all pages are copied any that no other page still
-	// references are blanked — otherwise the secret would linger as an orphaned,
-	// unreferenced object in the output (.claude/SECURITY.md §1: redaction must
-	// remove content, and a paint-over or a dangling copy both fail that).
-	var replaced []int
+	// Before anything is copied, record every page of the build (references to
+	// them resolve to their copies) and the annotations of Redacted pages
+	// (denied), so the order of the pages does not matter.
 	for _, s := range sources {
 		if s.Resolver == nil {
 			return nil, Reference{}, fmt.Errorf("%w: page source has no resolver", errLex)
@@ -342,7 +535,33 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 			cp = NewCopier(w, s.Resolver)
 			copiers[s.Resolver] = cp
 		}
-		pageRef, err := cp.copyPage(s.Page, s.ReplaceResources)
+		cp.addPage(s.Page)
+		if s.Redacted {
+			cp.denyAnnots(s.Page)
+		}
+		for _, n := range s.Deny {
+			cp.deny[n] = true
+		}
+	}
+	for _, cp := range copiers {
+		cp.denyForeignAnnots()
+	}
+	// replaced records the original page-content streams that ReplaceContent
+	// (redaction) repointed away from. They are not copied for their page, but
+	// another route may still reach one (an annotation appearance, a resource);
+	// their bytes carry the removed text, so after all pages are copied any
+	// such copy no page still uses as /Contents is blanked — otherwise the
+	// secret would linger as an orphaned, unreferenced object in the output
+	// (.claude/SECURITY.md §1: redaction must remove content, and a paint-over
+	// or a dangling copy both fail that).
+	type sourceRef struct {
+		cp  *Copier
+		num int
+	}
+	var replaced []sourceRef
+	for _, s := range sources {
+		cp := copiers[s.Resolver]
+		pageRef, err := cp.copyPage(s)
 		if err != nil {
 			return nil, Reference{}, err
 		}
@@ -354,7 +573,9 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 				delete(pd, "Annots")
 			}
 			if s.ReplaceContent != nil {
-				replaced = append(replaced, contentRefNums(pd["Contents"])...)
+				for _, n := range sourceContentNums(s.Resolver, s.Page.Dict["Contents"]) {
+					replaced = append(replaced, sourceRef{cp, n})
+				}
 				pd["Contents"] = w.Add(&Stream{Dict: Dict{}, Raw: s.ReplaceContent})
 			}
 			if len(s.AppendContent) > 0 {
@@ -364,7 +585,14 @@ func copyPages(sources []PageSource) (*Writer, Reference, error) {
 		kids = append(kids, pageRef)
 	}
 
-	blankOrphanedContent(w, kids, replaced)
+	// Map the replaced streams to the copies other routes made of them.
+	var copied []int
+	for _, r := range replaced {
+		if ref, ok := r.cp.visited[r.num]; ok {
+			copied = append(copied, ref.Number)
+		}
+	}
+	blankOrphanedContent(w, kids, copied)
 
 	w.Fill(pagesRef, Dict{
 		"Type":  Name("Pages"),
@@ -386,6 +614,20 @@ func contentRefNums(contents Object) []int {
 		for _, el := range c {
 			if ref, ok := el.(Reference); ok {
 				nums = append(nums, ref.Number)
+			}
+		}
+	}
+	return nums
+}
+
+// sourceContentNums is contentRefNums for a source page's /Contents, plus the
+// streams of an array it references indirectly.
+func sourceContentNums(r *Resolver, contents Object) []int {
+	nums := contentRefNums(contents)
+	if ref, ok := contents.(Reference); ok {
+		if arr, err := r.Resolve(ref); err == nil {
+			if a, ok := arr.(Array); ok {
+				nums = append(nums, contentRefNums(a)...)
 			}
 		}
 	}

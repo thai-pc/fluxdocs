@@ -30,7 +30,18 @@ type PageInfo struct {
 	MediaBox  Rectangle // inherited /MediaBox (defaults to US Letter if absent)
 	Rotate    int       // inherited /Rotate, normalized to 0/90/180/270
 	Contents  Object    // the page's /Contents, unresolved
+
+	// num is the page object's number (0 when the page tree holds it
+	// directly), so a build can map references to it (copy.go).
+	num int
 }
+
+// ObjectNumber returns the page object's number in its document, or 0 when
+// the page tree holds the page directly (or the PageInfo was not read from a
+// page tree). It survives copies of the PageInfo that replace Dict (Rotate
+// clones the page dictionary), so it identifies the page where the
+// dictionary's identity does not.
+func (p PageInfo) ObjectNumber() int { return p.num }
 
 // inherited carries page-tree attributes that propagate from intermediate nodes
 // to their descendants (ISO 32000-1 §7.7.3.4, Table 30).
@@ -116,14 +127,58 @@ func (r *Resolver) walkPageTree(obj Object, inh inherited, depth int, visited ma
 	if inh.mediaBox != nil {
 		mb = *inh.mediaBox
 	}
+	num := 0
+	if ref, ok := obj.(Reference); ok {
+		num = ref.Number
+	}
 	*out = append(*out, PageInfo{
 		Dict:      dict,
 		Resources: inh.resources,
 		MediaBox:  mb,
 		Rotate:    inh.rotate,
 		Contents:  dict["Contents"],
+		num:       num,
 	})
 	return nil
+}
+
+// pageTreeNumbers returns the object numbers of every node of the document's
+// page tree reached from the catalog's /Pages — intermediate nodes and leaf
+// pages — with the bounds and leaf rule of Pages. A failure to read the tree
+// yields what was found so far.
+func (r *Resolver) pageTreeNumbers() map[int]bool {
+	out := map[int]bool{}
+	cat, err := r.Catalog()
+	if err != nil {
+		return out
+	}
+	var walk func(obj Object, depth int)
+	walk = func(obj Object, depth int) {
+		if depth > maxPageTreeDepth || len(out) > maxPages {
+			return
+		}
+		if ref, ok := obj.(Reference); ok {
+			if out[ref.Number] {
+				return
+			}
+			out[ref.Number] = true
+		}
+		dict, ok, err := r.ResolveDict(obj)
+		if err != nil || !ok {
+			return
+		}
+		kids, hasKids, err := r.resolveArray(dict["Kids"])
+		if err != nil {
+			return
+		}
+		if typ, _ := dict.GetName("Type"); typ != "Page" && hasKids {
+			for _, kid := range kids {
+				walk(kid, depth+1)
+			}
+		}
+	}
+	walk(cat["Pages"], 0)
+	return out
 }
 
 // applyInherited overlays a node's own /Resources, /MediaBox, and /Rotate onto
