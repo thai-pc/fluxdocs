@@ -250,8 +250,8 @@ func TestPropertyListMatch(t *testing.T) {
 				if res == nil {
 					t.Fatal("no page-private resources for a named strip")
 				}
-				if s := string(parse.SerializeObject(res)); strings.Contains(s, "SECRET") || !strings.Contains(s, "/Lang") {
-					t.Errorf("resources %s: want /ActualText stripped and /Lang kept", s)
+				if s := string(parse.SerializeObject(res)); strings.Contains(s, "SECRET") || strings.Contains(s, "/Lang") {
+					t.Errorf("resources %s: want /ActualText and every other string (/Lang) stripped", s)
 				}
 			}
 		})

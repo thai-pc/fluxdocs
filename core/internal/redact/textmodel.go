@@ -80,6 +80,10 @@ type textRun struct {
 	disp [4]float64
 	// use is the state the run paints with (by its text rendering mode).
 	use consumes
+	// epoch numbers the stretches of content in which the pen moves only by
+	// what runs show: it changes at BT and at every line move (Td, TD, Tm,
+	// T*, ' and "). Removing a run moves the later runs of its epoch.
+	epoch int
 }
 
 // propList is one BDC or DP operator with a property list (§14.6.2).
@@ -96,6 +100,10 @@ type propList struct {
 	// runs [firstRun, endRun) are the runs inside the BDC…EMC sequence at any
 	// depth (the rest of the content if it is never closed); empty for DP.
 	firstRun, endRun int
+	// uses are what a named list's /Properties lookup bound (nil for an
+	// inline list): Rewrite writes a stripped copy instead of an entry that
+	// has a text key, so the entry's object is then not kept by this page.
+	uses useSet
 }
 
 // itemKind is what a paintItem paints.
@@ -283,6 +291,23 @@ type interp struct {
 
 	// rb are the reading buffers of show, reused from run to run (S-1).
 	rb readBuffers
+
+	// epoch is the current textRun.epoch.
+	epoch int
+	// settle, when set, interprets the page as Rewrite will write it (see
+	// settler).
+	settle *settler
+}
+
+// settler makes a page interpretation follow the rewritten content (Page.
+// settle): a run removed by the plan, or whose box meets a region where the
+// rewritten content places it, is removed — it moves the pen no further — so
+// the later runs of its epoch are placed where readers of the output place
+// them.
+type settler struct {
+	regions []Rect
+	removed func(span int) bool // removed by the plan (span marks, regions where the source places runs)
+	extra   []int               // spans of runs removed only where the output places them
 }
 
 // readBuffers are the buffers show builds a run's readings in: one per
@@ -470,6 +495,7 @@ func (it *interp) op(s *parse.ContentOpSpan) error {
 	case "BT":
 		it.tm, it.tlm = identity(), identity()
 		it.penX, it.penY = iv{}, iv{}
+		it.epoch++
 	case "Tc":
 		it.gs.tc = num(o[0])
 	case "Tw":
@@ -816,15 +842,22 @@ func (it *interp) moveLine(tx, ty float64) {
 func (it *interp) setLine() {
 	it.tm = it.tlm
 	it.penX, it.penY = iv{}, iv{}
+	it.epoch++
 }
 
 // markedContent records a BDC or DP property list (page) or refuses one that
 // carries text (child unit, §6.3).
 func (it *interp) markedContent(s *parse.ContentOpSpan) error {
+	var uses useSet
+	if _, named := s.Operands[1].(parse.Name); named && it.page != nil {
+		uses = useSet{}
+		it.w.uses = uses
+	}
 	lists, err := it.w.propertyLists(s.Operands[1], it.sc)
 	if err != nil {
 		return err
 	}
+	collect := it.page == nil && it.w.texts != nil
 	texts := map[parse.Name][]string{}
 	for _, d := range lists {
 		for _, k := range textKeys {
@@ -832,7 +865,7 @@ func (it *interp) markedContent(s *parse.ContentOpSpan) error {
 			if !ok {
 				continue
 			}
-			if it.page == nil {
+			if it.page == nil && !collect {
 				return it.shows()
 			}
 			obj, err := it.w.resolve(v)
@@ -845,13 +878,20 @@ func (it *interp) markedContent(s *parse.ContentOpSpan) error {
 		}
 	}
 	if it.page == nil {
+		if collect {
+			for _, k := range textKeys {
+				if len(texts[k]) > 0 {
+					it.w.texts(it.kind, it.num, texts[k])
+				}
+			}
+		}
 		if s.Op == "BDC" {
 			it.open = append(it.open, -1)
 		}
 		return nil
 	}
 	p := propList{span: it.idx, start: s.Start, end: s.End, op: s.Op, texts: texts,
-		firstRun: len(it.page.runs), endRun: len(it.page.runs)}
+		firstRun: len(it.page.runs), endRun: len(it.page.runs), uses: uses}
 	p.tag, _ = s.Operands[0].(parse.Name)
 	switch v := s.Operands[1].(type) {
 	case parse.Dict:
@@ -871,17 +911,22 @@ func (it *interp) markedContent(s *parse.ContentOpSpan) error {
 // every position its glyphs can take with any font of the set (§6.6), and
 // moves the pen. Decoding the readings is charged to the operator budget.
 func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object) error {
-	if it.page == nil {
+	// collect: a child unit read for its text (TextScanner), not refused.
+	collect := it.page == nil && it.w.texts != nil
+	if it.page == nil && !collect {
 		return it.shows()
 	}
+	// textOnly: a TextScanner reads the text and nothing of where it is.
+	textOnly := it.w.texts != nil
 	gs := &it.gs
 	fs := gs.fonts.fonts()
 	vertical := fs.vertical()
-	if vertical {
+	if vertical && it.w.texts == nil {
 		if err := checkVertical(fs); err != nil {
 			return err
 		}
 	}
+	p0X, p0Y := it.penX, it.penY
 	size := gs.size
 	// Readings: per font, all strings with Text, AltText and ByteText; the
 	// extraction reading; and the raw bytes as Latin-1. Index layout: 3 per
@@ -919,6 +964,43 @@ func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object
 	}
 	showString := func(raw []byte, nested bool) {
 		for i, f := range fs {
+			if tb := f.Tables(); tb != nil {
+				// One byte per code: append each byte's readings (the same
+				// strings Text, AltText and ByteText return, decoded once
+				// per font).
+				alt := false
+				if tb.Alt != nil {
+					for _, c := range raw {
+						if tb.AltDiffers[c] {
+							alt = true
+							break
+						}
+					}
+				}
+				// A slot that can never differ from Text for this font (no
+				// /Differences reading; ByteText equal to Text) is not built:
+				// it would only repeat the Text reading.
+				for _, c := range raw {
+					reads[3*i] = append(reads[3*i], tb.Text[c]...)
+					if i == 0 && !nested {
+						reads[extract] = append(reads[extract], tb.Text[c]...)
+					}
+					if tb.Alt != nil {
+						if alt {
+							reads[3*i+1] = append(reads[3*i+1], tb.Alt[c]...)
+						} else {
+							reads[3*i+1] = append(reads[3*i+1], tb.Text[c]...)
+						}
+					}
+					if !tb.ByteIsText {
+						reads[3*i+2] = append(reads[3*i+2], tb.Byte[c]...)
+					}
+				}
+				used[3*i] = true
+				used[3*i+1] = used[3*i+1] || alt
+				used[3*i+2] = used[3*i+2] || !tb.ByteIsText
+				continue
+			}
 			t := f.Text(raw)
 			reads[3*i] = append(reads[3*i], t...)
 			used[3*i] = true
@@ -941,7 +1023,7 @@ func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object
 		for _, c := range raw {
 			reads[latin] = utf8.AppendRune(reads[latin], rune(c))
 		}
-		if len(raw) == 0 {
+		if len(raw) == 0 || textOnly {
 			return
 		}
 		if codes, certain := fs.codes(raw); certain {
@@ -1020,11 +1102,31 @@ func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object
 	if err := it.w.visit(charge); err != nil {
 		return err
 	}
+	if collect {
+		it.w.texts(it.kind, it.num, it.rb.texts(nRead))
+		return nil
+	}
+	if textOnly {
+		if it.w.pageText != nil {
+			// The search needs only whether a reading holds a needle: no
+			// run is kept.
+			for k := 0; k < nRead; k++ {
+				if used[k] && it.rb.first(k) == k {
+					it.w.pageText(reads[k])
+				}
+			}
+			return nil
+		}
+		it.page.runs = append(it.page.runs, textRun{span: it.idx, start: s.Start, end: s.End,
+			texts: it.rb.texts(nRead), epoch: it.epoch})
+		return nil
+	}
 	if !has {
 		note(it.penX, it.penY) // no glyphs: the run is a point at the pen
 	}
 
-	run := textRun{span: it.idx, start: s.Start, end: s.End, texts: it.rb.texts(nRead), use: it.textState()}
+	run := textRun{span: it.idx, start: s.Start, end: s.End, texts: it.rb.texts(nRead), use: it.textState(),
+		epoch: it.epoch}
 
 	// Glyph ink around each origin, in text space (§6.6): x from the
 	// leftmost origin plus the ink's left edge to the rightmost origin plus
@@ -1056,6 +1158,25 @@ func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object
 	if fs.unbounded() || !it.penX.finite() || !it.penY.finite() {
 		run.nonFinite = true
 	}
+	if st := it.settle; st != nil {
+		if gone := st.removed(it.idx); gone || run.meetsAny(st.regions) {
+			if !gone {
+				st.extra = append(st.extra, it.idx)
+			}
+			// Removed from the output: it moves the pen no further.
+			it.penX, it.penY = p0X, p0Y
+		}
+	}
 	it.page.runs = append(it.page.runs, run)
 	return nil
+}
+
+// meetsAny reports whether the run meets any of the normalized regions.
+func (r textRun) meetsAny(regions []Rect) bool {
+	for _, rc := range regions {
+		if r.intersects(rc) {
+			return true
+		}
+	}
+	return false
 }

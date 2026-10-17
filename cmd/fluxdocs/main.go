@@ -434,6 +434,9 @@ func cmdRedact(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "redact: %v", err)
 	}
 	fmt.Fprintf(stdout, "redacted %d region(s), wrote %s\n", total, outPath)
+	if r, ok := redacted.RedactionReport(); ok && r.Summary() != "" {
+		fmt.Fprintln(stdout, r.Summary())
+	}
 	return 0
 }
 
@@ -482,6 +485,9 @@ func cmdAutoRedact(args []string, stdout, stderr io.Writer) int {
 		total += n
 	}
 	fmt.Fprintf(stdout, "auto-redacted %d PII region(s) %v, wrote %s\n", total, counts, outPath)
+	if r, ok := redacted.RedactionReport(); ok && r.Summary() != "" {
+		fmt.Fprintln(stdout, r.Summary())
+	}
 	return 0
 }
 

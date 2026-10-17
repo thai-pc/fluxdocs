@@ -14,7 +14,8 @@ import (
 // always redacts the exact region covering the secret, then piles on a FUZZED
 // regex pattern and a FUZZED extra region (arbitrary — including NaN, Inf, huge,
 // or negative coordinates). No matter what garbage is added:
-//   - redaction must never panic (a fuzz failure), and
+//   - redaction must never panic or fail its own verification (a fuzz
+//     failure), and
 //   - the secret must never survive extraction (adding regions only removes
 //     more), and must not remain in the serialized bytes.
 //
@@ -78,11 +79,16 @@ func FuzzRedact(f *testing.F) {
 }
 
 // failOnInternal fails the test, with the recovered stack, when err is
-// ErrInternal: a panic recovered by the public API is still a redaction bug.
+// ErrInternal: a panic recovered by the public API is still a redaction bug,
+// and so is a verification failure (ErrRedactionVerification: the output
+// still held removed text, §12.5).
 func failOnInternal(t *testing.T, err error) {
 	t.Helper()
 	var ie *core.InternalError
 	if errors.As(err, &ie) {
 		t.Fatalf("recovered panic (a bug, not an input error): %v\n%s", err, ie.Stack)
+	}
+	if errors.Is(err, core.ErrRedactionVerification) {
+		t.Fatalf("redaction verification failed (a bug): %v", err)
 	}
 }

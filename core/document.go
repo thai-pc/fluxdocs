@@ -486,6 +486,7 @@ func (d *Document) Close() error {
 		return nil
 	}
 	d.closed = true
+	d.pageModels = nil // the redaction page models (redact_cache.go) are memory only
 	return nil
 }
 

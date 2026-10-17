@@ -518,10 +518,11 @@ func leakCases() []leakCase {
 			area: partial(100, 690, 300, 40), ops: []leakOp{opArea}, want: clean},
 		// S4: a matched /ActualText survives through another reference to the
 		// same /Properties entry. Resource GC (step 1.9) drops the unused
-		// alias. A text-free form that is painted keeps its resources, so the
-		// shared list survives through them until the verifier (1.12) refuses
-		// the output, or Phase 2 COW (2.3) rewrites the form. Ghostscript does
-		// not show /ActualText.
+		// alias. A text-free form that is painted keeps its resources (the
+		// shared /Properties dictionary); the entry the page wrote a stripped
+		// copy of is no longer the page's, and nothing kept uses it, so it
+		// is denied build-wide (step 1.12; the form's dictionary keeps a
+		// null). Ghostscript does not show /ActualText.
 		{name: "actualtext_alias", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC"},
 			res: "<< /Font << /F1 5 0 R >> /Properties << /MC0 6 0 R /MC1 6 0 R >> >>", extra: map[int]string{6: "<< /ActualText " + S + " >>"}}.pdf,
 			ops: []leakOp{opText}, want: clean, gsBlind: true}, // step 1.9: resource GC drops the unused alias
@@ -529,7 +530,7 @@ func leakCases() []leakCase {
 			res: "<< /Font << /F1 5 0 R >> /Properties 7 0 R /XObject << /Fm 8 0 R >> >>",
 			extra: map[int]string{6: "<< /ActualText " + S + " >>", 7: "<< /MC0 6 0 R >>",
 				8: stm("/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /Properties 7 0 R >>", "0 0 1 1 re f")}}.pdf,
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.12 (verifier: owned hit -> ErrRedactionVerification) / 2.3 (COW of the form's /Properties) -> refuse, then clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true}, // step 1.12: the stripped entry is denied
 		// A match split across two text objects (Phase 2 matches across
 		// operators on a line).
 		{name: "split_bt", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET BT /F1 24 Tf 177.4 700 Td (1234) Tj ET"),
@@ -544,15 +545,15 @@ func leakCases() []leakCase {
 			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
 		// N-2: a /Properties list shared by two pages' /Resources. Page 0's
 		// private copy loses the matched /ActualText, but page 1 is not
-		// redacted and keeps the shared list: unused there (page hygiene on an
-		// unmarked page whose closure holds a needle), or used there (the
-		// match needle extends to page 1). Resource GC applies to marked pages
-		// only, so 1.9 does not close either. Ghostscript does not show
-		// /ActualText.
-		{name: "props_shared_unused", pdf: sharedProps("(public)"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.13 (page hygiene on the unmarked page) -> clean"},
+		// redacted and keeps the shared list: unused there (verification finds
+		// the needle in an object page 1 carries; page hygiene redacts page 1
+		// with no region, and resource GC drops the entry), or used there (the
+		// pre-pass extends the match needle to page 1, whose key is stripped).
+		// Ghostscript does not show /ActualText.
+		{name: "props_shared_unused", pdf: sharedProps(show("(public)")),
+			ops: []leakOp{opText}, want: clean, gsBlind: true}, // step 1.13: page hygiene
 		{name: "props_shared_used", pdf: sharedProps("/Span /MC0 BDC " + show("(YYYY)") + " EMC"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.13 (the match needle extends to page 1) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true}, // step 1.13: the match needle extends to page 1
 
 		// D5 (step 1.11): what the page paints besides text, under a region, is
 		// removed whole. The fixtures carry the secret as image samples or
@@ -730,25 +731,60 @@ func leakCases() []leakCase {
 			area: partial(100, 690, 200, 40), ops: []leakOp{opArea},
 			want: clean}, // steps 1.4 + 1.7: gs /Font sets the font and size of the box
 
-		// --- D4: the secret elsewhere in the document (automatic extension) ---
+		// --- D4: the secret elsewhere in the document (automatic extension,
+		// step 1.13). The match needle (RedactText) and the area needle (the
+		// whole page's removed run, 11 characters) both propagate.
 		{name: "d4_other_page", pdf: twoPages(show(S), "", show(S), "", nil, ""),
-			ops: both, want: knownLeak, closesIn: "1.13 (match/area needle extends to page 1) -> clean"},
+			ops: both, want: clean},
 		{name: "d4_text_annotation", pdf: twoPages(show(S), "", show("(public)"), " /Annots [9 0 R]", map[int]string{
 			9: "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents " + S + " >>"}, ""),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.13 (annotation holding a needle is removed) -> clean"},
+			ops: []leakOp{opText}, want: clean},
 		{name: "d4_widget_value", pdf: twoPages(show(S), "", show("(public)"), " /Annots [9 0 R]", map[int]string{
 			9:  "<< /Type /Annot /Subtype /Widget /Rect [72 600 300 630] /Parent 10 0 R >>",
 			10: "<< /FT /Tx /T (id) /V " + S + " /Kids [9 0 R] >>"}, ""),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.13 (widget whose field value holds a needle is removed) -> clean"},
+			ops: []leakOp{opText}, want: clean},
 		{name: "d4_attachment", pdf: twoPages(show(S), "", show("(public)"), " /Annots [9 0 R]", map[int]string{
 			9:  "<< /Type /Annot /Subtype /FileAttachment /Rect [10 10 30 30] /FS << /Type /Filespec /F (a.txt) /EF << /F 10 0 R >> >> >>",
 			10: flateStm("/Type /EmbeddedFile", "attached "+secret)}, ""),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.13 (attachments dropped whenever the plan is non-empty) -> clean"},
+			ops: []leakOp{opText}, want: clean},
 		{name: "d4_info_title", pdf: onePage{content: []string{show(S)}, extra: map[int]string{9: "<< /Title " + S + " >>"}, info: "9 0 R"}.pdf,
-			ops: both, want: knownLeak, closesIn: "1.13 (/Info field holding a needle is removed) -> clean"},
+			ops: both, want: clean},
+		// The secret on page 1 inside a form: Phase 1 does not rewrite forms,
+		// so the extension refuses rather than leave it.
+		{name: "d4_other_page_form", pdf: func() []byte {
+			return leakPDF(map[int]string{
+				1: "<< /Type /Catalog /Pages 2 0 R >>",
+				2: "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+				3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+				4: stm("", show(S)),
+				5: helvetica,
+				6: "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm1 9 0 R >> >> /Contents 8 0 R >>",
+				8: stm("", "q /Fm1 Do Q"),
+				9: textForm(""),
+			}, "")
+		},
+			ops: both, want: refuse, reason: "form_text"},
+		// The secret on page 1 in an annotation's appearance stream and in a
+		// reply to it; the popup and the reply go with it.
+		{name: "d4_annotation_appearance", pdf: twoPages(show(S), "", show("(public)"), " /Annots [9 0 R 10 0 R 11 0 R]", map[int]string{
+			9:  "<< /Type /Annot /Subtype /Square /Rect [0 0 400 800] /Popup 10 0 R /AP << /N 12 0 R >> >>",
+			10: "<< /Type /Annot /Subtype /Popup /Rect [0 0 10 10] /Parent 9 0 R >>",
+			11: "<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /IRT 9 0 R /Contents (reply) >>",
+			12: stm("/Type /XObject /Subtype /Form /BBox [0 0 400 800] /Resources << /Font << /F1 5 0 R >> >>",
+				"BT /F1 24 Tf 72 500 Td "+S+" Tj ET")}, ""),
+			ops: both, want: clean},
+		// Skeleton matching: a soft hyphen and spaces inside the occurrence
+		// on page 1 do not hide it.
+		{name: "d4_skeleton_softhyphen", pdf: twoPages(show(S), "", show("(SEC\255RET - 1234)"), "", nil, ""),
+			ops: []leakOp{opText}, want: clean, gsBlind: true}, // gs does not show the input's page-1 text joined
+		// A comment between operators that holds the secret is not written
+		// on a redacted page (comments are white-space to every reader).
+		{name: "comment_holds_secret", pdf: page(show(S) + "\n% " + secret + "\n" + show("(public)")),
+			ops: both, want: clean},
 	}
 
 	cases = append(cases, inlineImageCases()...)
+	cases = append(cases, rvdCases()...)
 
 	// The malformed-content table: unreadable content fails closed.
 	for _, tc := range unreadableContentCases {

@@ -27,24 +27,33 @@ import (
 // file with one PDF path per line, those PDFs (baseline in the file named by
 // FLUXDOCS_EXTRA_BASELINE; without it the outcomes are only summarized).
 // FLUXDOCS_REGRESS_WRITE=path writes the current outcomes there, to record a
-// baseline. FLUXDOCS_REGRESS_MAX_PAGES (default 3) bounds the pages redacted
+// baseline; FLUXDOCS_REGRESS_EXT=path writes what automatic extension added
+// per successful operation (pages, boxes, annotations, information fields:
+// no document text). FLUXDOCS_REGRESS_MAX_PAGES (default 3) bounds the pages redacted
 // per file.
 
 // redactionBaseline is the committed baseline for testing/corpus.
 const redactionBaseline = "testdata/redaction_baseline.tsv"
 
 // allowedNewRefusals are the reasons a Phase 1 step may newly refuse for
-// (§12.4): content Phase 1 cannot rewrite yet, and inline images whose end is
-// ambiguous (decision D1).
+// (§12.4): content Phase 1 cannot rewrite yet, inline images whose end is
+// ambiguous (decision D1), and text in a form that automatic extension
+// (D4) reaches on another page. A refusal automatic extension causes is
+// classified as "<reason>/d4" (its detail starts with "automatic
+// extension"); each one is listed.
 var allowedNewRefusals = map[string]bool{
 	"inline_image": true, "pattern_text": true, "softmask_text": true, "type3_text": true,
+	"inline_image/d4": true, "pattern_text/d4": true, "softmask_text/d4": true, "type3_text/d4": true,
+	"form_text/d4": true,
 }
 
 // mustNotOccur are outcomes that fail the check whatever the baseline says: a
 // recovered panic, a whole-page redaction whose output still extracts text,
-// and a refusal whose error chain breaks decision D2. (A re-open failure of
+// a refusal whose error chain breaks decision D2, and a verification failure
+// (ErrRedactionVerification, including not_converged: the output still held
+// removed text, which is a bug). (A re-open failure of
 // the output is "error", which no step may add.)
-var mustNotOccur = map[string]bool{"internal": true, "nonempty_text": true, "bad_chain": true}
+var mustNotOccur = map[string]bool{"internal": true, "nonempty_text": true, "bad_chain": true, "verification": true}
 
 // refusalReason classifies a redaction error into the reason codes of the
 // design (§9 P1): a *core.RedactionError carries its reason (step 1.8; the
@@ -55,11 +64,16 @@ func refusalReason(err error) string {
 	switch {
 	case err == nil:
 		return "ok"
+	case errors.Is(err, core.ErrRedactionVerification):
+		return "verification" // the output still held removed text: a bug
 	case errors.As(err, &ie):
 		return "internal"
 	case errors.As(err, &re):
 		if !errors.Is(err, core.ErrRedactionUnsupported) || errors.Is(err, core.ErrInvalidPDF) {
 			return "bad_chain" // D2: a refusal matches ErrRedactionUnsupported, never ErrInvalidPDF
+		}
+		if strings.HasPrefix(re.Detail, "automatic extension") {
+			return string(re.Reason) + "/d4"
 		}
 		return string(re.Reason)
 	case errors.Is(err, core.ErrEncryptedDocument):
@@ -68,9 +82,31 @@ func refusalReason(err error) string {
 	return "error"
 }
 
-// regressOutcome is one (file, operation) result.
+// regressOutcome is one (file, operation) result. ext summarizes what
+// automatic extension added (RedactionReport, text-free) when the
+// operation succeeded and extended; it is not part of the baseline.
 type regressOutcome struct {
 	file, op, outcome string
+	ext               string
+}
+
+// extSummary summarizes a redaction report: the pages extended, the black
+// boxes added, the annotations and information fields removed.
+func extSummary(r core.RedactionReport) string {
+	if len(r.Extensions) == 0 && len(r.RemovedAnnotations) == 0 && len(r.RemovedInfoFields) == 0 {
+		return ""
+	}
+	pages := map[int]bool{}
+	rects := 0
+	var where []string
+	for _, e := range r.Extensions {
+		pages[e.Page] = true
+		rects += len(e.Rects)
+		where = append(where, e.Source+"/"+e.Where)
+	}
+	sort.Strings(where)
+	return fmt.Sprintf("pages=%d rects=%d annots=%d info=%d %s", len(pages), rects, len(r.RemovedAnnotations),
+		len(r.RemovedInfoFields), strings.Join(where, ","))
 }
 
 // redactOutcomes runs the §12.4 operations on one PDF, on its first maxPages
@@ -81,21 +117,26 @@ type regressOutcome struct {
 func redactOutcomes(key string, data []byte, maxPages int) []regressOutcome {
 	doc, err := core.OpenBytes(data)
 	if err != nil {
-		return []regressOutcome{{key, "open", "open_failed"}}
+		return []regressOutcome{{file: key, op: "open", outcome: "open_failed"}}
 	}
 	n := min(doc.PageCount, maxPages)
 	var out []regressOutcome
 	for p := 0; p < n; p++ {
 		_, err := doc.RedactText(p, ".")
-		out = append(out, regressOutcome{key, "text/p" + strconv.Itoa(p), refusalReason(err)})
+		out = append(out, regressOutcome{file: key, op: "text/p" + strconv.Itoa(p), outcome: refusalReason(err)})
 	}
-	_, err = doc.RedactAndFlatten()
-	out = append(out, regressOutcome{key, "text/flatten", refusalReason(err)})
+	red, err := doc.RedactAndFlatten()
+	o := regressOutcome{file: key, op: "text/flatten", outcome: refusalReason(err)}
+	if err == nil {
+		r, _ := red.RedactionReport()
+		o.ext = extSummary(r)
+	}
+	out = append(out, o)
 
 	for _, op := range []string{"area-full", "area-half"} {
 		doc, err := core.OpenBytes(data)
 		if err != nil {
-			return append(out, regressOutcome{key, op, "open_failed"})
+			return append(out, regressOutcome{file: key, op: op, outcome: "open_failed"})
 		}
 		for p := 0; p < n; p++ {
 			r := core.Rect{X: -1e6, Y: -1e6, Width: 2e6, Height: 2e6} // everything, whatever the box origin
@@ -107,6 +148,11 @@ func redactOutcomes(key string, data []byte, maxPages int) []regressOutcome {
 		}
 		red, err := doc.RedactAndFlatten()
 		outcome := refusalReason(err)
+		ext := ""
+		if err == nil {
+			r, _ := red.RedactionReport()
+			ext = extSummary(r)
+		}
 		if err == nil && op == "area-full" {
 			for p := 0; p < n; p++ {
 				if text, err := red.ExtractTextByPage(p, core.ExtractOptions{}); err == nil && strings.TrimSpace(text) != "" {
@@ -114,7 +160,7 @@ func redactOutcomes(key string, data []byte, maxPages int) []regressOutcome {
 				}
 			}
 		}
-		out = append(out, regressOutcome{key, op, outcome})
+		out = append(out, regressOutcome{file: key, op: op, outcome: outcome, ext: ext})
 	}
 	return out
 }
@@ -161,7 +207,7 @@ func TestRedactionCorpusRegression(t *testing.T) {
 				defer func() { <-sem }()
 				data, err := os.ReadFile(in.path)
 				if err != nil {
-					results[i] = []regressOutcome{{in.key, "open", "read_failed"}}
+					results[i] = []regressOutcome{{file: in.key, op: "open", outcome: "read_failed"}}
 					return
 				}
 				results[i] = redactOutcomes(in.key, data, maxPages)
@@ -179,6 +225,18 @@ func TestRedactionCorpusRegression(t *testing.T) {
 	var extraOut []regressOutcome
 	if len(extra) > 0 {
 		extraOut = run(extra)
+	}
+	if path := os.Getenv("FLUXDOCS_REGRESS_EXT"); path != "" {
+		var lines []string
+		for _, o := range append(append([]regressOutcome{}, localOut...), extraOut...) {
+			if o.ext != "" {
+				lines = append(lines, o.file+"\t"+o.op+"\t"+o.ext)
+			}
+		}
+		sort.Strings(lines)
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if path := os.Getenv("FLUXDOCS_REGRESS_WRITE"); path != "" {
 		if err := writeOutcomes(path, append(append([]regressOutcome{}, localOut...), extraOut...)); err != nil {
@@ -240,7 +298,8 @@ func compareBaseline(t *testing.T, label string, outcomes []regressOutcome, base
 	}
 }
 
-// summarize logs the count of each outcome per operation.
+// summarize logs the count of each outcome per operation, and of the
+// successful operations that automatic extension extended.
 func summarize(t *testing.T, label string, outcomes []regressOutcome) {
 	t.Helper()
 	counts := map[string]int{}
@@ -250,6 +309,9 @@ func summarize(t *testing.T, label string, outcomes []regressOutcome) {
 			op = "text/page"
 		}
 		counts[op+" "+o.outcome]++
+		if o.ext != "" {
+			counts[op+" extended"]++
+		}
 	}
 	keys := make([]string, 0, len(counts))
 	for k := range counts {

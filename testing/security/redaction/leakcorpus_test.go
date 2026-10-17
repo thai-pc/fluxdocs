@@ -2,8 +2,10 @@ package redaction
 
 import (
 	"bytes"
+	"compress/zlib"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -224,8 +226,10 @@ func containsNeedle(haystack, needle string) bool {
 // ourLeaks returns where the secret survives in out by our own checks (§12.1
 // assertions 1 and 2): ExtractText; the verbatim bytes and a re-save; and every
 // object of the output — strings decoded as Latin-1 or UTF-16BE, names,
-// streams decoded through their filters, and the strings content streams show
-// (each, and joined in order, so a TJ split across elements still matches).
+// streams decoded through their filters (Flate, LZW, ASCIIHex, ASCII85,
+// RunLength; a Flate stream that fails part-way is read as far as it goes),
+// and the strings content streams show (each, and joined in order, so a TJ
+// split across elements still matches).
 func ourLeaks(t *testing.T, out *core.Document) []string {
 	t.Helper()
 	var leaks []string
@@ -293,7 +297,14 @@ func objectLeak(o parse.Object) string {
 		}
 		data, err := parse.DecodeStream(v)
 		if err != nil {
+			// What a tolerant reader gets: a Flate stream read to where it
+			// fails (a wrong checksum included), else the raw bytes.
 			data = v.Raw
+			if zr, zerr := zlib.NewReader(bytes.NewReader(v.Raw)); zerr == nil {
+				if part, _ := io.ReadAll(io.LimitReader(zr, 64<<20)); len(part) > 0 {
+					data = append(append([]byte{}, part...), v.Raw...)
+				}
+			}
 		}
 		if bytes.Contains(data, []byte(secret)) || stringLeak(data) {
 			return "stream data"
@@ -355,6 +366,8 @@ func refusalReason(err error) string {
 	switch {
 	case err == nil:
 		return "ok"
+	case errors.Is(err, core.ErrRedactionVerification):
+		return "verification" // the output still held removed text: a bug
 	case errors.As(err, &ie):
 		return "internal"
 	case errors.As(err, &re):

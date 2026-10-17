@@ -137,9 +137,12 @@ func TestRedact_UnreadableOperandFailsClosed(t *testing.T) {
 }
 
 // TestRedact_MalformedPageNotInPlanIsCopied: fail-closed applies only to pages
-// that are actually redacted; an unreadable page elsewhere is copied as-is.
+// that are redacted or searched; an unreadable page elsewhere is copied as-is
+// when nothing removed propagates (a match shorter than 4 characters). When
+// the removed text propagates (automatic extension, D4), the unreadable page
+// must be searched and cannot be read for certain: the redaction refuses.
 func TestRedact_MalformedPageNotInPlanIsCopied(t *testing.T) {
-	doc, err := core.OpenBytes(buildPDF(map[int]string{
+	pdf := buildPDF(map[int]string{
 		1: "<< /Type /Catalog /Pages 2 0 R >>",
 		2: "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
 		3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
@@ -147,11 +150,12 @@ func TestRedact_MalformedPageNotInPlanIsCopied(t *testing.T) {
 		5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
 		6: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>",
 		7: streamObj("BT /F1 24 Tf 72 700 Td [ (public) <zz> ] TJ ET"),
-	}, "<< /Size 8 /Root 1 0 R >>"))
+	}, "<< /Size 8 /Root 1 0 R >>")
+	doc, err := core.OpenBytes(pdf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := doc.RedactText(0, `SECRET-\d+`); err != nil {
+	if _, err := doc.RedactText(0, `SEC`); err != nil {
 		t.Fatal(err)
 	}
 	out, err := doc.RedactAndFlatten()
@@ -161,6 +165,20 @@ func TestRedact_MalformedPageNotInPlanIsCopied(t *testing.T) {
 	assertNoSecret(t, out)
 	if out.PageCount != 2 {
 		t.Errorf("PageCount = %d, want 2", out.PageCount)
+	}
+
+	doc, err = core.OpenBytes(pdf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.RedactText(0, `SECRET-\d+`); err != nil {
+		t.Fatal(err)
+	}
+	out, err = doc.RedactAndFlatten()
+	var re *core.RedactionError
+	if out != nil || !errors.As(err, &re) || re.Page != 1 || re.Reason != core.RedactionContentAmbiguous ||
+		!strings.HasPrefix(re.Detail, "automatic extension") {
+		t.Errorf("propagating match: RedactAndFlatten = (%v, %v), want a content_ambiguous refusal of page 1 by automatic extension", out, err)
 	}
 }
 

@@ -71,10 +71,25 @@ type Document struct {
 	redactMarks map[int][]redact.Mark
 
 	// redactNeedles are the substrings RedactText matched, per page: the
-	// needles automatic plan extension (step 1.13, §6.11) will search for;
-	// recorded now so 1.13 only adds the search. They are document text and
+	// match needles automatic plan extension searches the document for
+	// (docs/design/redaction-hardening.md §6.11). They are document text and
 	// are never logged. Guarded by mu.
 	redactNeedles map[int][]string
+
+	// redactPatterns are the RedactText patterns of the plan, per page, as
+	// given (they compiled): verification checks that no text of a redacted
+	// page still matches them, and a document information field that
+	// matches one is not written. Guarded by mu.
+	redactPatterns map[int][]string
+
+	// redactionReport is set on a document RedactAndFlatten returned: what
+	// the redaction removed beyond the caller's plan (RedactionReport).
+	// Guarded by mu.
+	redactionReport *RedactionReport
+
+	// pageModels caches the strict redaction models of the document's pages
+	// (redact_cache.go). Created on first use, under mu; it has its own lock.
+	pageModels *pageModelCache
 
 	// redactErr, once set, marks the redaction plan as incomplete: a marking
 	// call (RedactText, AutoRedactPII) failed after its arguments were accepted,

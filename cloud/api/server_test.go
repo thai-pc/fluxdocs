@@ -151,6 +151,9 @@ func TestRedactPIIEndpoint(t *testing.T) {
 	if newID == id {
 		t.Fatal("redaction must produce a new document id")
 	}
+	if n, ok := red["auto_extended"].(float64); !ok || n != 0 {
+		t.Errorf("auto_extended = %v, want 0 (nothing beyond the match)", red["auto_extended"])
+	}
 
 	_, ext := do(t, s, http.MethodPost, "/v1/documents/"+newID+"/extract", key, nil)
 	text := ext["text"].(string)

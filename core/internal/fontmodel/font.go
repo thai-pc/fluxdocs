@@ -87,6 +87,8 @@ type Font struct {
 	bboxOK  bool                //
 	diffs   map[byte]parse.Name // simple fonts: /Encoding /Differences
 
+	tables fontTables // per-byte readings (Tables)
+
 	wPartial  bool // Type 0: the /W array could not be read to its end
 	hasWidths bool // simple fonts: a /Widths array is present
 	embedded  bool // simple fonts: /FontDescriptor holds a font program

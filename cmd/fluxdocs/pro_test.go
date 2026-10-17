@@ -136,3 +136,25 @@ func TestRedact_RefusalNamesReason(t *testing.T) {
 		t.Error("a refused redaction wrote an output file")
 	}
 }
+
+// TestRedact_PrintsExtension: a string redacted on one page that occurs on
+// others is removed there too, and the CLI says where (page numbers, no
+// document text).
+func TestRedact_PrintsExtension(t *testing.T) {
+	path := writePDF(t, 3) // "Page 0", "Page 1", "Page 2"
+	out := filepath.Join(t.TempDir(), "red.pdf")
+	code, stdout, errs := runCLI("redact", path, "--pattern", `Page`, "--page", "0", "-o", out)
+	if code != 0 {
+		t.Fatalf("redact: code=%d errs=%q", code, errs)
+	}
+	if !strings.Contains(stdout, "automatic extension: extended to 2 place(s) on page(s) 1, 2") {
+		t.Errorf("stdout=%q, want the extension to pages 1 and 2", stdout)
+	}
+	doc, err := core.OpenDocument(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if txt, _ := doc.ExtractText(core.ExtractOptions{}); strings.Contains(txt, "Page") {
+		t.Errorf("the extension left %q", txt)
+	}
+}

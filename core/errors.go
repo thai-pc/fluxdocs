@@ -51,12 +51,13 @@ var (
 	// (errors.As). It is a property of the document: retrying does not help.
 	ErrRedactionUnsupported = errors.New("fluxdocs: content cannot be redacted safely")
 
-	// ErrRedactionVerification — the redacted output failed the mandatory
-	// self-check: it would still contain content the redaction removed. No
-	// document is returned. It signals a FluxDocs bug and matches ErrInternal
-	// too (errors.Is), so "report a bug" handling applies. Not returned yet:
-	// the verification lands with step 1.12 of
-	// docs/design/redaction-hardening.md.
+	// ErrRedactionVerification — RedactAndFlatten's mandatory self-check of
+	// its output failed: the output would still contain content the
+	// redaction removed, or automatic extension still found removed text
+	// after its last round ("not_converged" in the message). No document is
+	// returned. It signals a FluxDocs bug and matches ErrInternal too
+	// (errors.Is), so "report a bug" handling applies. The message never
+	// holds document text.
 	ErrRedactionVerification error = &childError{msg: "fluxdocs: redaction verification failed", parent: ErrInternal}
 
 	// ErrInvalidPageOrder — a page-organization argument is malformed: a Reorder

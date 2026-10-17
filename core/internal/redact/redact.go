@@ -32,6 +32,12 @@
 // *Refusal, which core reports as a *core.RedactionError. Rendering and text
 // extraction stay lenient.
 //
+// Automatic plan extension and verification (§5.6, §6.11) use the matching
+// in needles.go (skeletons: NFKC, no white-space or invisible characters),
+// the text-only deep reading of pages and annotations in scan.go
+// (TextScanner, lenient, through every unit), and the object-level search in
+// objsearch.go (ObjectRoles, ObjectSearch); core runs the rounds.
+//
 // Scope (Phase 1): the page's own content is rewritten, with text-showing
 // operators removed whole. The package is internal: only core uses it, and
 // its API has no compatibility guarantee. It is pure Go (MIT-safe) and must

@@ -249,3 +249,41 @@ func TestServe_StdioLoop(t *testing.T) {
 		t.Fatalf("got %d response lines, want 2:\n%s", len(lines), out.String())
 	}
 }
+
+// TestRedactAndSaveReportsExtension: when the removed text also occurs on
+// another page, the redaction is extended there and the tool result says
+// so, with page numbers and no document text (P8).
+func TestRedactAndSaveReportsExtension(t *testing.T) {
+	s := NewServer()
+	content := func(y int) string { return fmt.Sprintf("BT /F1 12 Tf 100 %d Td (SECRET-42) Tj ET", y) }
+	pdf := buildPDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		4: stream(content(700)),
+		5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		6: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>",
+		7: stream(content(300)),
+	}, "<< /Size 8 /Root 1 0 R >>")
+	path := filepath.Join(t.TempDir(), "in.pdf")
+	if err := os.WriteFile(path, pdf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := openHandle(t, s, path)
+	if item, isErr := callTool(t, s, "redact_text", map[string]any{"handle": h, "page": 0, "pattern": `SECRET-\d+`}); isErr {
+		t.Fatalf("redact_text error: %v", item)
+	}
+	out := filepath.Join(t.TempDir(), "redacted.pdf")
+	saved, isErr := callTool(t, s, "redact_and_save", map[string]any{"handle": h, "out_path": out})
+	if isErr {
+		t.Fatalf("redact_and_save error: %v", saved)
+	}
+	text := saved["text"].(string)
+	if !strings.Contains(text, `"auto_extended_summary":"automatic extension: extended to 1 place(s) on page(s) 1"`) || strings.Contains(text, "SECRET") {
+		t.Errorf("redact_and_save = %s, want the extension to page 1 and no document text", text)
+	}
+	raw, _ := os.ReadFile(out)
+	if bytes.Contains(raw, []byte("SECRET-42")) {
+		t.Errorf("LEAK: the secret remains on page 1")
+	}
+}

@@ -199,7 +199,7 @@ func init() {
 			for k, n := range counts {
 				byKind[string(k)] = n
 			}
-			return jsonText(map[string]any{"saved": a.OutPath, "redacted": byKind})
+			return jsonText(withSummary(map[string]any{"saved": a.OutPath, "redacted": byKind}, out))
 		},
 	})
 

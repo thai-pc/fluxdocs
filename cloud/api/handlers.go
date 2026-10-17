@@ -67,8 +67,10 @@ func (s *Server) extractText(w http.ResponseWriter, r *http.Request) {
 }
 
 // redactPII auto-redacts PII, stores the redacted document under a new id, and
-// returns that id plus the per-kind counts. The optional JSON body {"kinds":
-// [...]} selects kinds; omit for all.
+// returns that id, the per-kind counts and auto_extended, the number of
+// places the redaction was extended to beyond the matches (occurrences
+// elsewhere, annotations, information fields; no document text). The
+// optional JSON body {"kinds": [...]} selects kinds; omit for all.
 func (s *Server) redactPII(w http.ResponseWriter, r *http.Request) {
 	doc, ok := s.loadDoc(w, r)
 	if !ok {
@@ -109,7 +111,13 @@ func (s *Server) redactPII(w http.ResponseWriter, r *http.Request) {
 	for k, n := range counts {
 		byKind[string(k)] = n
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "redacted": byKind})
+	// auto_extended counts what the redaction removed beyond the PII matches
+	// (core.RedactionReport, text-free): other places that held the removed
+	// text, removed annotations (file attachments always) and document
+	// information fields.
+	report, _ := out.RedactionReport()
+	extended := len(report.Extensions) + len(report.RemovedAnnotations) + len(report.RemovedInfoFields)
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "redacted": byKind, "auto_extended": extended})
 }
 
 // writeRedactionUnsupported answers a redaction the core refused as unsafe

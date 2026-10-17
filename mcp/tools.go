@@ -251,7 +251,7 @@ func init() {
 			if err := out.Save(a.OutPath); err != nil {
 				return errText("save failed: %v", err)
 			}
-			return jsonText(map[string]any{"saved": a.OutPath, "pageCount": out.PageCount})
+			return jsonText(withSummary(map[string]any{"saved": a.OutPath, "pageCount": out.PageCount}, out))
 		},
 	})
 

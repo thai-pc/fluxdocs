@@ -194,6 +194,26 @@ type walker struct {
 	// that does not decode paints nothing, and tiling patterns count only
 	// when selected.
 	lenient bool
+	// texts, when set (TextScanner, with lenient), receives the readings of
+	// each run a child unit shows and the text of each of its property
+	// lists, with the unit's route and object number, instead of the unit
+	// being refused for showing text. A vertical font is then not refused
+	// either: only the text matters.
+	texts func(kind unitKind, num int, texts []string)
+	// pageText, when set with texts, receives each distinct reading of each
+	// run the page itself shows (the buffer is reused: it must not be
+	// kept), instead of the page model keeping the run.
+	pageText func(reading []byte)
+	// hidden collects what each unit walked holds but does not show
+	// (forHidden), for Page.UnitHidden; not collected by a Painter.
+	hidden []hiddenText
+
+	// disputed, in texts mode, is the first reason the walk's reading may
+	// not be every reader's: content the strict scanner reports a loss in
+	// (read leniently after all), or content that does not decode (read as
+	// showing nothing). A search that finds nothing in a disputed reading
+	// proves nothing.
+	disputed *Refusal
 
 	// uses collects the resource names looked up (in any scope) while it is
 	// set: the page's model sets it per operator so resource GC keeps exactly
@@ -398,6 +418,24 @@ func (w *walker) scanLimit() int {
 // one visit per operator returned (interpreting them charges another).
 // Returns the spans, or the scan's refusal for the named unit.
 func (w *walker) strictScan(unit string, content parse.ContentSegments, sc *scope) ([]parse.ContentOpSpan, error) {
+	if w.texts != nil {
+		// A text search reads as the strict scanner does when it can, and
+		// records a loss (then reads leniently, as the renderer does).
+		spans, err := parse.ScanContentStrict(content,
+			parse.StrictOptions{InlineColorSpace: w.colorSpaces(sc), MaxOps: w.scanLimit()})
+		if err == nil {
+			if err := w.visit(int64(len(spans))); err != nil {
+				return nil, err
+			}
+			return spans, nil
+		}
+		rf := scanRefusal(unit, err)
+		var r *Refusal
+		if errors.As(rf, &r) && r.Reason == ReasonBudgetExceeded {
+			return nil, rf
+		}
+		w.dispute(r)
+	}
 	if w.lenient {
 		spans := parse.ScanContentSpansWithInlineImages(content.Data)
 		if err := w.visit(int64(len(spans))); err != nil {
@@ -414,6 +452,13 @@ func (w *walker) strictScan(unit string, content parse.ContentSegments, sc *scop
 		return nil, err
 	}
 	return spans, nil
+}
+
+// dispute records the first reason a text search's reading is disputed.
+func (w *walker) dispute(r *Refusal) {
+	if w.disputed == nil && r != nil {
+		w.disputed = r
+	}
 }
 
 // budget returns a budget refusal.
@@ -871,6 +916,10 @@ func (w *walker) scanUnit(st *parse.Stream, num int, kind unitKind, sc *scope, o
 		if errors.As(err, &re) {
 			return err
 		}
+		if w.texts != nil {
+			w.dispute(&Refusal{Reason: ReasonContentAmbiguous,
+				Detail: unitName(kind, num) + " does not decode, so the text it shows is unknown"})
+		}
 		if w.lenient {
 			return nil // like the renderer: a unit that does not decode paints nothing
 		}
@@ -879,6 +928,17 @@ func (w *walker) scanUnit(st *parse.Stream, num int, kind unitKind, sc *scope, o
 	spans, err := w.strictScan(unitName(kind, num), parse.ContentSegments{Data: data}, sc)
 	if err != nil {
 		return err
+	}
+	if !w.lenient || w.texts != nil {
+		forHidden(data, spans, func(b []byte, operand parse.Object) {
+			if operand == nil {
+				w.hidden = append(w.hidden, hiddenText{kind: kind, num: num, text: append([]byte(nil), b...)})
+				return
+			}
+			forStrings(operand, 0, func(v []byte) {
+				w.hidden = append(w.hidden, hiddenText{kind: kind, num: num, text: append([]byte(nil), v...)})
+			})
+		})
 	}
 	w.path[st] = true
 	defer delete(w.path, st)

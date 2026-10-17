@@ -206,7 +206,8 @@ func TestRewriteResourceGC(t *testing.T) {
 
 // TestRewriteStripsEveryTextKey: on a redacted page every /ActualText, /Alt
 // and /E is stripped (D7), inline and named, matched or not, and their values
-// are returned for verification.
+// are returned for verification; every other string of a property list goes
+// too.
 func TestRewriteStripsEveryTextKey(t *testing.T) {
 	f := fixture{
 		content: "/Span << /ActualText (one) /Lang (en) >> BDC EMC /Figure << /Alt (two) >> DP /Span /MC0 BDC EMC /Span << /MCID 4 >> BDC EMC",
@@ -215,12 +216,14 @@ func TestRewriteStripsEveryTextKey(t *testing.T) {
 	}
 	out := rewriteArea(t, f, Rect{X: -1, Y: -1, Width: 0, Height: 0})
 	got := string(out.Content)
-	for _, s := range []string{"one", "two", "/ActualText", "/Alt"} {
+	// Every other string goes too, /Lang included (a "language tag" can
+	// hold any text); non-string entries stay.
+	for _, s := range []string{"one", "two", "/ActualText", "/Alt", "/Lang"} {
 		if strings.Contains(got, s) {
 			t.Errorf("%q survives: %q", s, got)
 		}
 	}
-	for _, s := range []string{"/Lang", "/MCID 4", "/MC0 BDC"} {
+	for _, s := range []string{"/MCID 4", "/MC0 BDC"} {
 		if !strings.Contains(got, s) {
 			t.Errorf("%q lost: %q", s, got)
 		}

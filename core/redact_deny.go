@@ -57,7 +57,11 @@ var errDenyGraph = fmt.Errorf("redaction deny graph exceeds %d objects", maxDeny
 // but shares objects with removed content and cannot be walked within the
 // redaction budget, or with Page -1 when the objects to examine exceed
 // maxDenyGraph.
-func (d *Document) redactionDenySet(outs map[int]redact.Output) ([]int, error) {
+//
+// view returns a page as the build writes it (for a page that is not
+// redacted: without the annotations the plan removes), so what only a
+// removed annotation paints is not kept.
+func (d *Document) redactionDenySet(outs map[int]redact.Output, view func(i int) parse.PageInfo) ([]int, error) {
 	var removed []int
 	for _, o := range outs {
 		removed = append(removed, o.Removed...)
@@ -67,7 +71,7 @@ func (d *Document) redactionDenySet(outs map[int]redact.Output) ([]int, error) {
 	}
 	r := d.resolver
 	gone := map[int]bool{}
-	if err := closeInto(r, gone, removed, closeD); err != nil {
+	if _, err := closeInto(r, gone, removed, closeD); err != nil {
 		return nil, denyRefusal(-1, err)
 	}
 
@@ -80,7 +84,7 @@ func (d *Document) redactionDenySet(outs map[int]redact.Output) ([]int, error) {
 			keep = appendRefs(keep, d.pageInfos[i].Dict[k])
 		}
 	}
-	if err := closeInto(r, kept, keep, closeP); err != nil {
+	if _, err := closeInto(r, kept, keep, closeP); err != nil {
 		return nil, denyRefusal(-1, err)
 	}
 	// undecided are the removed objects no kept content uses yet.
@@ -97,12 +101,12 @@ func (d *Document) redactionDenySet(outs map[int]redact.Output) ([]int, error) {
 	// when the undecided set shrinks.
 	var roots [][]int
 	var unmarked []int
-	for i, pi := range d.pageInfos {
+	for i := range d.pageInfos {
 		if _, marked := outs[i]; marked {
 			continue
 		}
 		unmarked = append(unmarked, i)
-		roots = append(roots, pageRoots(pi))
+		roots = append(roots, pageRoots(view(i)))
 	}
 	g, err := buildGraph(r, roots)
 	if err != nil {
@@ -132,7 +136,7 @@ func (d *Document) redactionDenySet(outs map[int]redact.Output) ([]int, error) {
 		if !hit {
 			continue
 		}
-		pi := d.pageInfos[i]
+		pi := view(i)
 		painted, err := painter.PaintedObjects(pi)
 		var rf *redact.Refusal
 		switch {
@@ -149,13 +153,15 @@ func (d *Document) redactionDenySet(outs map[int]redact.Output) ([]int, error) {
 		for _, k := range []parse.Name{"Contents", "Annots", "Group"} {
 			keep = appendRefs(keep, pi.Dict[k])
 		}
-		if err := closeInto(r, kept, keep, closeP); err != nil {
+		// Only the objects this page newly keeps can leave undecided: the
+		// work is proportional to what the page adds, not to |undecided|
+		// per page (F1: 60,000 pages × a large undecided set was quadratic).
+		added, err := closeInto(r, kept, keep, closeP)
+		if err != nil {
 			return nil, denyRefusal(-1, err)
 		}
-		for n := range undecided {
-			if kept[n] {
-				delete(undecided, n)
-			}
+		for _, n := range added {
+			delete(undecided, n)
 		}
 		if len(undecided) > 0 && len(undecided) <= sizeAtReach/2 {
 			reaches, visits = g.reachers(undecided)
@@ -278,9 +284,11 @@ func refsOf(r *parse.Resolver, num int, mode closeMode) ([]int, bool, error) {
 }
 
 // closeInto adds roots and every object reachable from them (as mode
-// follows), page objects excluded, to set; objects already in set are not
-// followed again. An object that does not resolve is added and not followed.
-func closeInto(r *parse.Resolver, set map[int]bool, roots []int, mode closeMode) error {
+// follows), page objects excluded, to set, and returns the objects it added;
+// objects already in set are not followed again. An object that does not
+// resolve is added and not followed.
+func closeInto(r *parse.Resolver, set map[int]bool, roots []int, mode closeMode) ([]int, error) {
+	var added []int
 	queue := append([]int(nil), roots...)
 	for len(queue) > 0 {
 		n := queue[len(queue)-1]
@@ -293,22 +301,24 @@ func closeInto(r *parse.Resolver, set map[int]bool, roots []int, mode closeMode)
 			continue
 		}
 		set[n] = true
+		added = append(added, n)
 		if len(set) > maxDenyGraph {
-			return errDenyGraph
+			return added, errDenyGraph
 		}
 		if err != nil {
 			continue
 		}
 		queue = append(queue, refs...)
 	}
-	return nil
+	return added, nil
 }
 
 // graph is the objects reachable from the roots of the pages that are not
 // redacted, as the copier follows them, with reverse edges.
 type graph struct {
-	seen map[int]bool
-	rev  map[int][]int
+	seen  map[int]bool
+	rev   map[int][]int
+	edges int64 // references followed while building
 }
 
 // buildGraph walks everything reachable from roots (each a page's roots).
@@ -336,6 +346,7 @@ func buildGraph(r *parse.Resolver, roots [][]int) (*graph, error) {
 		if err != nil {
 			continue
 		}
+		g.edges += int64(len(refs))
 		for _, c := range refs {
 			g.rev[c] = append(g.rev[c], n)
 			push(c)

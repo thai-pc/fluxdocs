@@ -29,6 +29,7 @@ var ErrMarkMismatch = errors.New("redaction mark does not belong to this page")
 type Page struct {
 	id      pageKey // the page's identity (see Mark)
 	r       *parse.Resolver
+	pi      parse.PageInfo
 	content []byte
 	spans   []parse.ContentOpSpan
 	runs    []textRun
@@ -41,8 +42,11 @@ type Page struct {
 	res  parse.Dict // the page's effective /Resources
 	// resID is the scopeID of res in the walk that built the page: the
 	// lookups whose conforming binding is the page's own resources carry it.
-	resID int
-	box   Rect // the page's MediaBox
+	resID   int
+	box     Rect  // the page's MediaBox
+	decoded int64 // bytes the analysis decoded
+	// unitHidden is what the units the page paints hold but do not show.
+	unitHidden []hiddenText
 }
 
 // Mark is a planned change to one operator of a page's content that applies
@@ -108,6 +112,7 @@ func analyzePage(w *walker, pi parse.PageInfo, content parse.ContentSegments) (*
 		resID:   resID,
 		id:      pageID(r, pi),
 		r:       r,
+		pi:      pi,
 		content: content.Data,
 		spans:   spans,
 		uses:    useSet{},
@@ -119,7 +124,95 @@ func analyzePage(w *walker, pi parse.PageInfo, content parse.ContentSegments) (*
 	if err := it.run(spans); err != nil {
 		return nil, err
 	}
+	p.decoded = w.decoded
+	p.unitHidden = w.hidden
 	return p, nil
+}
+
+// HasPropertyText reports whether any marked-content property list of the
+// page still has an /ActualText, /Alt or /E entry (a rewritten page has
+// none, D7).
+func (p *Page) HasPropertyText() bool {
+	for _, pl := range p.props {
+		for _, k := range textKeys {
+			if len(pl.texts[k]) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Size estimates the memory the model holds: its content, its operators and
+// their operands (strings, and every element of an array or dictionary), its
+// runs and their readings, its property lists, paint items and state
+// operators, and its units' hidden text.
+func (p *Page) Size() int64 {
+	n := int64(len(p.content)) + 160*int64(len(p.spans)) + 96*int64(len(p.props)) +
+		128*int64(len(p.items)) + 64*int64(len(p.states))
+	for _, r := range p.runs {
+		n += 160
+		for _, t := range r.texts {
+			n += 16 + int64(len(t))
+		}
+	}
+	for _, s := range p.spans {
+		for _, o := range s.Operands {
+			n += operandSize(o, 0)
+		}
+	}
+	for _, h := range p.unitHidden {
+		n += 48 + int64(len(h.text))
+	}
+	return n
+}
+
+// operandSize estimates the memory of an operand beyond its slot in the
+// span: a string's bytes; an array's or dictionary's elements (about 48
+// bytes each: the interface value, a map entry) and what they hold.
+func operandSize(o parse.Object, depth int) int64 {
+	if depth > 64 {
+		return 0
+	}
+	switch v := o.(type) {
+	case parse.String:
+		return int64(len(v.Value))
+	case parse.Name:
+		return int64(len(v))
+	case parse.Array:
+		n := int64(24)
+		for _, e := range v {
+			n += 48 + operandSize(e, depth+1)
+		}
+		return n
+	case parse.Dict:
+		n := int64(48)
+		for k, e := range v {
+			n += 64 + int64(len(k)) + operandSize(e, depth+1)
+		}
+		return n
+	}
+	return 0
+}
+
+// Decoded is the number of bytes reading the page decoded (its content and
+// every unit and font it paints with).
+func (p *Page) Decoded() int64 { return p.decoded }
+
+// RunsMeet reports whether any run of the page meets any of regions
+// (normalized first; closed intervals, a run that is not finite meets every
+// region).
+func (p *Page) RunsMeet(regions []Rect) bool {
+	norm := make([]Rect, len(regions))
+	for i, rc := range regions {
+		norm[i] = normalize(rc)
+	}
+	for _, r := range p.runs {
+		if r.meetsAny(norm) {
+			return true
+		}
+	}
+	return false
 }
 
 // Painter finds what pages that are not redacted paint (PaintedObjects), so
@@ -437,8 +530,27 @@ type Output struct {
 	// (a removed image, form, pattern or soft-mask ExtGState, and references
 	// inside a direct resource value): what D5 removed. They and what only
 	// they reach must not be written unless content kept elsewhere paints
-	// them (core denies the rest build-wide).
+	// them (core denies the rest build-wide). A /Properties entry whose text
+	// keys were stripped (the page writes a stripped copy) is one of them.
 	Removed []int
+
+	// The removed text, for verification and automatic plan extension
+	// (§5.6, §6.11). It is document text: never log it.
+	//
+	// RemovedTexts are the readings of every removed run. RemovedCodes are
+	// the raw bytes each removed run shows (a TJ's strings joined).
+	// AreaTexts are the readings of the runs removed only because they met
+	// a region where the source places them — not span-marked runs, nor runs
+	// removed only because removing others moved them into a region.
+	RemovedTexts []string
+	RemovedCodes [][]byte
+	AreaTexts    []string
+
+	// planned are the runs removed by a mark or by a region where the source
+	// places them, by span index: removed whatever else the plan adds
+	// (FindNeedles skips them). Runs removed because removing others moved
+	// them into a region are not: more removals may move them out again.
+	planned []uint64
 }
 
 // Rewrite returns the page with:
@@ -489,15 +601,31 @@ func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
 	for i, rc := range regions {
 		norm[i] = normalize(rc)
 	}
+	isDel := func(i int) bool { return remove[i/64]&(1<<(i%64)) != 0 }
+	marked := append([]uint64(nil), remove...)
+	isMarked := func(i int) bool { return marked[i/64]&(1<<(i%64)) != 0 }
+	var area []textRun // runs removed only by a region
 	for _, r := range p.runs {
-		for _, rc := range norm {
-			if r.intersects(rc) {
-				del(r.span)
-				break
+		if r.meetsAny(norm) {
+			if !isMarked(r.span) {
+				area = append(area, r)
 			}
+			del(r.span)
 		}
 	}
-	isDel := func(i int) bool { return remove[i/64]&(1<<(i%64)) != 0 }
+	planned := append([]uint64(nil), remove...)
+	// A removed run no longer moves the pen, so the later runs of its epoch
+	// are shown further back in the output, perhaps inside a region: they
+	// are removed too (no glyph of the output may meet a region).
+	if len(norm) > 0 && p.needsSettle(isDel) {
+		extra, err := p.settle(norm, isDel)
+		if err != nil {
+			return Output{}, err
+		}
+		for _, i := range extra {
+			del(i)
+		}
+	}
 	// keep marks the state-setting operators a surviving paint consumes.
 	keep := make([]bool, len(p.states))
 	consume := func(c consumes) {
@@ -557,29 +685,63 @@ func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
 		}
 		if pl.inline == nil {
 			named[pl.name] = true
-		} else if hasTextKey(pl.inline) {
+		} else if needsScrub(pl.inline) {
 			with[pl.span] = reemitProps(pl)
+		}
+	}
+	// A named list whose entry has a text key is written as a stripped copy:
+	// the entry's object is no longer this page's (if nothing kept uses it,
+	// core keeps it out of the output). The name itself stays in use.
+	strip, err := p.strippedEntries(named)
+	if err != nil {
+		return Output{}, err
+	}
+	for _, pl := range p.props {
+		if pl.inline != nil {
+			continue
+		}
+		if !strip[pl.name] {
+			used.add(pl.uses)
+			continue
+		}
+		for k := range pl.uses {
+			if _, ok := k.(resKey); ok {
+				used[k] = struct{}{}
+			} else {
+				dropped[k] = struct{}{}
+			}
 		}
 	}
 
 	// One pass over the spans, in content order: every byte outside a
-	// removed or replaced span is copied as it is.
+	// removed or replaced span is copied as it is, except comments — before
+	// an operator or between its operands — which become a space (they are
+	// white-space to every reader, but bytes that could hold the removed
+	// text).
 	var b bytes.Buffer
 	b.Grow(len(p.content))
 	prev := 0
 	for i, s := range p.spans {
+		writeGap(&b, p.content[prev:s.Start])
 		r, replaced := with[i]
-		if remove[i/64]&(1<<(i%64)) == 0 && !replaced {
-			continue
+		switch {
+		case isDel(i):
+			b.Write(p.removal(s)) // removal wins over a replacement
+		case replaced:
+			b.Write(r)
+		case s.Op == "BI":
+			// An inline image's data is opaque: comments are blanked up to
+			// the ID that ends its dictionary.
+			op := p.content[s.Start:s.End]
+			id := inlineDictEnd(op)
+			writeBlanked(&b, op[:id])
+			b.Write(op[id:])
+		default:
+			writeBlanked(&b, p.content[s.Start:s.End])
 		}
-		if !replaced || remove[i/64]&(1<<(i%64)) != 0 {
-			r = p.removal(s) // removal wins over a replacement
-		}
-		b.Write(p.content[prev:s.Start])
-		b.Write(r)
 		prev = s.End
 	}
-	b.Write(p.content[prev:])
+	writeGap(&b, p.content[prev:])
 	for _, r := range boxes {
 		writeBlackRect(&b, r)
 	}
@@ -600,7 +762,418 @@ func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
 	sort.Ints(removed)
 	kept := used.conforming()
 	sort.Ints(kept)
-	return Output{Content: b.Bytes(), Resources: res, Stripped: stripped, Used: kept, Removed: removed}, nil
+	out := Output{Content: b.Bytes(), Resources: res, Stripped: stripped, Used: kept, Removed: removed}
+	for _, r := range area {
+		out.AreaTexts = append(out.AreaTexts, r.texts...)
+	}
+	out.planned = planned
+	for _, r := range p.runs {
+		if !isDel(r.span) {
+			continue
+		}
+		out.RemovedTexts = append(out.RemovedTexts, r.texts...)
+		var code []byte
+		for _, o := range p.spans[r.span].Operands {
+			code = appendStrings(code, o, 0)
+		}
+		if len(code) >= MinNeedle {
+			out.RemovedCodes = append(out.RemovedCodes, code)
+		}
+	}
+	return out, nil
+}
+
+// appendStrings appends the bytes of every string in o, at any depth up to a
+// bound, to dst.
+func appendStrings(dst []byte, o parse.Object, depth int) []byte {
+	if depth > 64 {
+		return dst
+	}
+	switch v := o.(type) {
+	case parse.String:
+		dst = append(dst, v.Value...)
+	case parse.Array:
+		for _, e := range v {
+			dst = appendStrings(dst, e, depth+1)
+		}
+	}
+	return dst
+}
+
+// leadingSpace returns the length of the white-space and comments b starts
+// with (§7.2.2–7.2.3).
+func leadingSpace(b []byte) int {
+	i := 0
+	for i < len(b) {
+		switch c := b[i]; {
+		case isSpaceByte(c):
+			i++
+		case c == '%':
+			for i < len(b) && b[i] != '\r' && b[i] != '\n' {
+				i++
+			}
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// writeBlanked writes the bytes of one strictly scanned operator (its
+// operands and operator, with the white-space and comments before them, but
+// no inline image) with each comment replaced by a space; the end of line
+// that ends a comment is kept.
+func writeBlanked(b *bytes.Buffer, op []byte) {
+	prev := 0
+	forComments(op, func(i, j int) {
+		b.Write(op[prev:i])
+		b.WriteByte(' ')
+		prev = j
+	})
+	b.Write(op[prev:])
+}
+
+// forComments calls f with the offsets [i, j) of each comment in b, read as
+// the content lexer reads it (§7.2): a '%' outside a string up to the end of
+// its line. Literal strings (balanced parentheses, backslash escapes) and
+// hex strings are skipped. b must hold whole tokens (no inline image data).
+func forComments(b []byte, f func(i, j int)) {
+	for i := 0; i < len(b); {
+		switch b[i] {
+		case '(':
+			depth := 0
+			for ; i < len(b); i++ {
+				c := b[i]
+				if c == '\\' {
+					i++
+					continue
+				}
+				if c == '(' {
+					depth++
+				} else if c == ')' {
+					depth--
+					if depth == 0 {
+						i++
+						break
+					}
+				}
+			}
+		case '<':
+			if i+1 < len(b) && b[i+1] == '<' {
+				i += 2
+				continue
+			}
+			for i < len(b) && b[i] != '>' {
+				i++
+			}
+			i++
+		case '%':
+			j := i
+			for j < len(b) && b[j] != '\r' && b[j] != '\n' {
+				j++
+			}
+			f(i, j)
+			i = j
+		default:
+			i++
+		}
+	}
+}
+
+// inlineDictEnd returns the offset just past the ID keyword that ends an
+// inline image's dictionary in op, the bytes of a strictly scanned BI span
+// (white-space and comments, BI, the dictionary, ID, data, EI): tokens are
+// read as the content lexer reads them, strings and comments skipped. Returns
+// 0 when there is no ID (nothing before the data is then treated as the
+// dictionary).
+func inlineDictEnd(op []byte) int {
+	for i := 0; i < len(op); {
+		c := op[i]
+		switch {
+		case c == '(':
+			depth := 0
+			for ; i < len(op); i++ {
+				if op[i] == '\\' {
+					i++
+					continue
+				}
+				if op[i] == '(' {
+					depth++
+				} else if op[i] == ')' {
+					depth--
+					if depth == 0 {
+						i++
+						break
+					}
+				}
+			}
+		case c == '<':
+			if i+1 < len(op) && op[i+1] == '<' {
+				i += 2
+				continue
+			}
+			for i < len(op) && op[i] != '>' {
+				i++
+			}
+			i++
+		case c == '%':
+			for i < len(op) && op[i] != '\r' && op[i] != '\n' {
+				i++
+			}
+		case c == '/':
+			// A name, not a keyword (/ID is not the ID operator).
+			for i++; i < len(op) && !isSpaceByte(op[i]) && !isDelimiterByte(op[i]); i++ {
+			}
+		case isSpaceByte(c) || isDelimiterByte(c):
+			i++
+		default:
+			j := i
+			for j < len(op) && !isSpaceByte(op[j]) && !isDelimiterByte(op[j]) {
+				j++
+			}
+			if string(op[i:j]) == "ID" {
+				return j
+			}
+			i = j
+		}
+	}
+	return 0
+}
+
+// HiddenTags returns the tags of the needles found in what the page's
+// content holds but does not show (forHidden). A rewritten page holds none
+// of the removed text there (verification, §5.6 check 1); on a page that is
+// not redacted, a hit is page hygiene (the rewrite blanks and scrubs it).
+func (p *Page) HiddenTags(text, raw *Needles) uint8 {
+	return hiddenTags(p.content, p.spans, text, raw)
+}
+
+// hiddenTags returns the tags of the needles in what content holds but does
+// not show, read through spans (its operators, strict or lenient).
+func hiddenTags(content []byte, spans []parse.ContentOpSpan, text, raw *Needles) uint8 {
+	var tags uint8
+	forHidden(content, spans, func(b []byte, operand parse.Object) {
+		if operand != nil {
+			tags |= stringTags(operand, text, RoleData, 0)
+			if raw.Len() > 0 {
+				tags |= raw.Find(string(appendStrings(nil, operand, 0)))
+			}
+			return
+		}
+		tags |= text.FindBytes(b, raw)
+	})
+	return tags
+}
+
+// forHidden calls f with everything content holds but does not show: each
+// comment (b, operand nil) — between operators, between operands, in an
+// inline image's dictionary — and each operand of every operator but the
+// text-showing ones and inline images (operand set: a property list, a
+// marked-content tag), whose strings a reader may export but never draws.
+func forHidden(content []byte, spans []parse.ContentOpSpan, f func(b []byte, operand parse.Object)) {
+	comments := func(from, to int) {
+		if from < 0 || to > len(content) || from >= to {
+			return
+		}
+		forComments(content[from:to], func(i, j int) { f(content[from+i:from+j], nil) })
+	}
+	prev := 0
+	for _, s := range spans {
+		if s.Start < prev || s.End > len(content) {
+			continue // not in content order: nothing to read safely
+		}
+		comments(prev, s.Start)
+		prev = s.End
+		switch s.Op {
+		case "BI":
+			comments(s.Start, s.Start+inlineDictEnd(content[s.Start:s.End]))
+			continue
+		case "Tj", "TJ", "'", "\"":
+		default:
+			for _, o := range s.Operands {
+				if holdsString(o, 0) {
+					f(nil, o)
+				}
+			}
+		}
+		comments(s.Start, s.End)
+	}
+	comments(prev, len(content))
+}
+
+// forStrings calls f with the bytes of every string in o, at any depth of
+// arrays and dictionaries up to a bound.
+func forStrings(o parse.Object, depth int, f func([]byte)) {
+	if depth > 32 {
+		return
+	}
+	switch v := o.(type) {
+	case parse.String:
+		f(v.Value)
+	case parse.Array:
+		for _, e := range v {
+			forStrings(e, depth+1, f)
+		}
+	case parse.Dict:
+		for _, e := range v {
+			forStrings(e, depth+1, f)
+		}
+	}
+}
+
+// hiddenText is what a unit's content holds but does not show (forHidden),
+// recorded while the page is read: comments and the strings of operators
+// that show nothing.
+type hiddenText struct {
+	kind unitKind
+	num  int
+	text []byte
+}
+
+// UnitHidden returns the refusal for the first unit the page paints whose
+// hidden content (comments, strings it does not show) holds a needle:
+// Phase 1 does not rewrite units, so such content cannot be removed. nil
+// when none does.
+func (p *Page) UnitHidden(text *Needles) *Refusal {
+	for _, h := range p.unitHidden {
+		if text.FindBytes(h.text, nil) != 0 {
+			return refuse(h.kind.reason(), "automatic extension: the removed text is also held in the content of a %s (a comment or a string it does not show)",
+				unitName(h.kind, h.num)).(*Refusal)
+		}
+	}
+	return nil
+}
+
+// writeGap writes white-space and comments (bytes outside every token: the
+// strict scanner consumed every token), with each comment replaced by a
+// space.
+func writeGap(b *bytes.Buffer, gap []byte) {
+	for len(gap) > 0 {
+		i := bytes.IndexByte(gap, '%')
+		if i < 0 {
+			b.Write(gap)
+			return
+		}
+		b.Write(gap[:i])
+		b.WriteByte(' ')
+		gap = gap[i:]
+		j := bytes.IndexAny(gap, "\r\n")
+		if j < 0 {
+			return
+		}
+		gap = gap[j:]
+	}
+}
+
+// needsSettle reports whether a removed run is followed by a kept run that
+// it moved: one in the same epoch.
+func (p *Page) needsSettle(isDel func(int) bool) bool {
+	removedEpoch := -1
+	for _, r := range p.runs {
+		switch {
+		case isDel(r.span):
+			removedEpoch = r.epoch
+		case r.epoch == removedEpoch:
+			return true
+		}
+	}
+	return false
+}
+
+// settle interprets the page again as Rewrite writes it — a run removed
+// moves the pen no further — and returns the spans of the kept runs that
+// the output places inside a region (see settler). removed reports the runs
+// the plan removes. Interpretation is deterministic, so the walk refuses
+// nothing the first one accepted; an error is a budget or resolve error.
+func (p *Page) settle(regions []Rect, removed func(int) bool) ([]int, error) {
+	w := newWalker(p.r)
+	sc := w.pageScope(p.pi)
+	scratch := &Page{id: p.id, r: p.r, pi: p.pi, content: p.content, spans: p.spans, uses: useSet{}, res: p.res, box: p.box}
+	st := &settler{regions: regions, removed: removed}
+	it := &interp{w: w, kind: unitPage, sc: sc, page: scratch, settle: st}
+	if err := it.run(p.spans); err != nil {
+		return nil, err
+	}
+	return st.extra, nil
+}
+
+// strippedEntries reports, for each name, whether the page's own
+// /Properties entry has a text key or another string value (privateResources
+// writes a scrubbed copy of it, scrubProps).
+func (p *Page) strippedEntries(names map[parse.Name]bool) (map[parse.Name]bool, error) {
+	out := map[parse.Name]bool{}
+	if len(names) == 0 {
+		return out, nil
+	}
+	w := newWalker(p.r)
+	sub, err := w.resolveDict(p.res["Properties"])
+	if err != nil {
+		return nil, err
+	}
+	for name := range names {
+		v, ok := sub[name]
+		if !ok {
+			continue
+		}
+		entry, err := w.resolveDict(v)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = entry != nil && needsScrub(entry)
+	}
+	return out, nil
+}
+
+// NeedleHit is one place FindNeedles found a needle on a page.
+type NeedleHit struct {
+	Tags     uint8 // the tags of the needles found
+	Property bool  // in a property list's /ActualText, /Alt or /E (the key is stripped), not in a run
+	Rect     Rect  // a run's display box, where RedactAndFlatten paints it (Property false)
+}
+
+// FindNeedles plans the removal of every run of the page whose text, in any
+// reading, holds a needle, and the stripping of every property-list text key
+// that holds one (automatic plan extension, §6.11): span marks, and the hits
+// with their display boxes. A matched list's runs are not removed: the
+// needle is in the key, which is stripped. When done (a rewrite of the page)
+// is set, the runs it removed by a mark or a region — removed by any
+// rewrite with more marks — and every property list (a rewritten page strips
+// them all, D7) are skipped; done may be nil.
+func (p *Page) FindNeedles(n *Needles, done *Output) ([]Mark, []NeedleHit) {
+	var marks []Mark
+	var hits []NeedleHit
+	if n.Len() == 0 {
+		return nil, nil
+	}
+	for _, r := range p.runs {
+		if done != nil && done.planned[r.span/64]&(1<<(r.span%64)) != 0 {
+			continue
+		}
+		var tags uint8
+		for _, t := range r.texts {
+			tags |= n.FindText(t)
+		}
+		if tags != 0 {
+			marks = append(marks, Mark{page: p.id, start: r.start, end: r.end})
+			hits = append(hits, NeedleHit{Tags: tags, Rect: p.runRect(r)})
+		}
+	}
+	if done != nil {
+		return marks, hits
+	}
+	for _, pl := range p.props {
+		for _, k := range textKeys {
+			var tags uint8
+			for _, t := range pl.texts[k] {
+				tags |= n.FindText(t)
+			}
+			if tags != 0 {
+				marks = append(marks, Mark{page: p.id, start: pl.start, end: pl.end, strip: k})
+				hits = append(hits, NeedleHit{Tags: tags, Property: true})
+			}
+		}
+	}
+	return marks, hits
 }
 
 // spanAt returns the index of the span [start, end), if the page has one.
@@ -687,12 +1260,9 @@ func isDelimiterByte(c byte) bool {
 // minus its text keys (textKeys). Strings are written in hex form, so their
 // bytes round-trip exactly.
 func reemitProps(pl propList) []byte {
-	d := make(parse.Dict, len(pl.inline))
-	for k, v := range pl.inline {
+	d := scrubProps(pl.inline)
+	for k, v := range d {
 		d[k] = hexStrings(v)
-	}
-	for _, k := range textKeys {
-		delete(d, k)
 	}
 	var b bytes.Buffer
 	b.WriteByte(' ')
@@ -703,6 +1273,91 @@ func reemitProps(pl propList) []byte {
 	b.WriteString(pl.op)
 	b.WriteByte(' ')
 	return b.Bytes()
+}
+
+// needsScrub reports whether a property list has a text key (textKeys) or
+// any other string value: a rewritten page writes none of them (scrubProps).
+func needsScrub(d parse.Dict) bool {
+	if hasTextKey(d) {
+		return true
+	}
+	for _, v := range d {
+		if holdsString(v, 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubProps returns a copy of a property list without its text keys and
+// without any other string value, at any depth of its direct values — a
+// language tag (/Lang) included: a property list can carry any string, which
+// readers may show or export (a "language tag" such as (SECRET-1234) has a
+// valid BCP 47 shape), and a redacted page keeps none. References stay; the
+// objects they reach are verified. The original is not modified.
+func scrubProps(d parse.Dict) parse.Dict {
+	out := make(parse.Dict, len(d))
+	for k, v := range d {
+		if v = dropStrings(v, 0); v != nil {
+			out[k] = v
+		}
+	}
+	for _, k := range textKeys {
+		delete(out, k)
+	}
+	return out
+}
+
+// holdsString reports whether a direct value holds a string at any depth.
+func holdsString(o parse.Object, depth int) bool {
+	if depth > 32 {
+		return true
+	}
+	switch v := o.(type) {
+	case parse.String:
+		return true
+	case parse.Array:
+		for _, e := range v {
+			if holdsString(e, depth+1) {
+				return true
+			}
+		}
+	case parse.Dict:
+		for _, e := range v {
+			if holdsString(e, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dropStrings returns o without its strings (nil for a string itself).
+func dropStrings(o parse.Object, depth int) parse.Object {
+	if depth > 32 {
+		return nil
+	}
+	switch v := o.(type) {
+	case parse.String:
+		return nil
+	case parse.Array:
+		out := make(parse.Array, 0, len(v))
+		for _, e := range v {
+			if e = dropStrings(e, depth+1); e != nil {
+				out = append(out, e)
+			}
+		}
+		return out
+	case parse.Dict:
+		out := make(parse.Dict, len(v))
+		for k, e := range v {
+			if e = dropStrings(e, depth+1); e != nil {
+				out[k] = e
+			}
+		}
+		return out
+	}
+	return o
 }
 
 // hasTextKey reports whether a property list has any of textKeys.
@@ -772,15 +1427,8 @@ func (p *Page) privateResources(used useSet, named map[parse.Name]bool) (parse.D
 				if err != nil {
 					return nil, err
 				}
-				if entry != nil && hasTextKey(entry) {
-					e := make(parse.Dict, len(entry))
-					for k, ev := range entry {
-						e[k] = ev
-					}
-					for _, k := range textKeys {
-						delete(e, k)
-					}
-					v = e
+				if entry != nil && needsScrub(entry) {
+					v = scrubProps(entry)
 				}
 			}
 			kept[name] = v

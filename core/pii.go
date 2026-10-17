@@ -34,6 +34,10 @@ func PIIKindsFromStrings(names []string) []PIIKind { return pii.KindsFromStrings
 // were marked per kind. Nothing is removed until RedactAndFlatten. The document
 // text never leaves the process.
 //
+// Each matched value of 4 or more characters is also removed wherever else it
+// occurs (annotations, document information, text the per-page matching
+// could not see) when RedactAndFlatten runs; see RedactAndFlatten.
+//
 // Returns ErrInvalidPDF if the document was not opened from bytes, or the first
 // marking failure; in that case pages already marked stay marked and the plan
 // is flagged incomplete, so RedactAndFlatten refuses to run (fail closed).

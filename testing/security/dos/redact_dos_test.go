@@ -303,6 +303,27 @@ func TestDoS_RedactReachabilityBounded(t *testing.T) {
 	}
 }
 
+// TestDoS_RedactUndecidedPerPage: each page that is not redacted but can
+// reach a removed object costs what it adds to the kept set, not a pass over
+// every still-undecided object (F1, batch C review: 60,000 pages × 10 filler
+// objects took 66 s, 84% of it iterating the undecided set once per page).
+// Each page here decides one of k removed images, so the undecided set
+// stays large while every page is walked.
+func TestDoS_RedactUndecidedPerPage(t *testing.T) {
+	skipUnlessTimed(t)
+	doc := reachDoc(t, 30_000, 10)
+	if err := doc.RedactArea(0, core.Rect{X: 340, Y: 340, Width: 0.5, Height: 0.5}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := doc.RedactAndFlatten(); err != nil {
+		t.Fatalf("RedactAndFlatten: %v", err)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Errorf("took %v, want each page charged only for what it adds", d)
+	}
+}
+
 // TestDoS_IndirectStreamLengthIsCheap: every page's content stream has
 // /Length 4 0 R, and object 4 is an array of 500,000 integers (about 1 MB).
 // Resolving the indirect length reads a few tokens once, not the whole
@@ -333,5 +354,66 @@ func TestDoS_IndirectStreamLengthIsCheap(t *testing.T) {
 	}
 	if d := time.Since(start); d > 10*time.Second {
 		t.Errorf("open and extract took %v, want the indirect lengths read once and cheaply", d)
+	}
+}
+
+// attrDoc is the batch D review round 2 BL3 shape: page 0 shows the secret,
+// page 1 carries it in /PieceInfo (a residual that verification attributes,
+// page hygiene), and every page shares one /Resources whose /X array reaches
+// m small objects.
+func attrDoc(t *testing.T, pages, m int) *core.Document {
+	t.Helper()
+	objs := []string{"<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Font << /F1 5 0 R >> /X 4 0 R >>", "",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
+	var arr strings.Builder
+	arr.WriteString("[")
+	for i := 0; i < m; i++ {
+		fmt.Fprintf(&arr, "%d 0 R ", len(objs)+1)
+		objs = append(objs, "[1]")
+	}
+	arr.WriteString("]")
+	objs[3] = arr.String()
+	var kids strings.Builder
+	for p := 0; p < pages; p++ {
+		pn := len(objs) + 1
+		text, extra := "(public)", ""
+		if p == 0 {
+			text = "(SECRET-1234)"
+		}
+		if p == 1 {
+			extra = " /PieceInfo << /Q << /Private (SECRET-1234) >> >>"
+		}
+		c := "BT /F1 24 Tf 72 700 Td " + text + " Tj ET"
+		objs = append(objs, fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 3 0 R /Contents %d 0 R%s >>", pn+1, extra),
+			fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(c), c))
+		fmt.Fprintf(&kids, "%d 0 R ", pn)
+	}
+	objs[1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", kids.String(), pages)
+	doc, err := core.OpenBytes(classicPDF(objs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// TestDoS_RedactAttributionIsOnePass: attributing a residual costs one walk of
+// what the pages that are not redacted reach, not a closure per page and
+// annotation (BL3: 4,000 pages sharing 40,000 objects took 23.2 s).
+func TestDoS_RedactAttributionIsOnePass(t *testing.T) {
+	skipUnlessTimed(t)
+	doc := attrDoc(t, 4000, 40_000)
+	if _, err := doc.RedactText(0, `SECRET-\d+`); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	out, err := doc.RedactAndFlatten()
+	if err != nil {
+		t.Fatalf("RedactAndFlatten: %v", err)
+	}
+	if r, _ := out.RedactionReport(); len(r.Extensions) != 1 || r.Extensions[0].Where != "page-hygiene" {
+		t.Errorf("report %+v, want page hygiene on page 1", r)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("took %v, want attribution in one pass", d)
 	}
 }
