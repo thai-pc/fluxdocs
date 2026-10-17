@@ -44,8 +44,28 @@ Each Go package also has its own `testdata/` (e.g.
 1. `go build ./...` + `GOOS=js GOARCH=wasm go build ./wasm` — both green.
 2. `go test -race ./...` green.
 3. `gofmt -l .` empty, `go vet ./...` clean.
-4. `go test ./testing/security/redaction/...` **passes 100%** (hard block).
+4. `go test ./testing/security/redaction/...` **passes 100%** (hard block). The
+   `redaction-oracle` CI job runs it with Ghostscript installed and
+   `FLUXDOCS_REQUIRE_GS=1`, so the oracle cannot be skipped there (the job is
+   non-blocking until it has run green and stable on CI).
 5. Golden diffs (if any) reviewed by hand.
+
+## Redaction oracle (Ghostscript)
+
+The leak corpus (`security/redaction/`) checks every redacted output with a
+differential oracle: Ghostscript's `txtwrite` text of the output must not hold
+the secret (docs/design/redaction-hardening.md §12.1–12.3). Without `gs` on
+`PATH` those subtests skip, unless `FLUXDOCS_REQUIRE_GS=1`, which makes its
+absence a failure (set in CI). The oracle is native-only (`//go:build !js`).
+
+Licensing: Ghostscript is AGPL. The tests run it as a separate process; nothing
+links it and nothing ships it, so the MIT build is unaffected.
+
+The corpus no-regression check (`corpus/redaction_regress_test.go`) reads
+extra PDFs from `FLUXDOCS_EXTRA_CORPUS` (a file of paths) and compares refusal
+outcomes with `FLUXDOCS_EXTRA_BASELINE`; `FLUXDOCS_REGRESS_EXT` writes what
+automatic extension added per operation (no document text). Verification
+failures must be 0.
 
 ## Corpus principles
 

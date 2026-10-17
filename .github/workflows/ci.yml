@@ -64,6 +64,45 @@ jobs:
             echo "No redaction tests yet — gate is a placeholder."
           fi
 
+  # Redaction leak corpus with its differential oracle, Ghostscript txtwrite,
+  # made mandatory inside this job: FLUXDOCS_REQUIRE_GS=1 turns a missing gs
+  # into a failure instead of a skip (decision D10,
+  # docs/design/redaction-hardening.md §12.3). The job is non-blocking
+  # (continue-on-error) until it has run green and stable on CI; the native
+  # job's redaction gate above stays blocking. The runner image is pinned,
+  # which keeps the distribution's ghostscript package (and so the oracle's
+  # behaviour, which gsBlind rows depend on) stable; apt does not pin the
+  # version itself, so the job prints it and fails below the minimum the
+  # leak corpus was checked with. Ghostscript (AGPL) runs as a separate
+  # process in tests only: nothing links it, nothing ships it.
+  redaction-oracle:
+    name: Redaction leak corpus (Ghostscript oracle, non-blocking)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Install Ghostscript
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ghostscript
+      - name: Ghostscript version
+        run: |
+          v="$(gs --version)"
+          echo "Ghostscript $v"
+          # txtwrite with the text extraction the oracle relies on: 9.50+.
+          if [ "$(printf '%s\n' 9.50 "$v" | sort -V | head -n1)" != "9.50" ]; then
+            echo "::error::Ghostscript $v is older than 9.50"
+            exit 1
+          fi
+      - name: Leak corpus with the oracle required
+        env:
+          FLUXDOCS_REQUIRE_GS: "1"
+        run: go test -count=1 ./testing/security/redaction/...
+
   cloud:
     name: Build & Test (cloud module)
     runs-on: ubuntu-latest

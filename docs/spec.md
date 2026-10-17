@@ -689,7 +689,50 @@ doc.ImportAnnotationLayer(layer AnnotationLayer) error
 doc.RedactText(pageIndex int, pattern string) ([]Rect, error)       // by regex, e.g. an ID number
 doc.RedactArea(pageIndex int, rect Rect) error                       // by a specified region
 doc.RedactAndFlatten() (*Document, error)                            // permanently removed, not recoverable
+out.RedactionReport() (RedactionReport, bool)                        // what was removed beyond the plan
 ```
+
+Behaviour (design: `docs/design/redaction-hardening.md`):
+
+- **`RedactText`** matches the Unicode text extraction reads (`/ToUnicode`),
+  one text-showing operator at a time, the strings of a `TJ` array joined (so
+  kerning does not split a match). It also matches the `/ActualText`, `/Alt`
+  and `/E` entries of marked-content property lists: a match strips the entry
+  and removes the text shown inside the sequence. A matched operator is
+  removed whatever its size or position. A string split across operators is
+  not matched yet (Phase 2); `RedactArea` has no such limit. A font whose
+  glyphs draw something other than its `/ToUnicode` says is out of scope.
+- **`RedactArea`** normalizes a rect with a negative size; a NaN or infinite
+  coordinate returns `ErrInvalidArgument` and marks nothing. Everything the
+  page paints that meets the region is removed whole: text-showing
+  operators, images (a full-page scan under any region is blanked), inline
+  images, form XObjects without text, painted paths and shadings. Text that
+  removing earlier text moves into a region is removed too.
+- **Automatic extension.** A string `RedactText` or `AutoRedactPII` matched
+  (4 or more characters) and the text removed under a region (8 or more) are
+  also removed wherever else they occur — other pages, annotations (with
+  their popups and replies), form-field widgets, the document information —
+  compared after NFKC with white-space and invisible characters removed,
+  case-sensitively. A page that must be searched but cannot be read for certain
+  (content that does not decode, or a strict-scanner loss a lenient reading
+  could hide text behind) refuses the redaction. File attachment annotations
+  are dropped whenever a redaction runs. `RedactionReport()` on the returned
+  document lists what was extended (pages, rects, annotation subtypes,
+  information field names; never document text); `RedactionReport.Summary()`
+  is a one-line text-free account.
+- **`RedactAndFlatten`** strips every `/ActualText`, `/Alt` and `/E` — and
+  every other string, `/Lang` included — from the property lists of each
+  redacted page, blanks its comments, keeps only the resources and page
+  entries the remaining content needs, and writes nowhere what only removed
+  content used. It then re-opens and verifies its own output; verification is
+  always on.
+- **Errors.** A page that cannot be redacted safely (content other readers
+  could read differently, text shown through a form, tiling pattern,
+  soft-mask group or Type 3 glyph procedure, a budget) is a
+  `*RedactionError{Page, Reason, Detail, Err}` matching
+  `ErrRedactionUnsupported`, never `ErrInvalidPDF`. An output that still holds
+  removed text is `ErrRedactionVerification` (which matches `ErrInternal`) and
+  no document; so is automatic extension that does not converge.
 
 ### 7.5 Forms (Pro)
 
@@ -1189,6 +1232,17 @@ var (
 	// deterministic property of the document and options, so retrying does not
 	// help. A context deadline is NOT this error (it stays context.DeadlineExceeded).
 	ErrRenderBudgetExceeded = errors.New("fluxdocs: render budget exceeded")
+
+	// Redaction refused a page it cannot redact safely; the concrete error is a
+	// *RedactionError naming the page and reason (content_ambiguous,
+	// inline_image, form_text, pattern_text, softmask_text, type3_text,
+	// budget_exceeded, unsupported_xobject). Never ErrInvalidPDF.
+	ErrRedactionUnsupported = errors.New("fluxdocs: content cannot be redacted safely")
+
+	// The redacted output failed its mandatory self-check (it would still hold
+	// removed content, or automatic extension did not converge). No document is
+	// returned. Matches ErrInternal: it is a FluxDocs bug.
+	ErrRedactionVerification error = &childError{msg: "fluxdocs: redaction verification failed", parent: ErrInternal}
 )
 ```
 
@@ -1651,33 +1705,47 @@ rectangle over the content, while the original text remains in the content strea
 and can be extracted/copied. FluxDocs does it correctly by modifying the actual
 object stream.
 
+The pipeline (`docs/design/redaction-hardening.md` §5) has seven stages, and
+fails closed at every one:
+
 ```
-function redactAndFlatten(page, redactRects):
-    contentStream = decodeStream(page.Contents)
-    tokens = tokenize(contentStream)
-    newTokens = []
-
-    for token in tokens:
-        if token.operator == 'Tj' or token.operator == 'TJ':
-            textBounds = computeTextBounds(token, currentGraphicsState)
-            if intersectsAny(textBounds, redactRects):
-                continue  // drop this text-drawing operator entirely, keep nothing
-        newTokens.append(token)
-
-    page.Contents = encodeStream(reconstructStream(newTokens))
-
-    // Draw a black cover (display only, NOT the primary security mechanism)
-    for rect in redactRects:
-        page.Contents.append(drawFilledRect(rect, color='black'))
-
-    // Also remove metadata/annotations that may hold the same content
-    removeMatchingAnnotations(page, redactRects)
-
-    return page
+A. content model   strict scan of each content stream (ISO 32000-1 Annex A
+                   operand types, text-object rules, inline images whose end
+                   every reader agrees on, no token split across streams);
+                   any possible disagreement between readers -> refuse
+B. resource walker every route the page paints through: forms, soft-mask
+                   groups, tiling patterns, Type 3 glyph procedures, gs /Font;
+                   names looked up in every candidate scope; budgeted
+C. text model      per text-showing operator: Unicode readings via the font
+                   model, a box that over-approximates every glyph position
+                   (closed intervals; non-finite -> meets every region)
+D. planner         RedactText -> span marks (+ display rects);
+                   RedactArea -> removal regions; automatic extension adds
+                   the other occurrences of the removed text (D4)
+E. rewriter        splice out marked runs, runs and non-text paint meeting a
+                   region, the paint state only they used; strip /ActualText,
+                   /Alt, /E on the page; page-private resources (GC)
+F. builder         redacted pages keep only the entries that paint them (no
+                   annotations, /Thumb, /Metadata ...); references to them
+                   point at the copy; what only removed content used is
+                   denied build-wide; removed annotations left out
+G. verifier        re-open the output: strict re-read of redacted pages (no
+                   run meets a region, no pattern matches, no property text);
+                   needle search of owned objects, orphans, /Info, and of the
+                   rest for text that propagates -> extend and rebuild (at
+                   most 2 more rounds) or fail
 ```
+
+Annotations are not "matched" against regions: every annotation of a redacted
+page is dropped, property-list text is stripped, and back-references from
+other pages are denied.
 
 **Mandatory test:** after redaction, re-run `ExtractText()` over the redacted
-region — it must return empty or not match the original content.
+region — it must return empty or not match the original content. The leak
+corpus (`testing/security/redaction/`) checks every repro three ways: our
+extraction (including a deep extraction through forms and Type 3), the output's
+bytes, decoded streams and strings, and Ghostscript's text output (mandatory
+in CI).
 
 ---
 
@@ -1876,7 +1944,13 @@ and track bundle size as a continuous KPI.
 **Mitigation:** A mandatory test suite runs `ExtractText` after every redaction
 test case before merging code. This is the most serious reputation risk — a
 single publicly discovered redaction flaw (as has happened to governments/orgs)
-would destroy the product's credibility.
+would destroy the product's credibility. In addition: `RedactAndFlatten`
+verifies its own output and returns no document when removed content
+survives (always on, no opt-out); content whose reading other viewers could
+dispute is refused rather than guessed (fail closed on model disagreement);
+and a leak corpus — one row per repro from every review — runs with a
+differential oracle (Ghostscript `txtwrite`, mandatory in CI), next to a
+real-file no-regression check of refusals and verification failures.
 
 ### 18.2 Market Risks
 

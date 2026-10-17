@@ -1,8 +1,10 @@
 # Design: redaction hardening (one model instead of per-leak patches)
 
-Status: design; Phase 1 batches A and B landed (cbf7348, 13121d9), batch C
-(steps 1.8–1.11) in review. Base: `master` at 446eaea (design). Batch A
-baselines: 71de860; batch B baselines: cbf7348; batch C baselines: 13121d9.
+Status: design; Phase 1 batches A, B and C landed (cbf7348, 13121d9,
+f325e25), batch D (steps 1.12–1.14, the end of Phase 1) in review (review
+rounds 1 and 2 applied: C71–C84). Base:
+`master` at 446eaea (design). Batch A baselines: 71de860; batch B baselines:
+cbf7348; batch C baselines: 13121d9; batch D baselines: f325e25.
 Tier: **Pro** for the redaction engine (`core/internal/redact` since step 1.8,
 C25; `core/redact.go`, `core/pii.go`). It also touches **Core (MIT)** code in `core/parse` (strict
 scanner, copier) and a new shared font model, which Core callers (render,
@@ -162,6 +164,161 @@ reason), and the render and extract hashes are byte-identical.
 | C54 | **Rendering mode must be an exact integer 0–7 (S-3).** `int(...)` truncated `1.5 Tr` to stroke-only, so a fill pattern kept text renders with was removed; Ghostscript renders any non-integer mode as 0. Any other operand is undefined, and text then consumes every state | §6.10 |
 | C55 | **Exact scope fingerprints.** Scope ids compare an exact, type-tagged encoding (integers apart from reals, reals by bits, strings and names by bytes) hashed with SHA-256, confirmed by a full comparison on a hash match (the encodings are not kept) | §6.4 |
 | C56 | **Painter memory.** Decoded unit content is cached for the memo up to 256 MiB, then decoded again (charged); all unit decoding in a call is capped at 1 GiB, checked before and after each page (`rev4` MEM: 1.64 GB → 0.77 GB RSS) | §6.4 |
+
+## Design corrections from batch D implementation (2026-10-17)
+
+Batch D: steps 1.12 (verifier), 1.13 (automatic extension, report), 1.14
+(benchmarks, corpus, CI oracle job, spec and SECURITY.md) and follow-up F1.
+Baselines were recorded at **f325e25** on a rebuilt corpus list (the earlier
+scratch lists were lost with a machine restart): 719 system PDFs (every PDF
+under /Applications, /Library, /usr/local/Cellar and /usr/local/share, plus
+one in five under /Library/Developer and /System/Library) and **53 generated
+text-heavy files** (24 man pages via `man -t | ps2pdf`, 4 Chrome
+print-to-PDF, 5 Quartz via `cupsfilter`, 14 Ghostscript `pdfwrite` rewrites at
+PDF 1.3, 6 synthetic PostScript documents with inline images at PDF 1.2–1.4):
+772 files, 3,337 redaction outcomes. Render and extract hashes of every
+file (7,400 lines) and the canonical object graphs of 2,623 SaveTo, Split and
+Merge outputs are identical to f325e25 (the review round's parser fix, C73,
+changes three generated files; nothing else).
+
+| # | Correction | Applied in |
+|---|---|---|
+| C57 | **Verifier shape (1.12).** Check 1 re-reads each redacted page of the output strictly and also asserts that no property list keeps `/ActualText`, `/Alt` or `/E` (D7) and that no run holds a propagating needle. Removal regions are the `RedactArea` rects only (RedactText rects are display boxes, C17). Every needle type is compared on the skeleton (§6.11), not NFC with collapsed white-space. A budget refusal while re-reading is `budget_exceeded`, not a verification failure | §5.6 |
+| C58 | **What the object search reads (1.12).** Objects are classified by route from the catalog and `/Info` (`redact.ObjectRoles`). Not searched: image samples (image `/Subtype` or an image-only filter, as §5.6 says — a thumbnail without them *is* searched), fonts and font structures (programs, CMaps, `/ToUnicode`, `CIDSystemInfo`, descriptors), ICC profiles, functions, halftones and Indexed lookups — their bytes match short needles by chance (an Indexed ramp or a sampled gradient holds "1234" and "ABCD"; a font names "Adobe"). Content streams are read by the strings their text operators show (TJ joined) and their inline property lists, never by raw bytes (operands such as `1000 0 0 1000 0 0 cm` hold digit needles). `/Info` is searched with the propagating needles only (a residual removes the field): with every needle, a removed run "Report" fails any document titled "Annual Report" | §5.6 |
+| C59 | **Settle: removed runs move later text (1.12).** Removing a run removes its pen advance, so later runs of the same text line (an "epoch": between BT, Td, TD, Tm, T*, ', ") are shown further back — possibly inside a region, where copy-paste would then find kept text under the black box and the check "no glyph run meets a planned rect" would fail real files. When a region is planned and a removed run precedes a kept run of its epoch, Rewrite interprets the page again as written and also removes every run the output places in a region. Text removed only this way is collateral: not an area needle | §5.5, §6.8 |
+| C60 | **Comments.** On a rewritten page, comments before each operator (a span starts where the scanner began looking for its first token, so its leading white-space and comments are inside it) and after the last are replaced by a space: they are white-space to every reader but could hold the removed text. Row `comment_holds_secret` | §5.5 |
+| C61 | **Stripped `/Properties` entries are removed objects.** A named property list whose entry has a text key is written as a page-private stripped copy, so the entry's object is no longer the page's: it goes to `Output.Removed`, and the deny set keeps it out of the output unless kept content uses it. Row `actualtext_shared_form` is therefore **clean** in Phase 1 (the form keeps a null), not refused as the row's note predicted | §6.7, §6.10 |
+| C62 | **Pre-pass (1.13).** Each page is first read for its text only, leniently, through every unit (`redact.TextScanner`: no glyph geometry, fonts loaded once per call); only a page that shows a needle is read with the strict model, which places the runs to remove. `FindNeedles` on a caller's page skips only the runs removed by a mark or by a region where the source places them — not settle removals (C59), which depend on the whole plan: with the extension's marks a run settle had removed can be kept again (seven `License.pdf` area-half files failed verification before this) | §6.11 |
+| C63 | **Verifier and pre-pass share the work (1.12, 1.14).** When the pre-pass ran, the verifier does not read the other pages again with fonts: their copies show what the pre-pass read (content, resources and annotations are copied as they are, and what the deny set removes no kept content paints). It still searches every object those pages reach by bytes, reading shown strings as Latin-1 only — a reading the text model also matches, so a hit is attributable — and skips content streams whose bytes the pre-pass read without a hit (same filters and raw bytes, SHA-256). Without the pre-pass (test hook) the font-aware read runs, and round 1 extends | §5.6 |
+| C64 | **Attribution of residuals (1.13).** A hit in an object only pages that are not redacted reach is attributed to each such page that reaches it other than through `/Annots` (page hygiene: the page is redacted with no region; the hit may be in the page object itself, e.g. `/PieceInfo`) and to each annotation that reaches it (removed, with its popup and replies; the output's `/Annots` index is mapped back to the source's). A residual that changes nothing is a verification failure | §6.11 |
+| C65 | **Report details (P8).** `RedactionExtension.Where` gains **`"page-hygiene"`** (the third location of the §6.11 table; not in the approved shape — flagged). `RemovedAnnotations` lists the annotations removed from pages that are not otherwise redacted (a redacted page drops all) and every file attachment; a subtype outside ISO 32000-1 Table 169 is reported as `"Unknown"` (a name can carry text). The cloud's `auto_extended` is the number of extensions, removed annotations and removed information fields | §9 P8 |
+| C66 | **Refusals extension causes** have a detail starting `"automatic extension: "`; the regression harness classifies them as `<reason>/d4`, and allows `form_text/d4` and the four Phase 1 reasons with `/d4` | §12.4 |
+| C67 | **`/Info` and RedactText patterns.** Following §6.7, a field that matches a RedactText pattern is removed too; the regression's `RedactText(page, ".")` therefore removes every non-empty Title, Author and Subject (61 files) | §6.7 |
+| C68 | **Budgets.** Pre-pass and verification share one 2 GiB decoded cap per call (`budget_exceeded`, page −1); each page walk keeps the per-page budgets | §6.11, §7 |
+| C69 | **A document with no page** builds an empty page tree, which the lenient reader re-opens as one empty page: the page-count check skips that case (`malformed/cyclic_pages.pdf`) | — |
+| C70 | **F1 (batch C review).** The deny-set loop deleted from the undecided set by iterating all of it once per walked page (O(pages × \|D\|); 60,000 pages × 10 filler objects took 66 s). `closeInto` now returns the objects it added, and only those leave the undecided set. `TestDoS_RedactUndecidedPerPage` (30,000 pages): 68.4 s with the old loop, 6.5 s now | §6.4 |
+
+### Batch D measurements (1.14)
+
+**Leak corpus.** 330 rows (`FLUXDOCS_REQUIRE_GS=1`, gs 10.07.1): 326 pass;
+the 4 rows tagged 2.6 (`split_bt`, `split_same_bt_tj`, `split_same_bt_TJ`,
+`split_same_bt_per_char`) stay `knownLeak` and still reproduce. Closed: the
+1.12 row `actualtext_shared_form` (clean, C61) and the 1.13 rows
+`props_shared_unused`, `props_shared_used`, `d4_other_page` (text, area),
+`d4_text_annotation`, `d4_widget_value`, `d4_attachment`, `d4_info_title`
+(text, area). New rows: `d4_other_page_form` (refuse `form_text`, both ops),
+`d4_annotation_appearance` (popup and reply go too), `d4_skeleton_softhyphen`,
+`comment_holds_secret`.
+
+**Corpus no-regression** (772 files, first 3 pages): the only changed outcomes
+are three `form_text/d4` refusals — extension into a form on another page:
+`argon2-specs.pdf` (area-full) and `GS9_Color_Management.pdf` (area-full,
+area-half). Verification failures, internal errors, `nonempty_text`: 0.
+Automatic extension fired on 111 of 761 successful area-full and 101 of 762 area-half
+operations (212 operations, 4,291 pages extended in total; boilerplate such as
+license headers recurs on every page) and on 61 text/flatten operations
+(document information fields only, C67).
+
+**Inline images (C9).** In the generated set, Ghostscript `pdfwrite` writes
+small images inline, Flate-compressed **with a PNG predictor** (`/DP`): all 54
+inline images of the six synthetic files are refused by D15's predictor rule
+(`inline_image`, every operation on those files, at f325e25 too). The PDF 1.3
+`pdfwrite` rewrites of system files and the other producers wrote no inline
+image. Predictors are therefore the first candidate for the step 2.7
+widening.
+
+**Cost (verification + pre-pass, target ≤ 50% of RedactAndFlatten): not met.**
+`BenchmarkRedactVerify` (synthetic 40-line pages; "base" is RedactAndFlatten
+with pre-pass and verification off by test hooks; process CPU time per
+operation, which was stable while the machine's load average stayed between
+30 and 500):
+
+| Case | base | full | overhead |
+|---|---|---|---|
+| region on page 0 of 1 page | 0.76 ms | 1.07 ms | +41% |
+| region on page 0 of 20 pages, no extension | 0.93 ms | 5.83 ms | +527% |
+| RedactText on page 0 of 20 pages, no extension | 1.33 ms | 8.20 ms | +517% |
+| region on every page of 20 (all text removed) | 12.5 ms | 26.0 ms | +108% |
+| AutoRedactPII, 20 pages (4 with PII) | 2.7 ms | 14.3 ms | (wall 42 → 55 ms, +29%) |
+| region on page 0 of 100 pages, no extension | 2.6 ms | 31.7 ms | +1,100% |
+| region over the header every page shows, 100 pages | 3.7 ms | 126 ms | extension rewrites 99 pages |
+
+On the corpus (first 3 pages redacted): area-half CPU 4.9 s → 37.2 s
+(+654%), area-full 5.0 s → 42.9 s (+764%); this includes rewriting the 4,291
+pages extension reached, and the slowest file takes about 1 s. The fixed
+cost is one text-only read of every page that is not redacted (about 0.25 ms
+for a 40-line page; profile: the text model's readings 55%, content scanning
+25%) plus the byte-level search of what those pages reach; base
+RedactAndFlatten only copies such pages (about 0.025 ms each). D4 requires
+the search, so the overhead scales with the document while the base cost
+scales with the redacted pages. Done in batch D: text-only reading, fonts
+loaded once per call, shared work between pre-pass and verifier (C63), an
+allocation-free ASCII skeleton, an O(n²) loop over object numbers removed.
+**Reported to the maintainer per the exit criterion.** Remaining options:
+the per-document text-model cache (2.10), so the pre-pass reuses the models
+`RedactText`/`AutoRedactPII` built (AutoRedactPII already reads every page
+four times while marking); and skipping the search of a page whose content
+streams and fonts are byte-identical to one already searched.
+
+### Batch D review round (2026-10-17)
+
+go-reviewer (rvD probes, now leak-corpus rows `rvd_*`, 43 operation rows) and
+maintainer decisions: optimize before commit; `Where = "page-hygiene"`
+approved; the CI oracle job non-blocking until green and stable.
+
+| # | Correction | Applied in |
+|---|---|---|
+| C71 | **B1: nothing hidden stays on a rewritten page.** Comments are blanked anywhere in the kept content — before an operator, between its operands, in an inline image's dictionary (lexer-aware: strings, hex strings and names skipped; the end of line kept). Every property list (inline, or the page's named entry) loses every string value but a language tag (`/Lang`, BCP 47 shape), not only `/ActualText`, `/Alt`, `/E`. Check 1 also searches what the rewritten content holds but does not show — the strings of every operator but text-showing ones and inline images, and every comment — for every needle | §5.5, §5.6, §6.7 |
+| C72 | **B2: a search never reads "nothing" into what it cannot read.** The text scanner reads each content stream strictly first; a strict loss (read leniently after all) or content that does not decode marks the page *disputed*, and the pre-pass refuses a disputed page it must search (`content_ambiguous` or the loss's own reason, "automatic extension: …"): a lenient reading may hide text Ghostscript shows (`rvd_lenient_hidden_other_page`, `rvd_corrupt_flate_other_page`). An annotation appearance that is disputed counts as a hit (the annotation is removed). `parse.DecodeStream` now decodes ASCIIHex, ASCII85, LZW (EarlyChange, predictors) and RunLength, within the same budgets (cross-checked against `compress/lzw`); a stream the object search must read but cannot decode is a residual in R_u (page hygiene or annotation removal) and a `content_ambiguous` refusal when only redacted pages reach it — never "its dictionary's strings only". Hitting the per-stream decode cap is a budget refusal (S6). The leak oracle decodes the same filters and reads a Flate stream to where it fails (S7) | §5.6, §6.11 |
+| C73 | **A parser bug B2 exposed (Core, `parse`).** A stream whose `/Length` is an indirect reference was cut by the `endstream` scan, which takes a final CR or LF of the data for the end of line: one Flate stream in 256 written by Ghostscript (which always writes indirect lengths) lost its last byte and did not decode, so its page rendered and extracted nothing, and B2 refused to search it (3 man pages of the generated set). The parser now resolves an indirect integer length directly from its xref offset (no recursion into the resolver; object-stream lengths still use the scan) and uses it when `endstream` follows. **Corpus effect, the only render/extract/graph change of batch D:** `gs-dig.pdf` (page 5), `gs-git.pdf` (page 12), `gs-tar.pdf` (page 14) now extract text on those pages (text and table hashes change), and their SaveTo and Merge outputs carry the whole stream; every other hash and graph of the 772 files is identical to f325e25 | `core/parse` |
+| C74 | **B3: removed annotations paint nothing.** The deny set sees each page that is not redacted as the build writes it — without the annotations the plan removes (and references to removed annotation objects) — so an image removed under a region does not survive through the appearance of an annotation automatic extension removed (`rvd_removed_annot_ap_keeps_removed_image`) | §6.10 |
+| C75 | **S1: roles by route.** Whether an object is a font, binary data or content is decided by the route that reaches it (a resource dictionary's `/Font` and `/Shading`, an ExtGState's `/Font`, a font's parts, function keys, colour space slots, `/CharProcs` entries, `/AP` streams); keys an object carries (`/N`, `/Length1`, `/Registry`+`/Ordering`, `/FunctionType`) classify only objects nothing reaches. Image samples stay excluded by their own `/Subtype` or filter (§5.6). An unused form with `/N` or `/Length1`, a `/PieceInfo` with `/Registry`, and an unused Type 3 font's glyph procedures are now searched (`rvd_unused_*`, `rvd_pieceinfo_*`) | §5.6 |
+| C76 | **S2: what an extended page loses is reported.** A page automatic extension redacts keeps no annotation; each is listed in `RemovedAnnotations` with Reason `"page-hygiene"` or `"page-redacted"` (text the page shows), and `RedactionExtension.Where` documents what a redacted page loses | §9 P8 |
+| C77 | **Cost (maintainer: before commit).** (a) Per-byte reading tables for fonts read one byte per code (`fontmodel.ByteTables`; readings that cannot differ from Text are not built), checked equal to the slow path; the text-only search checks each reading as it is built and keeps no run. (b) Step 2.10 brought forward: a per-document cache of strict page models (`core/redact_cache.go`, keyed by page object, 128 MiB estimated, LRU), so marking reads a page once (AutoRedactPII read each page once per PII kind), and the pre-pass and rounds reuse it. `TestRedactVerifyCostGuard` fails past 15× (measured about 3×). Not reached: ≤ 1.5× for 20 and 100 pages; see the table below | §6.4, §7 |
+| C78 | **Nits.** CI job non-blocking with a Ghostscript ≥ 9.50 check (S3); `RedactionReport.Summary()` (reviewer request; capped page list; "automatic extension:" only when something but the attachments policy happened) replaces the CLI and MCP helpers, MCP field `auto_extended_summary` (cloud keeps the integer `auto_extended`); core's `golang.org/x/text` aligned with the workspace (v0.21.0); fixed verification messages; `cputime` helpers `unix`/`!unix` | — |
+
+**Measurements after the review round.** Leak corpus: 373 operation rows with
+`FLUXDOCS_REQUIRE_GS=1`; 369 pass, the 4 rows tagged 2.6 stay `knownLeak` and
+still reproduce. Corpus no-regression (772 files): outcomes as in batch D — 3
+`form_text/d4` refusals, 0 verification failures; extension on 212 area
+operations (4,294 pages) and 3,043 annotations now reported as dropped on
+extended pages. Cost, process CPU per operation (`BenchmarkRedactVerify`):
+
+| Case | base | full | full/base |
+|---|---|---|---|
+| region, 1 page | 0.46 ms | 0.54 ms | 1.17 |
+| region on page 0 of 20, no extension | 0.79 ms | 3.88 ms | 4.9 |
+| RedactText on page 0 of 20 | 0.68 ms | 3.29 ms | 4.8 |
+| region on every page of 20 | 8.90 ms | 9.16 ms | 1.03 |
+| AutoRedactPII, 20 pages | 1.54 ms | 6.02 ms | 3.9 (wall incl. marking 13.8 → 20.4 ms, 1.48) |
+| RedactText on every page of 100, match on page 0 (cache) | 4.18 ms | 7.73 ms | 1.85 (wall incl. marking 26.8 → 28.7 ms, 1.07) |
+| region on page 0 of 100, no extension | 2.28 ms | 17.3 ms | 7.6 |
+| region over a header on every page, 100 pages | 2.22 ms | 81.0 ms | extension rewrites 99 pages |
+
+Corpus (first 3 pages, CPU): area-half 3.4 s → 23.5 s (+587%), area-full
+3.3 s → 23.3 s (+610%), including the extension work. What remains: the
+pre-pass reads every page the caller did not mark (about 0.15 ms of a 40-line
+page, of which the strict scan's operator spans are half the allocation) —
+D4 requires that read, and no byte-level pre-filter can skip a page soundly
+(TJ splits, white-space removal, font remapping). Further options: a streaming
+strict scan in `parse` that does not materialize spans (a Core API addition),
+and reading pages in parallel (bounded by `runtime.NumCPU()`).
+
+### Batch D review round 2 (2026-10-17)
+
+go-reviewer round 2 (decoders checked against ISO 32000-1 and Ghostscript;
+the page-model cache, keyed by page object, safe under mutation; F1 correct)
+and maintainer decisions (cost accepted as measured; `"page-redacted"`
+approved). Rows `r2_*` (24 operation rows).
+
+| # | Correction | Applied in |
+|---|---|---|
+| C79 | **BL1: an indirect /Length costs a few tokens, once.** C73's resolver parsed the whole target object, uncached, for every stream: each page's `/Length 4 0 R` naming a 500,000-integer array (about 1 MB) took 35.8 s for 200 pages and 7 min 37 s for 2,000. It now reads only `N G obj <integer> endobj` at the object's offset, requires the reference's number and generation, rejects anything else at once (so a stream or an array target costs a few tokens, never a scan to EOF), and caches each result per object number, failures included, under the resolver's lock. `TestDoS_IndirectStreamLengthIsCheap` (500 pages, 1 MB target) | `core/parse` |
+| C80 | **BL2: hidden copies on pages that are not redacted.** The pre-pass now also reads what each page holds but does not show — every comment (between operators and operands, in inline-image dictionaries), the strings of every operator but the text-showing ones and inline images (property lists, marked-content tags) — and a hit is page hygiene, whose rewrite blanks comments and scrubs property lists (C71). Units record their hidden text while the page is read (strict model or text scanner, so a cached model has it); a hit there refuses with the unit's reason, since Phase 1 does not rewrite forms (`r2_other_form_comment` refuses `form_text`). The verifier's byte reading of content streams reads the same hidden content, so its skip of streams the pre-pass read is sound | §6.11, §5.6 |
+| C81 | **BL3: attributing a residual is one pass.** Every page and annotation used to get its own closure (up to 1 Mi objects each): 4,000 pages sharing 40,000 objects took 23.2 s. The graph of what the pages that are not redacted reach is now built once and walked backwards from the hits (one walk per needle source, as the deny set does), within 32 Mi visits; a graph or walk past its bound is `budget_exceeded`, never a verification failure. `TestDoS_RedactAttributionIsOnePass` (4,000 pages: 0.5 s) | §6.11 |
+| C82 | **S1: no property-list string survives a rewrite, `/Lang` included.** `(SECRET-1234)` has a valid BCP 47 shape, so the C71 allow-list kept it and verification failed as a bug. Rewritten pages drop every string of their property lists (the catalog's `/Lang` is not carried anyway) | §6.7 |
+| C83 | **S2: the model cache counts what it holds.** `Page.Size` counts every element of array and dictionary operands (a TJ-heavy page: 28.2 MB estimated, 27.9 MB live; it was about half), and `Close` drops a document's models | §6.4 |
+| C84 | **Cost decision.** The §11 cost exit criterion is rewritten to the measured scaling (see §11) | §11 |
 
 ---
 
@@ -1145,14 +1302,20 @@ P4/P5 for Phase 2, decide later).
       Page   int
       Rects  []Rect
       Source string // "text-match" | "area-text"
-      Where  string // "content" | "marked-content-property"
+      Where  string // "content" | "marked-content-property" | "page-hygiene"
   }
   type RemovedAnnotation struct {
       Page    int
-      Subtype string // e.g. "Text", "Widget", "FileAttachment"
-      Reason  string // "needle" | "attachment-policy"
+      Subtype string // e.g. "Text", "Widget", "FileAttachment"; "Unknown" outside Table 169
+      Reason  string // "needle" | "attachment-policy" | "page-hygiene" | "page-redacted"
   }
+  func (r RedactionReport) Summary() string // one line, no document text
   ```
+
+  As implemented (batch D, C65, C76, C78; `"page-hygiene"` and
+  `"page-redacted"` approved 2026-10-17): `"page-hygiene"` and
+  `"page-redacted"` list the annotations of a page that automatic extension
+  redacted (a redacted page keeps none) by page hygiene or by text it shows.
 
   Access options:
   - **(a), recommended:** `func (d *Document) RedactionReport()
@@ -1280,8 +1443,17 @@ Exit criteria for Phase 1:
 - Every D4 extension case either removes all occurrences and reports them (P8),
   or fails closed with the expected error.
 - The corpus no-regression check (§12.4) passes.
-- Verification plus pre-pass costs ≤ 50% of `RedactAndFlatten` on the benchmark
-  set, or the overrun is reported to the maintainer with numbers before merge.
+- Cost (rewritten 2026-10-17, maintainer decision: cost accepted as measured;
+  was "verification plus pre-pass ≤ 50% of `RedactAndFlatten`"). Automatic
+  extension must read every page the caller did not redact, so the cost
+  scales with the document: about 0.12–0.17 ms per unredacted 40-line page,
+  and a whole `RedactAndFlatten` (open, region on page 0, flatten) costs about
+  1.8× (20 pages) and 2.2× (100 pages) of opening the document and running a
+  whole-document `ExtractText` (process CPU, `core/redact_bench_test.go`
+  documents; measured at a load average of 3). `TestRedactVerifyCostGuard`
+  keeps the ratio to the redaction without pre-pass and verification within
+  15× (measured about 3×). A streaming strict scan and reading pages in
+  parallel are deferred to Phase 2.
 
 ### Phase 2: rewrite instead of refuse
 
@@ -1552,7 +1724,9 @@ input size).
 D1, D2, D3, D4, D5, D7, D11, D12, P8, P9 and the attachments policy were
 decided on 2026-10-15, and D14, D15 and D16 on 2026-10-16; see "Decisions
 (maintainer-approved)" at the top. They are not repeated here. **No open item
-below blocks Phase 1.**
+below blocks Phase 1.** Batch D measured the inline-image, cost and
+extension-frequency items below ("Batch D measurements"); the ≤ 50% cost
+target is not met and is reported there with numbers.
 
 **For the maintainer, not decided (from batch A, C10):**
 
