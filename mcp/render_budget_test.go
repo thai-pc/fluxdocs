@@ -45,16 +45,19 @@ func TestRenderPage_BudgetAndDeadline(t *testing.T) {
 		t.Errorf("over-budget render_page = %v (isErr=%v), want a budget tool error", item, isErr)
 	}
 
-	renderTimeout = 50 * time.Millisecond
-	// 2000 pt at 150 DPI: a default budget of ≈ 556 M pixel visits takes
-	// seconds to spend, so the deadline fires first.
+	// A deadline that has passed before the render starts: the render's first
+	// poll reports it, long before the default budget (≈ 556 M pixel visits
+	// for 2000 pt at 150 DPI) could trip, however fast or loaded the host is.
+	// A 50 ms deadline raced the budget under -race on a loaded host.
+	renderTimeout = time.Nanosecond
 	h = openHandle(t, s, writeFloodPDF(t, 2000, 100))
 	start := time.Now()
 	item, isErr = callTool(t, s, "render_page", map[string]any{"handle": h, "page": 0, "dpi": 150})
 	if !isErr || !strings.Contains(item["text"].(string), "deadline exceeded") {
 		t.Errorf("slow render_page = %v (isErr=%v), want a deadline tool error", item, isErr)
 	}
+	// A generous sanity bound only: the poll interval keeps the abort prompt.
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Errorf("render_page took %v, want shortly after the 50ms deadline", elapsed)
+		t.Errorf("render_page took %v after its deadline, want an abort at the first poll", elapsed)
 	}
 }

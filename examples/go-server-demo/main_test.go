@@ -155,18 +155,22 @@ func TestThumbnailBadPage(t *testing.T) {
 // (503), not a budget error.
 func TestThumbnailDeadline(t *testing.T) {
 	old := thumbnailTimeout
-	thumbnailTimeout = 50 * time.Millisecond
+	// A deadline that has passed before the render starts, so the outcome
+	// does not depend on host speed: the render's first poll reports it, long
+	// before the default budget of a 2000 pt page at 150 DPI (≈ 556 M pixel
+	// visits) could trip. A 50 ms deadline raced the budget under -race on a
+	// loaded host.
+	thumbnailTimeout = time.Nanosecond
 	t.Cleanup(func() { thumbnailTimeout = old })
 
-	// 2000 pt at 150 DPI: a 4167x4167 canvas whose default budget (≈ 556 M
-	// pixel visits) takes seconds to spend, far past 50 ms.
 	start := time.Now()
 	rr := post(t, NewServer(), "/thumbnail?page=0&dpi=150", floodPDF(2000, 2000, 100))
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 (%s)", rr.Code, rr.Body.String())
 	}
+	// A generous sanity bound only: the poll interval keeps the abort prompt.
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Errorf("request took %v, want shortly after the 50ms deadline", elapsed)
+		t.Errorf("request took %v after its deadline, want an abort at the first poll", elapsed)
 	}
 }
 
