@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -32,6 +33,17 @@ func main() {
 		os.Exit(1)
 	}
 	for _, r := range results {
+		var refused *core.RedactionError
+		if errors.As(r.Err, &refused) {
+			// Redaction fails closed on content it cannot remove safely; the
+			// reason code says why (no document text is in the error).
+			where := fmt.Sprintf("on page %d", refused.Page)
+			if refused.Page < 0 {
+				where = "for the document"
+			}
+			fmt.Printf("%s: REFUSED %s (%s)\n", r.Name, where, refused.Reason)
+			continue
+		}
 		if r.Err != nil {
 			fmt.Printf("%s: FAILED (%v)\n", r.Name, r.Err)
 			continue

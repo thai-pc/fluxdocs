@@ -39,6 +39,26 @@ var (
 	// deadline is NOT this error; it stays context.DeadlineExceeded.
 	ErrRenderBudgetExceeded = errors.New("fluxdocs: render budget exceeded")
 
+	// ErrRedactionUnsupported — RedactText, AutoRedactPII or RedactAndFlatten
+	// refused a page it cannot redact safely: content other readers could
+	// read differently (an ambiguous inline image, operands a viewer could
+	// pair differently, a token split across content streams), text shown
+	// through a route redaction does not rewrite yet (a form XObject, tiling
+	// pattern, soft-mask group or Type 3 glyph procedure), or a redaction
+	// budget exceeded. Redaction fails closed rather than miss text a viewer
+	// shows; rendering and text extraction stay lenient on the same content.
+	// The concrete error is a *RedactionError naming the page and the reason
+	// (errors.As). It is a property of the document: retrying does not help.
+	ErrRedactionUnsupported = errors.New("fluxdocs: content cannot be redacted safely")
+
+	// ErrRedactionVerification — the redacted output failed the mandatory
+	// self-check: it would still contain content the redaction removed. No
+	// document is returned. It signals a FluxDocs bug and matches ErrInternal
+	// too (errors.Is), so "report a bug" handling applies. Not returned yet:
+	// the verification lands with step 1.12 of
+	// docs/design/redaction-hardening.md.
+	ErrRedactionVerification error = &childError{msg: "fluxdocs: redaction verification failed", parent: ErrInternal}
+
 	// ErrInvalidPageOrder — a page-organization argument is malformed: a Reorder
 	// permutation of the wrong length or with a duplicate/missing index, or a
 	// Rotate angle that is not a multiple of 90 degrees. An out-of-range page
@@ -130,3 +150,77 @@ func (e *InternalError) Error() string {
 
 // Unwrap returns ErrInternal, so errors.Is(err, ErrInternal) matches.
 func (e *InternalError) Unwrap() error { return ErrInternal }
+
+// childError is a sentinel error that also matches a parent sentinel.
+type childError struct {
+	msg    string
+	parent error
+}
+
+func (e *childError) Error() string { return e.msg }
+
+// Unwrap returns the parent sentinel.
+func (e *childError) Unwrap() error { return e.parent }
+
+// RedactionReason is why redaction refused a page (*RedactionError).
+type RedactionReason string
+
+// The redaction refusal reasons.
+const (
+	// RedactionContentAmbiguous: the page content could be read differently
+	// by other readers — operands a viewer could pair with another operator,
+	// an operator out of place in a text object, a token or comment split
+	// across the page's content streams — so text could escape redaction.
+	RedactionContentAmbiguous RedactionReason = "content_ambiguous"
+	// RedactionInlineImage: an inline image whose extent or decoding some
+	// reader could disagree on (a reader that misreads it parses its data as
+	// content), or one inside a text object.
+	RedactionInlineImage RedactionReason = "inline_image"
+	// RedactionFormText: text shown through a form XObject.
+	RedactionFormText RedactionReason = "form_text"
+	// RedactionPatternText: text shown through a tiling pattern.
+	RedactionPatternText RedactionReason = "pattern_text"
+	// RedactionSoftMaskText: text shown through a soft-mask group.
+	RedactionSoftMaskText RedactionReason = "softmask_text"
+	// RedactionType3Text: text shown by a Type 3 glyph procedure.
+	RedactionType3Text RedactionReason = "type3_text"
+	// RedactionBudgetExceeded: the page exceeds a redaction budget
+	// (operators, decoded bytes, nesting, invocations, font candidates).
+	RedactionBudgetExceeded RedactionReason = "budget_exceeded"
+	// RedactionUnsupportedXObject: an XObject of a subtype redaction does not
+	// handle (e.g. PostScript).
+	RedactionUnsupportedXObject RedactionReason = "unsupported_xobject"
+)
+
+// RedactionError is returned (wrapped) by RedactText, AutoRedactPII and
+// RedactAndFlatten when a page cannot be redacted safely. It matches
+// ErrRedactionUnsupported with errors.Is, and also its cause Err when there
+// is one. It never matches ErrInvalidPDF: every viewer may open the file.
+//
+// Error() names the page, the reason and the detail, and never includes
+// document text.
+type RedactionError struct {
+	Page   int             // 0-based page index, or -1 when the refusal concerns the document as a whole
+	Reason RedactionReason // why the page was refused
+	Detail string          // where: the route, object number or content offset; never document text
+	Err    error           // the cause, or nil (e.g. the strict scanner's loss)
+}
+
+// Error returns "fluxdocs: content cannot be redacted safely: page N
+// (<reason>): <detail>", or "… safely: document (<reason>): <detail>" when
+// Page is -1.
+func (e *RedactionError) Error() string {
+	where := fmt.Sprintf("page %d", e.Page)
+	if e.Page < 0 {
+		where = "document"
+	}
+	return fmt.Sprintf("%s: %s (%s): %s", ErrRedactionUnsupported.Error(), where, e.Reason, e.Detail)
+}
+
+// Unwrap returns ErrRedactionUnsupported and the cause.
+func (e *RedactionError) Unwrap() []error {
+	if e.Err == nil {
+		return []error{ErrRedactionUnsupported}
+	}
+	return []error{ErrRedactionUnsupported, e.Err}
+}

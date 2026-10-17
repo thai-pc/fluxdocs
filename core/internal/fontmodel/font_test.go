@@ -158,11 +158,12 @@ func TestAdvance(t *testing.T) {
 }
 
 func TestInkAndUnbounded(t *testing.T) {
-	f := loadFont(t, map[int]string{2: "<< /Subtype /Type1 /FontDescriptor 3 0 R >>", 3: "<< /FontBBox [-200 -300 1500 1200] >>"})
+	// Embedded programs (/FontFile2): the /FontBBox and the em defaults.
+	f := loadFont(t, map[int]string{2: "<< /Subtype /Type1 /FirstChar 32 /Widths [500] /FontDescriptor 3 0 R >>", 3: "<< /FontBBox [-200 -300 1500 1200] /FontFile2 4 0 R >>"})
 	if x0, y0, x1, y1 := f.Ink(); x0 != -0.2 || y0 != -0.3 || x1 != 1.5 || y1 != 1.2 {
 		t.Errorf("Ink = %g %g %g %g, want the /FontBBox (wider than the em defaults)", x0, y0, x1, y1)
 	}
-	f = loadFont(t, map[int]string{2: "<< /Subtype /Type1 /FontDescriptor 3 0 R >>", 3: "<< /FontBBox [0 0 500 500] >>"})
+	f = loadFont(t, map[int]string{2: "<< /Subtype /Type1 /FirstChar 32 /Widths [500] /FontDescriptor 3 0 R >>", 3: "<< /FontBBox [0 0 500 500] /FontFile2 4 0 R >>"})
 	if x0, y0, x1, y1 := f.Ink(); x0 != 0 || y0 != -0.25 || x1 != 1.1 || y1 != 0.9 {
 		t.Errorf("Ink = %g %g %g %g, want at least the em defaults", x0, y0, x1, y1)
 	}
@@ -308,5 +309,50 @@ func TestLoadBoundsHostileArrays(t *testing.T) {
 	}
 	if !f.Unbounded() {
 		t.Error("a /W array read only up to the bound leaves the font bounded")
+	}
+}
+
+// TestInkOfSubstitutedFonts: a font without an embedded program is painted
+// with a reader's substitute, whatever its /BaseFont: its ink reaches
+// substitutedBBox (batch C reviews, SF-2 and round 5 S-2: Ghostscript's URW
+// clones and /Differences glyphs reach past the Adobe AFM boxes).
+func TestInkOfSubstitutedFonts(t *testing.T) {
+	for _, font := range []string{
+		"<< /Subtype /Type1 /BaseFont /Helvetica >>",
+		"<< /Subtype /Type1 /BaseFont /Times-Italic >>",
+		"<< /Subtype /Type1 /BaseFont /ABCDEF+Helvetica-Bold >>",
+		"<< /Subtype /TrueType /BaseFont /Arial >>",
+		"<< /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [3 0 R] >>",
+	} {
+		f := loadFont(t, map[int]string{2: font, 3: "<< /Subtype /CIDFontType2 /BaseFont /X >>"})
+		x0, y0, x1, y1 := f.Ink()
+		if math.Abs(x0+0.3) > 1e-9 || math.Abs(y0+0.45) > 1e-9 || math.Abs(x1-1.45) > 1e-9 || math.Abs(y1-1.25) > 1e-9 {
+			t.Errorf("%s: Ink = %g %g %g %g, want -0.3 -0.45 1.45 1.25", font, x0, y0, x1, y1)
+		}
+	}
+}
+
+// TestVerticalMetrics: /DW2 and /W2 (both forms) as hulls in text space; an
+// unreadable entry is not ok.
+func TestVerticalMetrics(t *testing.T) {
+	type0 := "<< /Subtype /Type0 /Encoding /Identity-V /DescendantFonts [3 0 R] >>"
+	for _, tc := range []struct {
+		cid        string
+		vx, vy, wy [2]float64
+		ok         bool
+	}{
+		{"<< /Subtype /CIDFontType2 >>", [2]float64{0.5, 0.5}, [2]float64{0.88, 0.88}, [2]float64{-1, -1}, true},
+		{"<< /Subtype /CIDFontType2 /DW 600 /DW2 [900 -1100] >>", [2]float64{0.3, 0.3}, [2]float64{0.9, 0.9}, [2]float64{-1.1, -1.1}, true},
+		{"<< /Subtype /CIDFontType2 /W2 [5 [-1000 500 2000 -900 400 880] 10 20 -4000 300 100] >>",
+			[2]float64{0.3, 0.5}, [2]float64{0.1, 2}, [2]float64{-4, -0.9}, true},
+		{"<< /Subtype /CIDFontType2 /W2 [5 [-1000 500]] >>", [2]float64{}, [2]float64{}, [2]float64{}, false},
+		{"<< /Subtype /CIDFontType2 /W2 [5 6 -1000 500] >>", [2]float64{}, [2]float64{}, [2]float64{}, false},
+		{"<< /Subtype /CIDFontType2 /DW2 [880] >>", [2]float64{}, [2]float64{}, [2]float64{}, false},
+	} {
+		f := loadFont(t, map[int]string{2: type0, 3: tc.cid})
+		vx, vy, wy, ok := f.VerticalMetrics()
+		if ok != tc.ok || (ok && (vx != tc.vx || vy != tc.vy || wy != tc.wy)) {
+			t.Errorf("%s: VerticalMetrics = %v %v %v %v, want %v %v %v %v", tc.cid, vx, vy, wy, ok, tc.vx, tc.vy, tc.wy, tc.ok)
+		}
 	}
 }

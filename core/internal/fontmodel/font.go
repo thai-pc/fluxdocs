@@ -2,7 +2,7 @@
 // the bytes of a shown string split into character codes, what Unicode text
 // they stand for, and — for layout — how far each code advances the pen and
 // how far its glyph may reach. Text extraction (core/extract) and redaction
-// (core/docops/redact) both read fonts through it, so RedactText matches the
+// (core/internal/redact) both read fonts through it, so RedactText matches the
 // text ExtractText returns (docs/design/redaction-hardening.md §5.3, D12).
 //
 // Version 1 (redaction-hardening step 1.3): code segmentation per font type
@@ -90,6 +90,18 @@ type Font struct {
 	wPartial  bool // Type 0: the /W array could not be read to its end
 	hasWidths bool // simple fonts: a /Widths array is present
 	embedded  bool // simple fonts: /FontDescriptor holds a font program
+
+	// Vertical metrics of a Type 0 font (§9.7.4.3), glyph units: the hulls
+	// over every CID of the position vector (vx, vy) and the vertical
+	// displacement w1y, from /DW2, /W2 and vx = w0/2 by default. vertOK is
+	// false when /DW2 or /W2 cannot be read.
+	vx, vy, wy [2]float64
+	vertOK     bool
+
+	// substituted is set for a font with no embedded program (not Type 3):
+	// a reader paints it with a font of its own, whose glyphs may reach
+	// past the em defaults.
+	substituted bool
 }
 
 // cidRange is one "cfirst clast w" entry of a CIDFont /W array.
@@ -462,11 +474,20 @@ func (f *Font) GlyphToText(w float64) float64 {
 // Ink returns bounds on where any glyph of the font may paint, relative to its
 // origin, in text space at font size 1: the union of /FontBBox (times
 // /FontMatrix for Type 3) and, except for Type 3, the em defaults
-// [0, 1.1] × [-0.25, 0.9]. For a Type 3 font with no usable box it returns
+// [0, 1.1] × [-0.25, 0.9]. A font without an embedded program is painted
+// with a reader's substitute, so its box also covers substitutedBBox,
+// whatever the /BaseFont. For a Type 3 font with no usable box it returns
 // the em defaults; check Unbounded first.
 func (f *Font) Ink() (x0, y0, x1, y1 float64) {
 	x0, y0, x1, y1 = 0, descenderEm, emDefault, ascenderEm
-	if f == nil || !f.metrics || !f.bboxOK || !f.scaleOK {
+	if f == nil || !f.metrics {
+		return x0, y0, x1, y1
+	}
+	if f.substituted && f.kind != Type3 {
+		b := substitutedBBox
+		x0, y0, x1, y1 = min(x0, b[0]/1000), min(y0, b[1]/1000), max(x1, b[2]/1000), max(y1, b[3]/1000)
+	}
+	if !f.bboxOK || !f.scaleOK {
 		return x0, y0, x1, y1
 	}
 	bx0, by0, bx1, by1 := f.mapBox(f.bbox)
@@ -475,6 +496,17 @@ func (f *Font) Ink() (x0, y0, x1, y1 float64) {
 	}
 	return min(x0, bx0), min(y0, by0), max(x1, bx1), max(y1, by1)
 }
+
+// substitutedBBox bounds the glyphs a reader may draw for a font without an
+// embedded program, whatever its /BaseFont (standard 14 names included), in
+// glyph units. Readers substitute their own faces, not Adobe's: Ghostscript's
+// URW clones reach past the Adobe AFM boxes (WinAnsi Helvetica Å/Ê/Ò/Š/Ž/Î up
+// to 0.953 em against the AFM's 0.931; Times Å 0.915 against 0.898), and
+// /Differences can name glyphs outside the Adobe standard set
+// (Aringacute 1.17 em high, Scommaaccent -0.372 em deep, Bookman-LightItalic
+// AE 1.269 em wide). Measured Ghostscript substitutes span about
+// [-231 -393 1346 1170]; this box has margin around that.
+var substitutedBBox = [4]float64{-300, -450, 1450, 1250}
 
 // mapBox maps a glyph-space box through scale and returns its axis-aligned
 // bounds.
@@ -522,7 +554,10 @@ func (f *Font) loadMetrics(r *parse.Resolver, decode func(*parse.Stream) ([]byte
 			f.cidLo, f.cidHi = v, v
 		}
 		f.loadCIDWidths(r, cid["W"])
-		f.loadBBox(r, fontDescriptor(r, cid)["FontBBox"])
+		f.loadVerticalMetrics(r, cid)
+		cdesc := fontDescriptor(r, cid)
+		f.loadBBox(r, cdesc["FontBBox"])
+		f.substituted = !hasFontFile(cdesc)
 
 	case Type3:
 		f.scaleOK = false
@@ -545,17 +580,24 @@ func (f *Font) loadMetrics(r *parse.Resolver, decode func(*parse.Stream) ([]byte
 	default:
 		f.loadSimpleWidths(r)
 		fdesc := fontDescriptor(r, f.dict)
-		for _, k := range []parse.Name{"FontFile", "FontFile2", "FontFile3"} {
-			if _, ok := fdesc[k]; ok {
-				f.embedded = true
-			}
-		}
+		f.embedded = hasFontFile(fdesc)
+		f.substituted = !f.embedded
 		if v, ok := resolveNumber(r, fdesc["MissingWidth"]); ok {
 			f.missingWidth = v
 		}
 		f.loadBBox(r, fdesc["FontBBox"])
 		f.loadDifferences(r)
 	}
+}
+
+// hasFontFile reports whether a font descriptor holds a font program.
+func hasFontFile(fdesc parse.Dict) bool {
+	for _, k := range []parse.Name{"FontFile", "FontFile2", "FontFile3"} {
+		if _, ok := fdesc[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // loadEncodingCMap reads a Type 0 font's /Encoding (§9.7.5): a predefined
@@ -699,6 +741,106 @@ func (f *Font) loadCIDWidths(r *parse.Resolver, obj parse.Object) {
 		i += 3
 	}
 	f.wPartial = false
+}
+
+// loadVerticalMetrics reads a CIDFont's /DW2 and /W2 (§9.7.4.3) into the
+// hulls vx, vy and wy, within the same item bound as /W. The default /DW2 is
+// [880 -1000]; a CID without a /W2 entry has vx = w0/2, w0 any of /DW and
+// the /W widths (the hull cidLo…cidHi). Call after loadCIDWidths.
+func (f *Font) loadVerticalMetrics(r *parse.Resolver, cid parse.Dict) {
+	f.vertOK = false
+	vy, wy := 880.0, -1000.0
+	if raw, has := cid["DW2"]; has {
+		arr, ok := resolveArray(r, raw)
+		if !ok || len(arr) != 2 {
+			return
+		}
+		a, ok1 := resolveNumber(r, arr[0])
+		b, ok2 := resolveNumber(r, arr[1])
+		if !ok1 || !ok2 {
+			return
+		}
+		vy, wy = a, b
+	}
+	f.vx = [2]float64{f.cidLo / 2, f.cidHi / 2}
+	f.vy = [2]float64{vy, vy}
+	f.wy = [2]float64{wy, wy}
+	add := func(w1y, vx, vy float64) {
+		f.wy = [2]float64{min(f.wy[0], w1y), max(f.wy[1], w1y)}
+		f.vx = [2]float64{min(f.vx[0], vx), max(f.vx[1], vx)}
+		f.vy = [2]float64{min(f.vy[0], vy), max(f.vy[1], vy)}
+	}
+	raw, has := cid["W2"]
+	if !has {
+		f.vertOK = true
+		return
+	}
+	w2, ok := resolveArray(r, raw)
+	if !ok {
+		return
+	}
+	items := 0
+	nums := func(objs []parse.Object) ([]float64, bool) {
+		out := make([]float64, len(objs))
+		for i, e := range objs {
+			v, ok := resolveNumber(r, e)
+			if !ok {
+				return nil, false
+			}
+			out[i] = v
+		}
+		return out, true
+	}
+	for i := 0; i < len(w2); {
+		if i+1 >= len(w2) || items >= maxWItems {
+			return
+		}
+		next, err := r.Resolve(w2[i+1])
+		if err != nil {
+			return
+		}
+		if arr, isArr := next.(parse.Array); isArr {
+			// c [w1y vx vy w1y vx vy …]
+			if len(arr)%3 != 0 || items+len(arr) > maxWItems {
+				return
+			}
+			v, ok := nums(arr)
+			if !ok {
+				return
+			}
+			for j := 0; j < len(v); j += 3 {
+				add(v[j], v[j+1], v[j+2])
+			}
+			items += len(arr)
+			i += 2
+			continue
+		}
+		// cfirst clast w1y vx vy
+		if i+4 >= len(w2) {
+			return
+		}
+		v, ok := nums(w2[i+2 : i+5])
+		if !ok {
+			return
+		}
+		add(v[0], v[1], v[2])
+		items++
+		i += 5
+	}
+	f.vertOK = true
+}
+
+// VerticalMetrics returns, for a Type 0 font, the hulls over every code of
+// the position vector components vx and vy and of the vertical displacement
+// w1y (§9.7.4.3), in text space at font size 1, and ok false when /DW2 or
+// /W2 cannot be read (or the font is not Type 0). Needs Options.Metrics.
+func (f *Font) VerticalMetrics() (vx, vy, wy [2]float64, ok bool) {
+	if f == nil || !f.metrics || f.kind != Composite || !f.vertOK {
+		return vx, vy, wy, false
+	}
+	s := f.scale[0]
+	return [2]float64{f.vx[0] * s, f.vx[1] * s}, [2]float64{f.vy[0] * s, f.vy[1] * s},
+		[2]float64{f.wy[0] * s, f.wy[1] * s}, true
 }
 
 // loadBBox reads a /FontBBox. An all-zero box means "no assumptions" (§9.8.1)

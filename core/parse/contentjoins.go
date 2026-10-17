@@ -1,9 +1,6 @@
 package parse
 
-import (
-	"bytes"
-	"fmt"
-)
+import "bytes"
 
 // checkJoins reports the first join of ContentSegments that a reader could
 // read differently from PageContent's newline. Readers disagree on a page with
@@ -23,12 +20,10 @@ import (
 func checkJoins(data []byte, joins []int, images map[int]int) error {
 	for i, j := range joins {
 		if j < 0 || j >= len(data) || (i > 0 && j <= joins[i-1]) {
-			return fmt.Errorf("%w: content stream: invalid join at offset %d", errLex, j)
+			return newContentLoss("invalid join", j)
 		}
 	}
-	lossAt := func(off int, what string) error {
-		return fmt.Errorf("%w: content stream: %s at offset %d", errLex, what, off)
-	}
+	lossAt := func(off int, what string) error { return newContentLoss(what, off) }
 	ji, pos := 0, 0
 	for ji < len(joins) {
 		tokStart := skipBlank(data, pos)

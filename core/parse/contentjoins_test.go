@@ -69,7 +69,7 @@ func TestScanContentStrict_Joins(t *testing.T) {
 				t.Fatalf("ScanContentStrict err = %v, want ok=%v", err, tc.ok)
 			}
 			if err == nil {
-				if want := ScanContentSpans(c.Data); !reflect.DeepEqual(spans, want) {
+				if want := ScanContentSpans(c.Data); !reflect.DeepEqual(withoutInlineImages(spans), want) {
 					t.Errorf("strict spans = %v, want the lenient spans %v", spans, want)
 				}
 			}

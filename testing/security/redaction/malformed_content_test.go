@@ -229,6 +229,11 @@ func TestRedact_FormXObjectTextFailsClosed(t *testing.T) {
 			if err == nil || out != nil {
 				t.Fatalf("RedactAndFlatten after RedactArea = (%v, %v), want (nil, error)", out, err)
 			}
+			if !errors.Is(err, core.ErrRedactionUnsupported) || errors.Is(err, core.ErrInvalidPDF) {
+				t.Errorf("err = %v, want ErrRedactionUnsupported and not ErrInvalidPDF (D2)", err)
+			}
+			// The deprecated core/docops/redact.ErrFormXObjectText stays
+			// reachable for one release (decision P1).
 			if strings.Contains(tc.name, "text") && !errors.Is(err, redact.ErrFormXObjectText) {
 				t.Errorf("err = %v, want redact.ErrFormXObjectText", err)
 			}

@@ -32,7 +32,7 @@ Core technical differentiators — **always keep these true when coding**:
 | Tier | License | Features | Code location |
 |---|---|---|---|
 | **Core** | MIT, free | render, basic annotation, text extraction, merge/split, WASM | `core/` (except `ocr/`, `sign/`) |
-| **Pro** | One-time | form fill, e-signature, redaction, OCR, compare, watermark, PDF/A | `core/form`, `core/sign`, `core/docops/redact`, `core/ocr` |
+| **Pro** | One-time | form fill, e-signature, redaction, OCR, compare, watermark, PDF/A | `core/form`, `core/sign`, `core/internal/redact`, `core/ocr` |
 | **Cloud** | Subscription | AI Q&A, structured extraction, auto-redact PII, collaboration, hosted API | `cloud/` |
 
 **License-tier separation rule:** pure-MIT code must not `import` a

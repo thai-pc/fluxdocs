@@ -51,6 +51,14 @@ var fixedOperands = map[string]int{
 // section or not — fits only with no operands, since what a viewer does with
 // operands it pairs to an unknown operator is undefined.
 func operandsFit(op string, operands []Object) bool {
+	return OperandsFit(op, operands)
+}
+
+// OperandsFit reports whether operands are exactly what op takes, by the
+// rules ScanContentStrict applies (see operandsFit). A caller interpreting
+// spans from the lenient scanner uses it to skip operators a strict scan
+// would have refused.
+func OperandsFit(op string, operands []Object) bool {
 	n := len(operands)
 	switch op {
 	case "Tj", "'":

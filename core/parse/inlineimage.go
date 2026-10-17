@@ -78,22 +78,23 @@ type inlineImage struct {
 // strict mode (see the file comment). Each plausible data start — after the
 // one white-space byte, and after CR LF — must give the same EI.
 //
-// Returns the offset just past EI and an empty string; or, when some reader
-// could delimit or reject the image differently, the offset to report and a
-// description of the loss. inflated is the scan's running Flate allowance.
-func strictInlineImage(data []byte, i int, opts *StrictOptions, inflated *int64) (int, string) {
+// Returns the image dictionary (keyed by full names), the offset just past EI
+// and an empty string; or, when some reader could delimit or reject the image
+// differently, the offset to report and a description of the loss. inflated
+// is the scan's running Flate allowance.
+func strictInlineImage(data []byte, i int, opts *StrictOptions, inflated *int64) (Dict, int, string) {
 	dict, idEnd, what := inlineImageDict(data, i)
 	if what != "" {
-		return idEnd, what
+		return nil, idEnd, what
 	}
 	img, what := checkInlineDict(dict, opts)
 	if what != "" {
-		return idEnd, what
+		return nil, idEnd, what
 	}
 	// §8.9.7: exactly one white-space byte separates ID from the data. With
 	// CR LF, a reader may take the LF as that byte or as the first data byte.
 	if idEnd >= len(data) || !isWhitespace(data[idEnd]) {
-		return idEnd, "inline image data does not start with white-space"
+		return nil, idEnd, "inline image data does not start with white-space"
 	}
 	starts := []int{idEnd + 1}
 	if data[idEnd] == '\r' && idEnd+1 < len(data) && data[idEnd+1] == '\n' {
@@ -104,26 +105,26 @@ func strictInlineImage(data []byte, i int, opts *StrictOptions, inflated *int64)
 	for _, start := range starts {
 		end, what := inlineDataEnd(data, start, img, inflated)
 		if what != "" {
-			return start, what
+			return nil, start, what
 		}
 		if l, ok := dict["Length"]; ok {
 			if n, isInt := l.(Integer); !isInt || int64(n) != int64(end-start) {
-				return start, "inline image length entry disagrees with its data"
+				return nil, start, "inline image length entry disagrees with its data"
 			}
 		}
 		if textShowCandidate(data[start:end]) {
-			return start, "inline image data could show text if parsed as content"
+			return nil, start, "inline image data could show text if parsed as content"
 		}
 		next, what := inlineTerminator(data, start, end)
 		if what != "" {
-			return end, what
+			return nil, end, what
 		}
 		if eiEnd >= 0 && next != eiEnd {
-			return start, "inline image data has two plausible ends"
+			return nil, start, "inline image data has two plausible ends"
 		}
 		eiEnd = next
 	}
-	return eiEnd, ""
+	return dict, eiEnd, ""
 }
 
 // inlineImageDict parses the inline-image dictionary that starts at i (just
@@ -448,7 +449,9 @@ func inlineFilterChain(v Object) ([]string, string) {
 		}
 		abbr, ok := inlineFilters[name]
 		if !ok {
-			return nil, "inline image filter /" + string(name) + " is not supported"
+			// The name is not quoted: loss descriptions never hold document
+			// bytes (they reach redaction errors).
+			return nil, "inline image filter is not supported"
 		}
 		chain = append(chain, abbr)
 	}

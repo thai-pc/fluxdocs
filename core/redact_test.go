@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/thai-pc/fluxdocs/core/internal/redact"
+	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
 // redactFixture is a one-page 400x800 PDF with content and page resources
@@ -155,7 +158,8 @@ func TestAutoRedactPII_ActualText(t *testing.T) {
 }
 
 // TestRedactText_RefusalReasons: routes the page cannot rewrite are refused
-// with a *redact.RefusalError, not ErrInvalidPDF, and the plan stays failed.
+// with a *RedactionError matching ErrRedactionUnsupported, not ErrInvalidPDF
+// (D2), and the plan stays failed.
 func TestRedactText_RefusalReasons(t *testing.T) {
 	doc, err := OpenBytes(redactFixture("/P1 scn 0 0 10 10 re f BT /F1 12 Tf 100 700 Td (SECRET-1) Tj ET",
 		"<< /Font << /F1 5 0 R >> /Pattern << /P1 6 0 R >> >>",
@@ -171,8 +175,64 @@ func TestRedactText_RefusalReasons(t *testing.T) {
 	if strings.Contains(err.Error(), "SECRET") {
 		t.Errorf("refusal holds document text: %v", err)
 	}
-	if out, err := doc.RedactAndFlatten(); out != nil || err == nil {
+	var re *RedactionError
+	if !errors.As(err, &re) || re.Reason != RedactionPatternText || re.Page != 0 || !errors.Is(err, ErrRedactionUnsupported) {
+		t.Errorf("RedactText = %#v, want a *RedactionError pattern_text on page 0", err)
+	}
+	out, err := doc.RedactAndFlatten()
+	if out != nil || err == nil {
 		t.Error("RedactAndFlatten ran after a refused RedactText")
+	}
+	// The sticky plan error keeps the refusal reachable.
+	if !errors.As(err, &re) || re.Reason != RedactionPatternText || !errors.Is(err, ErrRedactionUnsupported) {
+		t.Errorf("RedactAndFlatten = %v, want the pattern_text refusal wrapped", err)
+	}
+}
+
+// TestRedactionErrors pins the error surface of P1 and P3: each refusal
+// reason, the error chain, and text that never quotes the document.
+func TestRedactionErrors(t *testing.T) {
+	if !errors.Is(ErrRedactionVerification, ErrInternal) || errors.Is(ErrInternal, ErrRedactionVerification) {
+		t.Error("ErrRedactionVerification must match ErrInternal (P3), not the reverse")
+	}
+	for _, tc := range []struct {
+		name, content, res string
+		extra              map[int]string
+		reason             RedactionReason
+	}{
+		{"operand type", "BT /F1 12 Tf 20 Tc (x) Tc 100 700 Td (SECRET-1) Tj ET", "", nil, RedactionContentAmbiguous},
+		{"keyword in a TJ array", "BT /F1 12 Tf 100 700 Td [ (A) SECRET-1 ] TJ ET", "", nil, RedactionContentAmbiguous},
+		{"inline image", "BI /W 1 /H 1 /BPC 8 /CS /G ID AEI BT /F1 12 Tf 100 700 Td (SECRET-1) Tj ET", "", nil, RedactionInlineImage},
+		{"form text", "/Fm1 Do", "<< /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >>",
+			map[int]string{6: "<< /Type /XObject /Subtype /Form /BBox [0 0 9 9] /Resources << /Font << /F1 5 0 R >> >> /Length 28 >>\nstream\nBT /F1 9 Tf (SECRET-1) Tj ET\nendstream"},
+			RedactionFormText},
+		{"PostScript XObject", "/Ps Do", "<< /XObject << /Ps 6 0 R >> >>",
+			map[int]string{6: "<< /Type /XObject /Subtype /PS /Length 0 >>\nstream\n\nendstream"}, RedactionUnsupportedXObject},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := OpenBytes(redactFixture(tc.content, tc.res, tc.extra))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := doc.RedactArea(0, Rect{X: 0, Y: 0, Width: 612, Height: 792}); err != nil {
+				t.Fatal(err)
+			}
+			out, err := doc.RedactAndFlatten()
+			var re *RedactionError
+			if out != nil || !errors.As(err, &re) || re.Reason != tc.reason || re.Page != 0 {
+				t.Fatalf("RedactAndFlatten = (%v, %v), want a %s refusal on page 0", out != nil, err, tc.reason)
+			}
+			if !errors.Is(err, ErrRedactionUnsupported) || errors.Is(err, ErrInvalidPDF) {
+				t.Errorf("%v: want ErrRedactionUnsupported and not ErrInvalidPDF (D2)", err)
+			}
+			if form := tc.reason == RedactionFormText || tc.reason == RedactionUnsupportedXObject; form != errors.Is(err, redact.ErrFormXObjectText) {
+				t.Errorf("%v: matches ErrFormXObjectText = %v, want %v", err, !form, form)
+			}
+			if msg := err.Error(); strings.Contains(msg, "SECRET") || strings.Contains(msg, "lexer error") ||
+				!strings.HasPrefix(msg, "fluxdocs: content cannot be redacted safely: page 0 ("+string(tc.reason)+"): ") {
+				t.Errorf("message %q: want the page and reason, and no document text", msg)
+			}
+		})
 	}
 }
 
@@ -196,5 +256,101 @@ func TestRedactAndFlatten_ForeignMarkIsInternal(t *testing.T) {
 	out, err := b.RedactAndFlatten()
 	if out != nil || !errors.Is(err, ErrInternal) || !strings.Contains(err.Error(), "page 0") {
 		t.Fatalf("RedactAndFlatten = (%v, %v), want ErrInternal naming page 0", out != nil, err)
+	}
+}
+
+// TestRedactAndFlatten_AfterRotate: a plan made before Rotate (which clones
+// the page dictionary) still applies to the page (batch C review S3).
+func TestRedactAndFlatten_AfterRotate(t *testing.T) {
+	doc, err := OpenBytes(redactFixture("BT /F1 12 Tf 100 700 Td (SECRET-1) Tj ET", "", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.RedactText(0, `SECRET-\d`); err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.Rotate(0, 90); err != nil {
+		t.Fatal(err)
+	}
+	out, err := doc.RedactAndFlatten()
+	if err != nil {
+		t.Fatalf("RedactAndFlatten after Rotate: %v", err)
+	}
+	if out.Pages[0].Rotation != 90 {
+		t.Errorf("rotation %d, want 90", out.Pages[0].Rotation)
+	}
+	if raw, _ := out.Bytes(); bytes.Contains(raw, []byte("SECRET-1")) {
+		t.Error("secret survives")
+	}
+}
+
+// TestRedactAndFlatten_SharedObjectsPaintedElsewhere: an image removed under
+// a region on page 0 stays for page 1 when page 1 paints it, and is denied
+// when page 1 only lists it in a shared resource dictionary (B3, C36).
+func TestRedactAndFlatten_SharedObjectsPaintedElsewhere(t *testing.T) {
+	two := func(content1 string) []byte {
+		objs := map[int]string{
+			1: "<< /Type /Catalog /Pages 2 0 R >>",
+			2: "<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+			3: "<< /Type /Page /Parent 2 0 R /Resources 7 0 R /Contents 4 0 R >>",
+			4: "<< /Length 30 >>\nstream\nq 400 0 0 800 0 0 cm /Im1 Do Q\nendstream",
+			5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+			6: "<< /Type /XObject /Subtype /Image /Width 9 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 9 >>\nstream\nIMGMARKER\nendstream",
+			7: "<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >>",
+			8: "<< /Type /Page /Parent 2 0 R /Resources 7 0 R /Contents 9 0 R >>",
+			9: fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content1), content1),
+		}
+		return buildCorePDF(objs, "<< /Size 10 /Root 1 0 R >>")
+	}
+	for _, tc := range []struct {
+		name, content1 string
+		kept           bool
+	}{
+		{"page 1 paints the image", "q 10 0 0 10 0 0 cm /Im1 Do Q", true},
+		{"page 1 does not", "BT /F1 12 Tf 72 700 Td (public) Tj ET", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := OpenBytes(two(tc.content1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := doc.RedactArea(0, Rect{X: 0, Y: 0, Width: 400, Height: 800}); err != nil {
+				t.Fatal(err)
+			}
+			out, err := doc.RedactAndFlatten()
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := out.Bytes()
+			if got := bytes.Contains(raw, []byte("IMGMARKER")); got != tc.kept {
+				t.Errorf("image written = %v, want %v", got, tc.kept)
+			}
+			if !tc.kept {
+				return
+			}
+			// Page 1 still finds the image under /Im1.
+			xo, ok, _ := out.resolver.ResolveDict(out.pageInfos[1].Resources["XObject"])
+			if !ok {
+				t.Fatal("page 1 lost its /XObject")
+			}
+			if im, _ := out.resolver.Resolve(xo["Im1"]); im == nil {
+				t.Error("page 1's /Im1 no longer resolves")
+			} else if _, isStream := im.(*parse.Stream); !isStream {
+				t.Errorf("page 1's /Im1 = %v, want the image", im)
+			}
+		})
+	}
+}
+
+// TestRedactionErrorDocumentLevel: a refusal for the document as a whole
+// (Page -1) says so instead of naming a page.
+func TestRedactionErrorDocumentLevel(t *testing.T) {
+	err := &RedactionError{Page: -1, Reason: RedactionBudgetExceeded, Detail: "the objects shared with removed content exceed 1048576"}
+	want := "fluxdocs: content cannot be redacted safely: document (budget_exceeded): the objects shared with removed content exceed 1048576"
+	if err.Error() != want {
+		t.Errorf("Error() = %q, want %q", err.Error(), want)
+	}
+	if !errors.Is(err, ErrRedactionUnsupported) {
+		t.Error("a document-level refusal must match ErrRedactionUnsupported")
 	}
 }

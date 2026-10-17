@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thai-pc/fluxdocs/core/docops/redact"
+	"github.com/thai-pc/fluxdocs/core/internal/redact"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 

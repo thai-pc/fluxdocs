@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // This file exposes a content-stream scanner. A PDF content stream (ISO 32000-1
@@ -55,7 +56,19 @@ func ScanContent(data []byte) []ContentOp {
 // ScanContentSpans is ScanContent with each operator's byte range recorded (see
 // ContentOpSpan).
 func ScanContentSpans(data []byte) []ContentOpSpan {
-	ops, _ := scanContent(data, nil)
+	ops, _ := scanContent(data, nil, false)
+	return ops
+}
+
+// ScanContentSpansWithInlineImages is ScanContentSpans that also reports each
+// inline image it skips as a span with Op "BI", from the BI operator through
+// the end the lenient scan finds, whose only operand is the image dictionary
+// keyed by full names (ISO 32000-1 Table 93) — or no operand when the
+// dictionary does not parse. Everything else is ScanContentSpans' output. A
+// caller that must know which resources a page's inline images name (a
+// colour space) uses it.
+func ScanContentSpansWithInlineImages(data []byte) []ContentOpSpan {
+	ops, _ := scanContent(data, nil, true)
 	return ops
 }
 
@@ -68,6 +81,13 @@ func ScanContentSpansStrict(data []byte) ([]ContentOpSpan, error) {
 
 // StrictOptions configures ScanContentStrict.
 type StrictOptions struct {
+	// MaxOps, when positive, bounds the operators (inline images included) a
+	// strict scan returns: past it the scan stops with an error wrapping
+	// ErrOpLimit, before it materializes more spans. Redaction passes what is
+	// left of its operator budget, so a hostile page costs memory in
+	// proportion to that budget rather than to its content.
+	MaxOps int
+
 	// InlineColorSpace resolves a named inline-image colour space — a name
 	// other than the device colour spaces and their abbreviations — through
 	// the resources of the stream being scanned (ISO 32000-1 §8.9.7). It
@@ -78,6 +98,44 @@ type StrictOptions struct {
 	// only for inline images; when it is nil or reports false, an inline image
 	// with a named colour space is a loss.
 	InlineColorSpace func(name Name) (Object, bool)
+}
+
+// ErrInlineImageLoss is matched (errors.Is) by a ScanContentStrict error about
+// an inline image: one some reader could delimit or reject differently, or one
+// inside a text object. An inline image split across two content streams is
+// a join loss like any other token split, and does not match it.
+var ErrInlineImageLoss = errors.New("parse: inline image cannot be delimited safely")
+
+// ErrOpLimit is matched (errors.Is) by a ScanContentStrict error when the
+// content has more operators than StrictOptions.MaxOps.
+var ErrOpLimit = errors.New("parse: content operator limit exceeded")
+
+// contentLoss is a strict-scan loss: where the scan and a reader could
+// disagree. Its message names the problem and the offset and never holds
+// document bytes (a lexer error can quote them, so it is not included):
+// redaction errors carry it, and callers print and log those. It matches
+// errLex, and ErrInlineImageLoss when it is about an inline image.
+type contentLoss struct {
+	msg    string
+	inline bool
+}
+
+func (e *contentLoss) Error() string { return e.msg }
+
+// Is reports whether target is errLex, or ErrInlineImageLoss for an inline
+// image loss.
+func (e *contentLoss) Is(target error) bool {
+	return target == errLex || (e.inline && target == ErrInlineImageLoss)
+}
+
+// newContentLoss returns the loss for what at offset off. A description that
+// starts with "inline image", or "malformed inline image", is about an inline
+// image.
+func newContentLoss(what string, off int) error {
+	return &contentLoss{
+		msg:    fmt.Sprintf("%v: content stream: %s at offset %d", errLex, what, off),
+		inline: strings.HasPrefix(what, "inline image") || what == "malformed inline image",
+	}
 }
 
 // ScanContentStrict is ScanContentSpans for redaction, which must fail closed
@@ -93,8 +151,17 @@ type StrictOptions struct {
 // PageContentSegments assembles it, whose Joins mark where its streams meet.
 // Span offsets index c.Data.
 //
-// Returns the spans, or nil and a wrapped errLex naming the first offset where
-// input was discarded or could be read differently:
+// Unlike the lenient scan, it reports each inline image it accepts as one span
+// with Op "BI", covering the image through EI, whose only operand is the
+// image dictionary keyed by full names (ISO 32000-1 Table 93), so a caller
+// can remove the image whole.
+//
+// Returns the spans; nil and an error wrapping ErrOpLimit when the content
+// has more than opts.MaxOps operators (reported instead of a loss the scan
+// meets at the operator past the cap); or nil and an error naming the first
+// offset where input was discarded or could be read differently (it matches
+// ErrInlineImageLoss when that is an inline image, and its message holds no
+// document bytes):
 //   - a token error, an operand array/dictionary that failed to parse
 //     (including an over-deep one that never closes or holds a keyword), a
 //     stray ']' or '>>', or operands pending at an inline image or at the end of
@@ -113,7 +180,7 @@ type StrictOptions struct {
 //     merge into one if the streams were concatenated without a separator.
 func ScanContentStrict(c ContentSegments, opts StrictOptions) ([]ContentOpSpan, error) {
 	st := &strictScan{opts: &opts, images: map[int]int{}}
-	ops, err := scanContent(c.Data, st)
+	ops, err := scanContent(c.Data, st, false)
 	if err != nil {
 		return nil, err
 	}
@@ -137,19 +204,24 @@ type strictScan struct {
 // strict selects strict mode (ScanContentStrict): the operand checks against
 // Annex A and the exact inline-image end, which lenient callers do not need,
 // and it stops at the first loss.
-func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
+//
+// images, in lenient mode, reports each skipped inline image as a "BI" span
+// (ScanContentSpansWithInlineImages).
+func scanContent(data []byte, strict *strictScan, images bool) ([]ContentOpSpan, error) {
 	var ops []ContentOpSpan
 	var operands []Object
 	var lossErr error // first discarded input; see ScanContentStrict
+	// cause is not part of the loss: a lexer error can quote document bytes
+	// (see contentLoss).
 	loss := func(off int, what string, cause error) {
-		if lossErr != nil {
-			return
+		_ = cause
+		if lossErr == nil {
+			lossErr = newContentLoss(what, off)
 		}
-		if cause != nil {
-			lossErr = fmt.Errorf("%w: content stream: %s at offset %d: %v", errLex, what, off, cause)
-		} else {
-			lossErr = fmt.Errorf("%w: content stream: %s at offset %d", errLex, what, off)
-		}
+	}
+	// tooMany reports whether a strict scan already holds MaxOps spans.
+	tooMany := func() bool {
+		return strict != nil && strict.opts.MaxOps > 0 && len(ops) >= strict.opts.MaxOps
 	}
 	// resync is where scanning resumes after a parse error at start that left
 	// the parser at pos: past a token that ran to end of input there is nothing
@@ -244,10 +316,19 @@ func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
 					loss(start, "inline image inside a text object", nil)
 					next = len(data)
 				} else if strict != nil {
-					end, what := strictInlineImage(data, ni, strict.opts, &strict.inflated)
+					dict, end, what := strictInlineImage(data, ni, strict.opts, &strict.inflated)
 					if what != "" {
 						loss(end, what, nil)
 						end = len(data)
+					} else if lossErr == nil {
+						if tooMany() {
+							return nil, opLimit(strict.opts.MaxOps)
+						}
+						ops = append(ops, ContentOpSpan{
+							ContentOp: ContentOp{Op: "BI", Operands: []Object{dict}},
+							Start:     start,
+							End:       end,
+						})
 					}
 					strict.images[ni] = end
 					next = end
@@ -256,6 +337,13 @@ func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
 					next, ok = skipInlineImage(data, ni)
 					if !ok {
 						loss(start, "malformed inline image", nil)
+					}
+					if images {
+						span := ContentOpSpan{ContentOp: ContentOp{Op: "BI"}, Start: start, End: next}
+						if dict, _, what := inlineImageDict(data, ni); what == "" {
+							span.Operands = []Object{dict}
+						}
+						ops = append(ops, span)
 					}
 				}
 				p.pos = next
@@ -273,6 +361,9 @@ func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
 				}
 				if strict != nil && (t.kw == "BT" || t.kw == "ET") {
 					strict.inText = t.kw == "BT"
+				}
+				if tooMany() {
+					return nil, opLimit(strict.opts.MaxOps)
 				}
 				ops = append(ops, ContentOpSpan{
 					ContentOp: ContentOp{Op: t.kw, Operands: operands},
@@ -303,6 +394,11 @@ func scanContent(data []byte, strict *strictScan) ([]ContentOpSpan, error) {
 		return nil, lossErr
 	}
 	return ops, lossErr
+}
+
+// opLimit is the error for content with more than max operators.
+func opLimit(max int) error {
+	return fmt.Errorf("%w: more than %d operators", ErrOpLimit, max)
 }
 
 // textObjectLoss describes an operator that ISO 32000-1 Figure 9 does not

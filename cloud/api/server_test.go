@@ -162,6 +162,27 @@ func TestRedactPIIEndpoint(t *testing.T) {
 	}
 }
 
+// TestRedactPIIUnsupported: a page the core refuses to redact safely is a 422
+// redaction_unsupported with the reason and page, not a 500, and no document
+// is stored.
+func TestRedactPIIUnsupported(t *testing.T) {
+	s, key := testServer(t, nil)
+	// A non-numeric Tc operand: Ghostscript ignores the operator, so readers
+	// could place the SSN differently (content_ambiguous).
+	pdf := contentPDF("BT /F1 12 Tf 20 Tc (x) Tc 72 700 Td (SSN 123-45-6789) Tj ET")
+	_, up := do(t, s, http.MethodPost, "/v1/documents", key, pdf)
+	id := up["id"].(string)
+
+	code, res := do(t, s, http.MethodPost, "/v1/documents/"+id+"/redact-pii", key, []byte(`{"kinds":["ssn"]}`))
+	if code != http.StatusUnprocessableEntity || res["error"] != "redaction_unsupported" ||
+		res["reason"] != "content_ambiguous" || res["page"] != float64(0) {
+		t.Fatalf("redact-pii = %d %v, want 422 redaction_unsupported content_ambiguous page 0", code, res)
+	}
+	if _, ok := res["id"]; ok {
+		t.Errorf("a refused redaction stored a document: %v", res)
+	}
+}
+
 func TestExtractStructuredEndpoint(t *testing.T) {
 	s, key := testServer(t, stubAI{fields: map[string]any{"vendor": "Acme"}})
 	_, up := do(t, s, http.MethodPost, "/v1/documents", key, textPDF("Invoice from Acme"))

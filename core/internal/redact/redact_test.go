@@ -34,7 +34,7 @@ func hasText(content []byte, want string) bool {
 // mustRedact is RedactContent for well-formed content: an error fails the test.
 func mustRedact(t *testing.T, content []byte, rects []Rect) []byte {
 	t.Helper()
-	out, err := RedactContent(content, rects)
+	out, err := redactContent(content, rects)
 	if err != nil {
 		t.Fatalf("RedactContent: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestRedactContent_EmptyRectsUnchanged(t *testing.T) {
 
 func TestFindTextRects(t *testing.T) {
 	content := []byte("BT /F1 12 Tf 100 700 Td (SECRET-1234) Tj 0 -100 Td (public) Tj ET")
-	rects, err := FindTextRects(content, regexp.MustCompile(`SECRET-\d+`))
+	rects, err := findTextRects(content, regexp.MustCompile(`SECRET-\d+`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,17 +128,17 @@ func TestRedact_FailsClosedOnDiscardedOperands(t *testing.T) {
 		"BT /F1 12 Tf 50 500 Td [(SECRET) " + strings.Repeat("[", 300) + "] TJ ET",
 		"BT /F1 12 Tf 50 500 Td (SECRET) ] Tj ET",
 	} {
-		if rects, err := FindTextRects([]byte(bad), re); err == nil || rects != nil {
-			t.Errorf("FindTextRects(%.40q) = (%v, %v), want (nil, error)", bad, rects, err)
+		if rects, err := findTextRects([]byte(bad), re); err == nil || rects != nil {
+			t.Errorf("findTextRects(%.40q) = (%v, %v), want (nil, error)", bad, rects, err)
 		}
-		if out, err := RedactContent([]byte(bad), region); err == nil || out != nil {
-			t.Errorf("RedactContent(%.40q) = (%q, %v), want (nil, error)", bad, out, err)
+		if out, err := redactContent([]byte(bad), region); err == nil || out != nil {
+			t.Errorf("redactContent(%.40q) = (%q, %v), want (nil, error)", bad, out, err)
 		}
 	}
 
 	ok := []byte("BT /F1 12 Tf 50 500 Td [(SECRET) " + deep + "] TJ ET")
-	if rects, err := FindTextRects(ok, re); err != nil || len(rects) != 1 {
-		t.Errorf("FindTextRects(deep sibling) = (%v, %v), want one rect", rects, err)
+	if rects, err := findTextRects(ok, re); err != nil || len(rects) != 1 {
+		t.Errorf("findTextRects(deep sibling) = (%v, %v), want one rect", rects, err)
 	}
 	if out := mustRedact(t, ok, region); hasText(out, "SECRET") {
 		t.Errorf("secret next to a deep sibling survived: %.80q", out)

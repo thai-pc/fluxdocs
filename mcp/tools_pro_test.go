@@ -275,3 +275,31 @@ func TestExtractTablesTool(t *testing.T) {
 		t.Errorf("result = %v", item["text"])
 	}
 }
+
+// TestRedactRefusalSurfacesReason: a page the core refuses to redact safely
+// is a tool error that names the reason code (and no document text).
+func TestRedactRefusalSurfacesReason(t *testing.T) {
+	s := NewServer()
+	// A non-numeric Tc operand: readers could place the secret differently.
+	content := "BT /F1 12 Tf 20 Tc (x) Tc 20 100 Td (SECRET-42) Tj ET"
+	pdf := buildPDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		4: stream(content),
+		5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}, "<< /Size 6 /Root 1 0 R >>")
+	path := filepath.Join(t.TempDir(), "ambiguous.pdf")
+	if err := os.WriteFile(path, pdf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := openHandle(t, s, path)
+	item, isErr := callTool(t, s, "redact_text", map[string]any{"handle": h, "page": 0, "pattern": `SECRET-\d+`})
+	text, _ := item["text"].(string)
+	if !isErr || !strings.Contains(text, "content cannot be redacted safely") || !strings.Contains(text, "content_ambiguous") {
+		t.Errorf("redact_text = %q (isErr=%v), want a redaction_unsupported error naming content_ambiguous", text, isErr)
+	}
+	if strings.Contains(text, "SECRET") {
+		t.Errorf("tool error quotes document text: %q", text)
+	}
+}

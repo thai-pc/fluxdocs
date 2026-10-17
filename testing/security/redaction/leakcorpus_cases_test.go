@@ -167,6 +167,15 @@ func identityHFont() map[int]string {
 	}
 }
 
+// verticalFont is identityHFont written vertically (/Identity-V), with
+// extra entries (/DW2, /W2) on the CIDFont.
+func verticalFont(extra string) map[int]string {
+	m := identityHFont()
+	m[6] = strings.Replace(m[6], "/Identity-H", "/Identity-V", 1)
+	m[7] = strings.Replace(m[7], "/DW 600", "/DW 600 "+extra, 1)
+	return m
+}
+
 // type0DW returns objects 6–9: a Type 0 font /F2 with the given /Encoding (a
 // name, or "9 0 R" for the embedded CMap 9 mapping codes to CIDs), a
 // descendant with /DW 3000 (three em per glyph), and an identity /ToUnicode.
@@ -205,6 +214,95 @@ func utf16Hex(s string) string {
 	}
 	b.WriteByte('>')
 	return b.String()
+}
+
+// perChar shows each character of s with its own Tj.
+func perChar(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		fmt.Fprintf(&b, "(%c) Tj ", c)
+	}
+	return b.String()
+}
+
+// secretImage is an 11×1 DeviceGray image XObject whose samples are the
+// secret's bytes.
+func secretImage() string {
+	return stm("/Type /XObject /Subtype /Image /Width 11 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", secret)
+}
+
+// clippedImage is a page that sets clip, paints the secret image over the
+// whole page, and shows the secret as text inside the region (300, 300)–(400,
+// 400).
+func clippedImage(clip string) func() []byte {
+	return onePage{content: []string{"q " + clip + " 400 0 0 800 0 0 cm /Im1 Do Q BT /F1 12 Tf 305 350 Td " + S + " Tj ET"},
+		res: "<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >>", extra: map[int]string{6: secretImage()}}.pdf
+}
+
+// secretUnderRegion paints the secret image and shows the secret as text
+// inside the region (300, 300)–(400, 400).
+const secretUnderRegion = "q 100 0 0 100 300 300 cm /Im1 Do Q BT /F1 12 Tf 305 350 Td " + S + " Tj ET"
+
+// sharedResPDF assembles a fixture whose resource dictionary 20 holds /F1
+// (5), the secret image /Im1 (6), any extra /XObject entries xobjects, and
+// /T3 7 when objs defines it; kids are the page objects, in order.
+func sharedResPDF(objs map[int]string, xobjects string, kids ...int) func() []byte {
+	return func() []byte {
+		o := map[int]string{1: "<< /Type /Catalog /Pages 2 0 R >>", 5: helvetica, 6: secretImage()}
+		fonts := "/F1 5 0 R"
+		if _, ok := objs[7]; ok {
+			fonts += " /T3 7 0 R"
+		}
+		o[20] = "<< /Font << " + fonts + " >> /XObject << /Im1 6 0 R " + xobjects + " >> >>"
+		k := ""
+		for _, n := range kids {
+			k += fmt.Sprintf("%d 0 R ", n)
+		}
+		o[2] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 400 800] >>", k, len(kids))
+		for n, v := range objs {
+			o[n] = v
+		}
+		return leakPDF(o, "")
+	}
+}
+
+// sharedImageRes is a two-page fixture whose pages share one /Resources
+// dictionary (7) holding /F1 and the secret image /Im1 (6); page 0 shows
+// content0, page 1 content1.
+func sharedImageRes(content0, content1 string) func() []byte {
+	return func() []byte {
+		return leakPDF(map[int]string{
+			1: "<< /Type /Catalog /Pages 2 0 R >>",
+			2: "<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+			3: "<< /Type /Page /Parent 2 0 R /Resources 7 0 R /Contents 4 0 R >>",
+			4: stm("", content0),
+			5: helvetica,
+			6: secretImage(),
+			7: "<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >>",
+			8: "<< /Type /Page /Parent 2 0 R /Resources 7 0 R /Contents 9 0 R >>",
+			9: stm("", content1),
+		}, "")
+	}
+}
+
+// sharedProps is a two-page fixture whose pages share one /Properties
+// dictionary (7) holding /MC0 (6), whose /ActualText is the secret. Page 0
+// shows XXXXXXXXXXX inside /MC0; page 1 shows content1.
+func sharedProps(content1 string) func() []byte {
+	return func() []byte {
+		res := "/Resources << /Font << /F1 5 0 R >> /Properties 7 0 R >>"
+		return leakPDF(map[int]string{
+			1: "<< /Type /Catalog /Pages 2 0 R >>",
+			2: "<< /Type /Pages /Kids [3 0 R 8 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+			3: "<< /Type /Page /Parent 2 0 R " + res + " /Contents 4 0 R >>",
+			4: stm("", "/Span /MC0 BDC "+show("(XXXXXXXXXXX)")+" EMC"),
+			5: helvetica,
+			6: "<< /ActualText " + S + " >>",
+			7: "<< /MC0 6 0 R >>",
+			8: "<< /Type /Page /Parent 2 0 R " + res + " /Contents 9 0 R >>",
+			9: stm("", content1),
+		}, "")
+	}
 }
 
 // partial returns a pointer to an area rect (for rows that redact part of a
@@ -291,24 +389,25 @@ func leakCases() []leakCase {
 
 		// Marked-content property text (item 7). Property-list matching (D14,
 		// step 1.6) closes the text rows: RedactText matches the /ActualText,
-		// marks the page, strips the key and removes the sequence's runs. The
-		// area rows wait for D7 (strip on marked pages). Ghostscript txtwrite
-		// does not show /ActualText even in the input (gsBlind, C1); the rows
-		// model a reader whose copy/paste does (Acrobat, pdf.js).
+		// marks the page, strips the key and removes the sequence's runs. D7
+		// (step 1.10) closes the area rows: every text key is stripped on a
+		// marked page. Ghostscript txtwrite does not show /ActualText, /Alt or
+		// /E even in the input (gsBlind, C1); the rows model a reader whose
+		// copy/paste or accessibility output does (Acrobat, pdf.js).
 		{name: "actualtext", pdf: page("/Span << /ActualText " + S + " >> BDC " + show("(XXXXXXXXXXX)") + " EMC"),
 			ops: []leakOp{opText}, want: clean, gsBlind: true},
 		{name: "actualtext", pdf: page("/Span << /ActualText " + S + " >> BDC " + show("(XXXXXXXXXXX)") + " EMC"),
-			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.10 (D7 strips /ActualText on marked pages) -> clean"},
+			ops: []leakOp{opArea}, want: clean, gsBlind: true}, // step 1.10: D7 strips /ActualText on marked pages
 		{name: "actualtext_props", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC"},
 			res: "<< /Font << /F1 5 0 R >> /Properties << /MC0 << /ActualText " + S + " >> >> >>"}.pdf,
 			ops: []leakOp{opText}, want: clean, gsBlind: true},
 		{name: "actualtext_props", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC"},
 			res: "<< /Font << /F1 5 0 R >> /Properties << /MC0 << /ActualText " + S + " >> >> >>"}.pdf,
-			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.10 (D7 strips named /Properties entries) -> clean"},
+			ops: []leakOp{opArea}, want: clean, gsBlind: true}, // step 1.10: D7 strips named /Properties entries
 		{name: "alt", pdf: page("/Figure << /Alt " + S + " >> BDC 0 0 10 10 re f EMC " + show("(public)")),
-			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.10 (D7 strips /Alt) -> clean"},
+			ops: []leakOp{opArea}, want: clean, gsBlind: true}, // step 1.10: D7 strips /Alt
 		{name: "expansion_E", pdf: page("/Span << /E " + S + " >> BDC " + show("(SR)") + " EMC"),
-			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.10 (D7 strips /E) -> clean"},
+			ops: []leakOp{opArea}, want: clean, gsBlind: true}, // step 1.10: D7 strips /E
 
 		// TJ, compatibility sections, quote operators, comments.
 		{name: "tj_nested", pdf: page("BT /F1 24 Tf 72 700 Td [ (A) [ " + S + " ] ] TJ ET"),
@@ -418,21 +517,165 @@ func leakCases() []leakCase {
 			res: "<< /Font << /T3 6 0 R >> >>", extra: type3ZeroWidths()}.pdf,
 			area: partial(100, 690, 300, 40), ops: []leakOp{opArea}, want: clean},
 		// S4: a matched /ActualText survives through another reference to the
-		// same /Properties entry (an unused alias, or a text-free form's
-		// resources): resource GC and verification close these. Ghostscript
-		// does not show /ActualText.
+		// same /Properties entry. Resource GC (step 1.9) drops the unused
+		// alias. A text-free form that is painted keeps its resources, so the
+		// shared list survives through them until the verifier (1.12) refuses
+		// the output, or Phase 2 COW (2.3) rewrites the form. Ghostscript does
+		// not show /ActualText.
 		{name: "actualtext_alias", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC"},
 			res: "<< /Font << /F1 5 0 R >> /Properties << /MC0 6 0 R /MC1 6 0 R >> >>", extra: map[int]string{6: "<< /ActualText " + S + " >>"}}.pdf,
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.9 (resource GC drops the unused alias) / 1.12 (verifier) -> clean"},
+			ops: []leakOp{opText}, want: clean, gsBlind: true}, // step 1.9: resource GC drops the unused alias
 		{name: "actualtext_shared_form", pdf: onePage{content: []string{"/Span /MC0 BDC " + show("(XXXXXXXXXXX)") + " EMC q /Fm Do Q"},
 			res: "<< /Font << /F1 5 0 R >> /Properties 7 0 R /XObject << /Fm 8 0 R >> >>",
 			extra: map[int]string{6: "<< /ActualText " + S + " >>", 7: "<< /MC0 6 0 R >>",
 				8: stm("/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /Properties 7 0 R >>", "0 0 1 1 re f")}}.pdf,
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.9 (COW of shared /Properties) / 1.12 (verifier) -> clean"},
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.12 (verifier: owned hit -> ErrRedactionVerification) / 2.3 (COW of the form's /Properties) -> refuse, then clean"},
 		// A match split across two text objects (Phase 2 matches across
 		// operators on a line).
 		{name: "split_bt", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET BT /F1 24 Tf 177.4 700 Td (1234) Tj ET"),
 			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+		// N-2 (batch B review): the same split inside one text object, as Tj,
+		// as TJ, and one character per operator.
+		{name: "split_same_bt_tj", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj (1234) Tj ET"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+		{name: "split_same_bt_TJ", pdf: page("BT /F1 24 Tf 72 700 Td [(SECRET-)] TJ [(1234)] TJ ET"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+		{name: "split_same_bt_per_char", pdf: page("BT /F1 24 Tf 72 700 Td " + perChar(secret) + " ET"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+		// N-2: a /Properties list shared by two pages' /Resources. Page 0's
+		// private copy loses the matched /ActualText, but page 1 is not
+		// redacted and keeps the shared list: unused there (page hygiene on an
+		// unmarked page whose closure holds a needle), or used there (the
+		// match needle extends to page 1). Resource GC applies to marked pages
+		// only, so 1.9 does not close either. Ghostscript does not show
+		// /ActualText.
+		{name: "props_shared_unused", pdf: sharedProps("(public)"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.13 (page hygiene on the unmarked page) -> clean"},
+		{name: "props_shared_used", pdf: sharedProps("/Span /MC0 BDC " + show("(YYYY)") + " EMC"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "1.13 (the match needle extends to page 1) -> clean"},
+
+		// D5 (step 1.11): what the page paints besides text, under a region, is
+		// removed whole. The fixtures carry the secret as image samples or
+		// inside a text-free form, which no text extraction shows (gsBlind);
+		// the leak checks find the bytes if the image or form survives.
+		{name: "d5_image_xobject", pdf: onePage{content: []string{"q 400 0 0 800 0 0 cm /Im1 Do Q " + show("(public)")},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >>", extra: map[int]string{6: secretImage()}}.pdf,
+			area: partial(10, 10, 20, 20), ops: []leakOp{opArea}, want: clean, gsBlind: true},
+		{name: "d5_image_smask", pdf: onePage{content: []string{"q 100 0 0 100 50 50 cm /Im1 Do Q"},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >>",
+			extra: map[int]string{6: stm("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 7 0 R", "\x80"),
+				7: secretImage()}}.pdf,
+			area: partial(150, 150, 10, 10), ops: []leakOp{opArea}, want: clean, gsBlind: true}, // the region touches the image's corner
+		{name: "d5_inline_image", pdf: page("q 11 0 0 1 72 300 cm BI /W 11 /H 1 /BPC 8 /CS /G ID " + secret + " EI Q " + show("(public)")),
+			area: partial(60, 290, 40, 20), ops: []leakOp{opArea}, want: clean, gsBlind: true},
+		{name: "d5_textfree_form", pdf: onePage{content: []string{"q 1 0 0 1 100 100 cm /Fm1 Do Q"},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >>",
+			extra: map[int]string{6: stm("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << /XObject << /Im1 7 0 R >> >>",
+				"q 50 0 0 50 0 0 cm /Im1 Do Q"), 7: secretImage()}}.pdf,
+			area: partial(140, 140, 30, 30), ops: []leakOp{opArea}, want: clean, gsBlind: true},
+		{name: "d5_form_matrix", pdf: onePage{content: []string{"/Fm1 Do"},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >>",
+			extra: map[int]string{6: stm("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Matrix [1 0 0 1 300 600] /Resources << /XObject << /Im1 7 0 R >> >>",
+				"q 10 0 0 10 0 0 cm /Im1 Do Q"), 7: secretImage()}}.pdf,
+			area: partial(305, 605, 1, 1), ops: []leakOp{opArea}, want: clean, gsBlind: true}, // /Matrix moves the form under the region
+		// B3 (batch C review): the removed image must not survive through
+		// another route. Each page also shows the secret as text under the
+		// region, so Ghostscript checks the text and the leak checks find the
+		// image's sample bytes. A resource dictionary shared with a page that
+		// is not redacted (and does not paint the image):
+		{name: "d5_shared_resources", pdf: sharedImageRes(show(S)+" q 400 0 0 800 0 0 cm /Im1 Do Q", show("(public)")),
+			ops: []leakOp{opArea}, want: clean},
+		// Batch C review round 2 (BL-1): the removed image only listed in a
+		// resource dictionary that kept content shares (the page's own,
+		// indirect): a kept form on the redacted page, a form or an annotation
+		// appearance on a page that is not redacted, a kept Type 3 font.
+		{name: "d5_kept_form_shared_res", pdf: sharedResPDF(map[int]string{
+			3: "<< /Type /Page /Parent 2 0 R /Resources 20 0 R /Contents 4 0 R >>",
+			4: stm("", secretUnderRegion+" /Fm1 Do"),
+			8: stm("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources 20 0 R", "0 0 50 50 re f"),
+		}, "/Fm1 8 0 R", 3), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		{name: "d5_unredacted_form_shared_res", pdf: sharedResPDF(map[int]string{
+			3:  "<< /Type /Page /Parent 2 0 R /Resources 20 0 R /Contents 4 0 R >>",
+			4:  stm("", secretUnderRegion),
+			8:  stm("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources 20 0 R", "0 0 50 50 re f"),
+			10: "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm1 8 0 R >> >> /Contents 11 0 R >>",
+			11: stm("", "/Fm1 Do"),
+		}, "/Fm1 8 0 R", 3, 10), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		{name: "d5_unredacted_annot_ap_shared_res", pdf: sharedResPDF(map[int]string{
+			3:  "<< /Type /Page /Parent 2 0 R /Resources 20 0 R /Contents 4 0 R >>",
+			4:  stm("", secretUnderRegion),
+			8:  stm("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources 20 0 R", "0 0 50 50 re f"),
+			10: "<< /Type /Page /Parent 2 0 R /Resources 20 0 R /Contents 11 0 R /Annots [12 0 R] >>",
+			11: stm("", show("(public)")),
+			12: "<< /Type /Annot /Subtype /Square /Rect [0 0 50 50] /AP << /N 8 0 R >> >>",
+		}, "", 3, 10), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		{name: "d5_kept_type3_shared_res", pdf: sharedResPDF(map[int]string{
+			3: "<< /Type /Page /Parent 2 0 R /Resources 20 0 R /Contents 4 0 R >>",
+			4: stm("", secretUnderRegion+" BT /T3 12 Tf 50 50 Td (a) Tj ET"),
+			7: "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 9 0 R >> " +
+				"/Encoding << /Differences [97 /a] >> /FirstChar 97 /LastChar 97 /Widths [1000] /Resources 20 0 R >>",
+			9: stm("", "1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f"),
+		}, "", 3), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		// Batch C review round 3 (BL-A): no clip narrows a paint (C46).
+		// FluxDocs' renderer ignores W/W* and text clips, and readers
+		// disagree on edge cases, so an image painted under a clip that
+		// keeps it away from the region is still removed.
+		{name: "d5_clip_re_W_n", pdf: clippedImage("0 0 50 50 re W n"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		{name: "d5_clip_text_Tr7", pdf: clippedImage("BT 7 Tr /F1 48 Tf 20 20 Td (CLIP) Tj ET"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		{name: "d5_clip_text_Tr4.5", pdf: clippedImage("BT 4.5 Tr /F1 48 Tf 20 20 Td (CLIP) Tj ET"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		{name: "d5_clip_no_point", pdf: clippedImage("h W n"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		{name: "d5_sh_under_W_clip", pdf: onePage{content: []string{"q 0 0 50 50 re W n /Sh sh Q BT /F1 12 Tf 305 350 Td " + S + " Tj ET"},
+			res:   "<< /Font << /F1 5 0 R >> /Shading << /Sh << /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 400 0] /Function 6 0 R >> >> >>",
+			extra: map[int]string{6: stm("/FunctionType 0 /Domain [0 1] /Range [0 1] /Size [11] /BitsPerSample 8", secret)}}.pdf,
+			area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean}, // the shading's sampled function holds the secret
+		// Batch C review round 3 (BL-B): kept content records only the
+		// binding a reader uses for a name (the innermost scope that defines
+		// it), so the removed image is not kept because a kept unit looks up
+		// a name that an outer scope binds to it.
+		{name: "d5_kept_form_own_same_name", pdf: onePage{content: []string{secretUnderRegion + " q 1 0 0 1 10 10 cm /F Do Q"},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R /F 8 0 R >> >>",
+			extra: map[int]string{6: secretImage(), 7: stm("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", "\x80"),
+				8: stm("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << /XObject << /Im1 7 0 R >> >>", "50 0 0 50 0 0 cm /Im1 Do")}}.pdf,
+			area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean}, // E4
+		{name: "d5_unredacted_form_own_same_name", pdf: sharedResPDF(map[int]string{
+			3:  "<< /Type /Page /Parent 2 0 R /Resources 20 0 R /Contents 4 0 R >>",
+			4:  stm("", secretUnderRegion),
+			7:  stm("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", "\x80"),
+			8:  stm("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << /XObject << /Im1 7 0 R >> >>", "50 0 0 50 0 0 cm /Im1 Do"),
+			10: "<< /Type /Page /Parent 2 0 R /Resources 20 0 R /Contents 11 0 R >>",
+			11: stm("", "/Fm1 Do"),
+		}, "/Fm1 8 0 R", 3, 10), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean}, // E5
+		{name: "d5_kept_form_lists_pattern", pdf: onePage{content: []string{secretUnderRegion + " /F Do"},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R /F 8 0 R >> >>",
+			extra: map[int]string{6: secretImage(),
+				8: stm("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << /Pattern << /P 9 0 R >> >>", "0 0 1 rg 0 0 50 50 re f"),
+				9: stm("/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << /XObject << /Im1 6 0 R >> >>",
+					"10 0 0 10 0 0 cm /Im1 Do")}}.pdf,
+			area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean}, // E1: the form never selects the pattern
+		// Batch C review round 5 (B-1): vertical writing. The text model
+		// does not place glyphs by /DW2 or /W2; metrics that would put a
+		// glyph outside its bounds are refused. The standard metrics redact.
+		{name: "d6_vertical_standard", pdf: onePage{content: []string{"BT /F2 24 Tf 200 700 Td " + utf16Hex(secret) + " Tj ET"},
+			res: "<< /Font << /F1 5 0 R /F2 6 0 R >> >>", extra: verticalFont("/DW2 [880 -1000]")}.pdf,
+			area: partial(150, 300, 100, 500), ops: both, want: clean},
+		{name: "d6_vertical_dw2_offset", pdf: onePage{content: []string{"BT /F2 24 Tf 200 700 Td " + utf16Hex(secret) + " Tj ET"},
+			res: "<< /Font << /F1 5 0 R /F2 6 0 R >> >>", extra: verticalFont("/DW2 [2500 -1000]")}.pdf,
+			area: partial(150, 300, 100, 500), ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "d6_vertical_w2_advance", pdf: onePage{content: []string{"BT /F2 24 Tf 200 700 Td " + utf16Hex(secret) + " Tj ET"},
+			res: "<< /Font << /F1 5 0 R /F2 6 0 R >> >>", extra: verticalFont("/W2 [32 126 -4000 500 880]")}.pdf,
+			area: partial(150, 300, 100, 500), ops: both, want: refuse, reason: "content_ambiguous"},
+		// A tiling pattern that paints the image, used only by a removed fill:
+		{name: "d5_pattern_image", pdf: onePage{content: []string{"/Pattern cs /P1 scn 0 0 400 800 re f " + show(S)},
+			res: "<< /Font << /F1 5 0 R >> /Pattern << /P1 7 0 R >> >>",
+			extra: map[int]string{6: secretImage(), 7: stm("/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 400 800] /XStep 400 /YStep 800 "+
+				"/Resources << /XObject << /Im1 6 0 R >> >>", "q 400 0 0 800 0 0 cm /Im1 Do Q")}}.pdf,
+			ops: []leakOp{opArea}, want: clean},
+		// A soft-mask group that paints the image, used only by a removed fill:
+		{name: "d5_smask_image", pdf: onePage{content: []string{"/GS1 gs 0 0 400 800 re f " + show(S)},
+			res: "<< /Font << /F1 5 0 R >> /ExtGState << /GS1 << /SMask << /S /Luminosity /G 7 0 R >> >> >> >>",
+			extra: map[int]string{6: secretImage(), 7: stm("/Type /XObject /Subtype /Form /BBox [0 0 400 800] /Group << /S /Transparency /CS /DeviceGray >> "+
+				"/Resources << /XObject << /Im1 6 0 R >> >>", "q 400 0 0 800 0 0 cm /Im1 Do Q")}}.pdf,
+			ops: []leakOp{opArea}, want: clean},
 
 		// --- rv5 ---
 		{name: "rv5_b1_deep_sibling", pdf: page("BT /F1 24 Tf 72 700 Td [ " + S + " " + openArrays(overDeep) + "1" + closeArrays(overDeep) + " ] TJ ET"),
@@ -457,26 +700,26 @@ func leakCases() []leakCase {
 		{name: "n2_link_dest", pdf: twoPages(show(S), " /Annots [7 0 R]", show("(public)"), " /Annots [9 0 R]", map[int]string{
 			7: "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents " + S + " >>",
 			9: "<< /Type /Annot /Subtype /Link /Rect [0 0 100 100] /Dest [3 0 R /XYZ 0 800 0] >>"}, ""),
-			ops: both, want: knownLeak, closesIn: "1.9 (BuildOptions.PageRefs remaps page references) -> clean"},
+			ops: both, want: clean}, // step 1.9: references to a page point at its copy (D11)
 		{name: "n2_widget_parent", pdf: twoPages(show(S), " /Annots [7 0 R]", show("(public)"), " /Annots [9 0 R]", map[int]string{
 			7:  "<< /Type /Annot /Subtype /Widget /Rect [72 600 300 630] /Parent 10 0 R /P 3 0 R /AP << /N 11 0 R >> >>",
 			9:  "<< /Type /Annot /Subtype /Widget /Rect [72 600 300 630] /Parent 10 0 R /P 6 0 R >>",
 			10: "<< /FT /Tx /T (name) /V (public) /Kids [7 0 R 9 0 R] >>",
 			11: stm("/Type /XObject /Subtype /Form /BBox [0 0 228 30] /Resources << /Font << /F1 5 0 R >> >>",
 				"BT /F1 12 Tf 2 10 Td "+S+" Tj ET")}, ""),
-			ops: both, want: knownLeak, closesIn: "1.9 (PageRefs + deny field /Kids widgets of marked pages) -> clean"},
+			ops: both, want: clean}, // step 1.9: page references remapped; a redacted page's widgets denied
 
 		// --- N3: page-dict entries that hold a copy of the page ---
 		{name: "n3_thumb", pdf: onePage{content: []string{show(S)}, pageExtra: " /Thumb 9 0 R",
 			extra: map[int]string{9: flateStm("/Width 4 /Height 4 /ColorSpace /DeviceGray /BitsPerComponent 8", "thumbnail stand-in "+secret)}}.pdf,
-			ops: both, want: knownLeak, closesIn: "1.9 (Redacted page-dict allow-list) -> clean"},
+			ops: both, want: clean}, // step 1.9: the Redacted page-dictionary allow-list
 
 		// --- N4: an unused page resource holds the text; it is copied verbatim.
 		// A reader that parses inline-image data as content (T5) could also
 		// invoke it with a Do, gs or scn hidden there, which T6 does not refuse.
 		{name: "n4_unused_form", pdf: onePage{content: []string{show("(public)")},
 			res: "<< /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >>", extra: map[int]string{6: textForm("")}}.pdf,
-			ops: []leakOp{opArea}, want: knownLeak, closesIn: "1.9 (resource GC drops entries the walk never invoked) -> clean"},
+			ops: []leakOp{opArea}, want: clean, gsBlind: true}, // step 1.9: resource GC; gs shows only "public"
 
 		// --- N6: gs /Font sets the font and size, which the scanner ignores ---
 		{name: "n6_gs_font", pdf: onePage{content: []string{"BT /GS1 gs 72 700 Td " + S + " Tj ET"},

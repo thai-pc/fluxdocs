@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 	"unicode"
 	"unicode/utf16"
 
 	"github.com/thai-pc/fluxdocs/core"
-	"github.com/thai-pc/fluxdocs/core/docops/redact"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
@@ -348,32 +346,22 @@ func stringLeak(b []byte) bool {
 	return false
 }
 
-// inlineImageLoss matches the strict scanner's inline-image losses.
-var inlineImageLoss = regexp.MustCompile(`content stream: (malformed inline image|inline image )|for redaction: inline image `)
-
 // refusalReason classifies a redaction error into the reason codes of the
-// design (§9 P1). Until core.RedactionError carries the reason (step 1.8), it
-// is derived from the error chain — a *redact.RefusalError carries its reason
-// (form_text, pattern_text, softmask_text, type3_text, budget_exceeded,
-// unsupported_xobject) — and the scanner's loss description, which never
-// holds document bytes. testing/corpus/redaction_regress_test.go has the
-// same classifier.
+// design (§9 P1): a *core.RedactionError carries its reason (step 1.8; the
+// classifier of C8 is gone).
 func refusalReason(err error) string {
 	var ie *core.InternalError
-	var re *redact.RefusalError
+	var re *core.RedactionError
 	switch {
 	case err == nil:
 		return "ok"
 	case errors.As(err, &ie):
 		return "internal"
 	case errors.As(err, &re):
+		if !errors.Is(err, core.ErrRedactionUnsupported) || errors.Is(err, core.ErrInvalidPDF) {
+			return "bad_chain" // D2: a refusal matches ErrRedactionUnsupported, never ErrInvalidPDF
+		}
 		return string(re.Reason)
-	case errors.Is(err, redact.ErrFormXObjectText):
-		return "form_text"
-	case inlineImageLoss.MatchString(err.Error()):
-		return "inline_image"
-	case strings.Contains(err.Error(), "cannot be scanned safely"):
-		return "content_ambiguous"
 	}
 	return "error"
 }

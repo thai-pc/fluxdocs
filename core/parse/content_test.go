@@ -362,7 +362,7 @@ func TestScanContentSpansStrict(t *testing.T) {
 				}
 				return
 			}
-			if want := ScanContentSpans([]byte(tc.in)); !reflect.DeepEqual(spans, want) {
+			if want := ScanContentSpans([]byte(tc.in)); !reflect.DeepEqual(withoutInlineImages(spans), want) {
 				t.Errorf("strict spans = %v, want the lenient spans %v", spans, want)
 			}
 		})
@@ -468,5 +468,74 @@ func TestScanContent_UnterminatedStringIsLinear(t *testing.T) {
 				t.Errorf("strict scan of an unterminated string: err = nil")
 			}
 		})
+	}
+}
+
+// withoutInlineImages returns spans without the "BI" spans the strict scan
+// adds for accepted inline images (the lenient scan reports none).
+func withoutInlineImages(spans []ContentOpSpan) []ContentOpSpan {
+	var out []ContentOpSpan
+	for _, s := range spans {
+		if s.Op != "BI" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// TestScanContentStrict_LossErrors: a strict-scan loss matches errLex, and
+// ErrInlineImageLoss exactly when it is about an inline image; its message
+// never quotes document bytes (redaction errors carry it, and callers print
+// them).
+func TestScanContentStrict_LossErrors(t *testing.T) {
+	for _, tc := range []struct {
+		in     string
+		inline bool
+	}{
+		{"BT [ (A) SECRET-1234 ] TJ ET", false},
+		{"BT (A) /SECRET-1234 Tj ET", false},
+		{"BT <SECRET-1234> Tj ET", false},
+		{"BT 1.2.3SECRET Tc ET", false},
+		{"BI /W 1 /H 1 /BPC 8 /CS /G /F /SECRET-1234 ID A EI", true},
+		{"BT BI /W 1 /H 1 /BPC 8 /CS /G ID A EI ET", true},
+		{"BI /W 1 /H 1 /BPC 8 /CS /G ID AEI (SECRET-1234) Tj", true},
+	} {
+		_, err := ScanContentSpansStrict([]byte(tc.in))
+		if err == nil {
+			t.Errorf("%q: no loss", tc.in)
+			continue
+		}
+		if !errors.Is(err, errLex) || errors.Is(err, ErrInlineImageLoss) != tc.inline {
+			t.Errorf("%q: err = %v, want errLex and inline=%v", tc.in, err, tc.inline)
+		}
+		if strings.Contains(err.Error(), "SECRET") {
+			t.Errorf("%q: loss message quotes the content: %v", tc.in, err)
+		}
+	}
+}
+
+// TestScanContentSpansWithInlineImages: the lenient scan, plus a "BI" span
+// with the dictionary for each inline image it skips (none when the
+// dictionary does not parse).
+func TestScanContentSpansWithInlineImages(t *testing.T) {
+	in := []byte("q BI /W 1 /H 1 /CS /CS0 /BPC 8 ID \x00 EI Q BI /W <zz> ID x EI (x) Tj")
+	got := ScanContentSpansWithInlineImages(in)
+	if !reflect.DeepEqual(withoutInlineImages(got), ScanContentSpans(in)) {
+		t.Errorf("non-image spans differ from the lenient scan: %v", got)
+	}
+	var images []ContentOpSpan
+	for _, s := range got {
+		if s.Op == "BI" {
+			images = append(images, s)
+		}
+	}
+	if len(images) != 2 {
+		t.Fatalf("%d image spans, want 2: %v", len(images), got)
+	}
+	if d, ok := images[0].Operands[0].(Dict); !ok || d["ColorSpace"] != Name("CS0") {
+		t.Errorf("first image operands = %v, want its dictionary", images[0].Operands)
+	}
+	if len(images[1].Operands) != 0 {
+		t.Errorf("an unparsable dictionary gave operands %v", images[1].Operands)
 	}
 }

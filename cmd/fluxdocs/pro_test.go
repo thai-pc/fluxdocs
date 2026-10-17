@@ -110,3 +110,29 @@ func TestAutoRedact_UnknownKinds(t *testing.T) {
 		t.Errorf("autoredact with only unknown kinds: code=%d, want 1", code)
 	}
 }
+
+// TestRedact_RefusalNamesReason: a page the core refuses to redact safely
+// fails the command with the reason code in the message, and writes nothing.
+func TestRedact_RefusalNamesReason(t *testing.T) {
+	pdf := buildPDF(map[int]string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>",
+		3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >> /Contents 4 0 R >>",
+		4: streamObj("/Fm1 Do"),
+		5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		6: strings.Replace(streamObj("BT /F1 12 Tf 20 100 Td (Page 0) Tj ET"), "<<",
+			"<< /Type /XObject /Subtype /Form /BBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >>", 1),
+	}, "<< /Size 7 /Root 1 0 R >>")
+	path := filepath.Join(t.TempDir(), "form.pdf")
+	if err := os.WriteFile(path, pdf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "out.pdf")
+	code, _, errs := runCLI("redact", path, "--pattern", `Page \d`, "-o", out)
+	if code != 1 || !strings.Contains(errs, "cannot be redacted safely") || !strings.Contains(errs, "form_text") {
+		t.Errorf("redact: code=%d errs=%q, want 1 and a form_text refusal", code, errs)
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("a refused redaction wrote an output file")
+	}
+}

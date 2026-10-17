@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"hash/adler32"
 	"math/rand"
 	"reflect"
@@ -228,7 +229,7 @@ func TestStrictInlineImage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			data := []byte(tc.in)
 			var inflated int64
-			end, what := strictInlineImage(data, len("BI"), tc.opts, &inflated)
+			_, end, what := strictInlineImage(data, len("BI"), tc.opts, &inflated)
 			if tc.ok != (what == "") {
 				t.Fatalf("strictInlineImage = (%d, %q), want ok=%v", end, what, tc.ok)
 			}
@@ -319,11 +320,11 @@ func TestStrictInlineImage_InflateBudget(t *testing.T) {
 	zl := zlibLevel(t, make([]byte, 1000), zlib.BestCompression)
 	data := []byte("BI /W 1000 /H 1 /BPC 8 /CS /G /F /Fl ID " + string(zl) + " EI")
 	inflated := int64(maxInlineInflate - 999)
-	if _, what := strictInlineImage(data, 2, nil, &inflated); what == "" {
+	if _, _, what := strictInlineImage(data, 2, nil, &inflated); what == "" {
 		t.Errorf("image accepted past the inflate allowance")
 	}
 	inflated = maxInlineInflate - 1000
-	if _, what := strictInlineImage(data, 2, nil, &inflated); what != "" {
+	if _, _, what := strictInlineImage(data, 2, nil, &inflated); what != "" {
 		t.Errorf("image within the allowance refused: %s", what)
 	}
 }
@@ -353,8 +354,27 @@ func TestScanContentStrict_InlineImage(t *testing.T) {
 	for _, s := range spans {
 		ops = append(ops, s.Op)
 	}
-	if got := strings.Join(ops, " "); got != "q Q BT Tj ET" {
-		t.Errorf("ops = %q, want \"q Q BT Tj ET\"", got)
+	if got := strings.Join(ops, " "); got != "q BI Q BI BT Tj ET" {
+		t.Errorf("ops = %q, want \"q BI Q BI BT Tj ET\"", got)
+	}
+	// Each accepted image is one span through EI (from the white-space before
+	// BI, like every span), with its
+	// dictionary keyed by full names.
+	if bi := spans[1]; string(in[bi.Start:bi.End]) != " BI /W 1 /H 1 /BPC 8 /CS /G ID A EI" {
+		t.Errorf("first image span = %q", in[bi.Start:bi.End])
+	} else if d, ok := bi.Operands[0].(Dict); !ok || d["Width"] != Integer(1) || d["ColorSpace"] != Name("G") {
+		t.Errorf("first image operands = %v, want its dictionary with full keys", bi.Operands)
+	}
+	if bi := spans[3]; string(in[bi.Start:bi.End]) != " BI /W 2 /H 1 /BPC 8 /CS /CS0 ID ab EI" {
+		t.Errorf("second image span = %q", in[bi.Start:bi.End])
+	}
+
+	// MaxOps: the scan stops before it materializes more operators.
+	if _, err := ScanContentStrict(ContentSegments{Data: in}, StrictOptions{InlineColorSpace: opts.InlineColorSpace, MaxOps: 6}); !errors.Is(err, ErrOpLimit) {
+		t.Errorf("MaxOps 6 (7 operators) err = %v, want ErrOpLimit", err)
+	}
+	if _, err := ScanContentStrict(ContentSegments{Data: in}, StrictOptions{InlineColorSpace: opts.InlineColorSpace, MaxOps: 7}); err != nil {
+		t.Errorf("MaxOps 7 (7 operators) err = %v, want nil", err)
 	}
 
 	// No inline image inside a text object (ISO 32000-1 Figure 9; S6).
@@ -389,14 +409,14 @@ func FuzzScanContentStrict(f *testing.F) {
 			c.Joins = []int{split}
 		}
 		st := &strictScan{opts: &StrictOptions{}, images: map[int]int{}}
-		ops, err := scanContent(c.Data, st)
+		ops, err := scanContent(c.Data, st, false)
 		for bi, end := range st.images {
 			if end < bi || end > len(c.Data) {
 				t.Fatalf("inline image after BI at %d ends at %d, outside [%d, %d]", bi, end, bi, len(c.Data))
 			}
 		}
 		if err == nil {
-			if want := ScanContentSpans(c.Data); !reflect.DeepEqual(ops, want) {
+			if want := ScanContentSpans(c.Data); !reflect.DeepEqual(withoutInlineImages(ops), want) {
 				t.Fatalf("strict spans %v differ from the lenient spans %v", ops, want)
 			}
 		}

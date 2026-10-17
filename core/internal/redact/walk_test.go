@@ -103,7 +103,7 @@ func analyze(t *testing.T, f fixture, tune func(*limits)) (*Page, *walker, error
 
 // reasonOf is a refusal's reason, "ok" for nil, "error" for anything else.
 func reasonOf(err error) Reason {
-	var re *RefusalError
+	var re *Refusal
 	switch {
 	case err == nil:
 		return "ok"
@@ -338,5 +338,24 @@ func TestInlineColorSpaceScopes(t *testing.T) {
 				t.Errorf("err = %v, want an inline-image loss", err)
 			}
 		})
+	}
+}
+
+// TestScopeIDExact: resource dictionaries share a scope id only when their
+// exact encodings are equal: 1 and 1.0, a name and a string, and different
+// references stay apart (batch C review round 5, FP).
+func TestScopeIDExact(t *testing.T) {
+	w := newWalker(nil)
+	d := func(v parse.Object) parse.Dict {
+		return parse.Dict{"XObject": parse.Dict{"Im": parse.Reference{Number: 6}}, "ExtGState": parse.Dict{"G": parse.Dict{"LW": v}}}
+	}
+	a, b := w.scopeID(d(parse.Integer(1))), w.scopeID(d(parse.Integer(1)))
+	if a != b {
+		t.Errorf("equal dictionaries got ids %d and %d", a, b)
+	}
+	for _, v := range []parse.Object{parse.Real(1), parse.Real(1.0000001), parse.Name("1"), parse.String{Value: []byte("1")}, parse.Reference{Number: 1}} {
+		if id := w.scopeID(d(v)); id == a {
+			t.Errorf("%#v shares the id of Integer 1", v)
+		}
 	}
 }

@@ -1,10 +1,15 @@
 package redact
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/thai-pc/fluxdocs/core/internal/fontmodel"
 	"github.com/thai-pc/fluxdocs/core/parse"
@@ -28,13 +33,13 @@ import (
 // decoding and operator visits are budgeted, and hitting a budget refuses.
 
 // Reason is a refusal reason code (docs/design/redaction-hardening.md §9 P1).
-//
-// Interim plumbing with no compatibility guarantee: step 1.8 replaces Reason
-// and RefusalError with core.RedactionError.
+// Core reports it as core.RedactionReason, with the same strings.
 type Reason string
 
-// The refusal reasons the walker reports.
+// The refusal reasons.
 const (
+	ReasonContentAmbiguous   Reason = "content_ambiguous"
+	ReasonInlineImage        Reason = "inline_image"
 	ReasonFormText           Reason = "form_text"
 	ReasonPatternText        Reason = "pattern_text"
 	ReasonSoftMaskText       Reason = "softmask_text"
@@ -43,22 +48,22 @@ const (
 	ReasonUnsupportedXObject Reason = "unsupported_xobject"
 )
 
-// RefusalError reports content that redaction cannot handle safely yet: a
-// route that shows text redaction does not rewrite, an XObject of an
-// unsupported subtype, or a page past a redaction budget. Detail describes
-// where, by route and object number, and never holds document text. A
-// form_text or unsupported_xobject refusal matches ErrFormXObjectText with
-// errors.Is.
-//
-// Interim plumbing with no compatibility guarantee: step 1.8 replaces it with
-// core.RedactionError (ErrFormXObjectText stays reachable one more release).
-type RefusalError struct {
+// Refusal reports content that redaction cannot handle safely: content the
+// strict scanner cannot read the way every reader does, a route that shows
+// text redaction does not rewrite, an XObject of an unsupported subtype, or a
+// page past a redaction budget. Detail describes where, by route, object
+// number and content offset, and never holds document text. Err is the
+// cause, when there is one: ErrFormXObjectText for form_text and
+// unsupported_xobject, the strict scanner's loss for content_ambiguous and
+// inline_image. Core reports a Refusal as a *core.RedactionError.
+type Refusal struct {
 	Reason Reason
 	Detail string
+	Err    error
 }
 
 // Error returns the detail and what is not supported.
-func (e *RefusalError) Error() string {
+func (e *Refusal) Error() string {
 	switch e.Reason {
 	case ReasonFormText, ReasonUnsupportedXObject:
 		return e.Detail + "; " + ErrFormXObjectText.Error()
@@ -72,20 +77,22 @@ func (e *RefusalError) Error() string {
 	return e.Detail
 }
 
-// Is reports whether target is ErrFormXObjectText for a form_text or
-// unsupported_xobject refusal (the error those refusals had before they had
-// reasons).
-func (e *RefusalError) Is(target error) bool {
-	return target == ErrFormXObjectText && (e.Reason == ReasonFormText || e.Reason == ReasonUnsupportedXObject)
-}
+// Unwrap returns the cause.
+func (e *Refusal) Unwrap() error { return e.Err }
 
 // Walk budgets per page call (§6.4). Hitting any of them is a refusal.
 const (
 	maxDecodedBytes = 512 << 20 // content decoded: page, forms, groups, cells, glyph procedures, font streams
-	maxOpVisits     = 64 << 20  // operators interpreted, plus one per memoized revisit
-	maxUnitDepth    = 12        // nesting of units below the page (render/form.go)
-	maxInvocations  = 4096      // form, soft-mask group and pattern invocations
-	maxGlyphProcs   = 1 << 20   // Type 3 glyph procedures walked
+	// maxOpVisits bounds the operators scanned and interpreted (two visits
+	// each: scanLimit), one per memoized revisit, and the characters a run's
+	// readings hold. Scans stop at what it can pay for, so it bounds the
+	// memory a hostile page costs too. It matches the renderer's default
+	// operator budget; the largest page of a 3,100-page corpus needs 0.56 Mi
+	// (docs/design/redaction-hardening.md, batch C notes, C27).
+	maxOpVisits    = 8 << 20
+	maxUnitDepth   = 12      // nesting of units below the page (render/form.go)
+	maxInvocations = 4096    // form, soft-mask group and pattern invocations
+	maxGlyphProcs  = 1 << 20 // Type 3 glyph procedures walked
 	// maxFontSet bounds the fonts a reader may have selected at once (see
 	// fontSet). Real files have one; each gs or Tf name bound differently by
 	// several scopes adds candidates, and every shown string is decoded once
@@ -129,6 +136,7 @@ type scope struct {
 	res    parse.Dict
 	parent *scope
 	key    string
+	id     int // scopeID of res (0 for the empty outermost scope)
 }
 
 // candidate is an object a scope binds a name to, with its object number (0
@@ -172,11 +180,36 @@ type walker struct {
 	budgetErr   error // a budget hit while decoding a font stream
 
 	content map[*parse.Stream][]byte // decoded unit content
-	memo    map[memoKey]error        // walk results
-	type3   map[string]error         // Type 3 font checks, by font and scope chain
-	path    map[*parse.Stream]bool   // units on the current invocation chain
-	fonts   map[uintptr]*fontmodel.Font
-	ids     map[uintptr]int // dictionary identity -> small id, for scope keys
+	cached  int64                    // bytes held in content
+	// cacheLimit, when positive, is the most content holds: past it a unit
+	// is decoded (and charged) again each time it is walked. unitDecoded
+	// counts every unit byte decoded.
+	cacheLimit  int64
+	unitDecoded int64
+	memo        map[memoKey]walkResult // walk results
+	type3       map[string]walkResult  // Type 3 font checks, by font and scope chain
+
+	// lenient selects the walk PaintedObjects does: content is read with the
+	// lenient scanner, text and unsupported XObjects are not refused, a unit
+	// that does not decode paints nothing, and tiling patterns count only
+	// when selected.
+	lenient bool
+
+	// uses collects the resource names looked up (in any scope) while it is
+	// set: the page's model sets it per operator so resource GC keeps exactly
+	// what the surviving operators, and the units they invoke, can use.
+	uses  useSet
+	path  map[*parse.Stream]bool // units on the current invocation chain
+	fonts map[uintptr]*fontmodel.Font
+	// ids maps a dictionary's identity to its scopeID. Identity is a safe
+	// key: the Resolver caches every object it parses for the document's
+	// lifetime, so an object always resolves to the same map.
+	ids map[uintptr]int
+	// fingerprints maps the SHA-256 of a resource dictionary's exact
+	// encoding (exactEncoding) to the dictionaries with that hash and their
+	// scopeIDs; a hit is confirmed by comparing the encodings in full.
+	fingerprints map[[sha256.Size]byte][]fingerprint
+	nextScopeID  int
 
 	// glyphWX is the d0/d1 width (wx, glyph space) each Type 3 glyph
 	// procedure sets; type3Adv is, per Type 3 font, the hull of 0 and its
@@ -192,20 +225,195 @@ func newWalker(r *parse.Resolver) *walker {
 		r:       r,
 		lim:     defaultLimits,
 		content: map[*parse.Stream][]byte{},
-		memo:    map[memoKey]error{},
-		type3:   map[string]error{},
+		memo:    map[memoKey]walkResult{},
+		type3:   map[string]walkResult{},
 		path:    map[*parse.Stream]bool{},
 		fonts:   map[uintptr]*fontmodel.Font{},
 		ids:     map[uintptr]int{},
+
+		fingerprints: map[[sha256.Size]byte][]fingerprint{},
 
 		glyphWX:  map[*parse.Stream]float64{},
 		type3Adv: map[uintptr]iv{},
 	}
 }
 
-// refuse returns a refusal.
+// resKey is a name of a category of /Resources (/Font, /XObject, …) as the
+// scope with id scope binds it: the conforming binding of a lookup, which
+// resource GC keeps when scope is the page's own resources.
+type resKey struct {
+	scope     int
+	cat, name parse.Name
+}
+
+// objNum is an indirect object some candidate binding of a lookup reached (a
+// resource value, or a reference inside a direct one): what removed content
+// may have painted (the D side of the deny list).
+type objNum int
+
+// confObj is an indirect object the conforming binding of a lookup reached —
+// the innermost scope that defines the name, as ISO 32000-1 readers resolve
+// it and falling-back readers do when the inner scopes lack it: what kept
+// content paints (Output.Used, Painter; the P side).
+type confObj int
+
+// useSet is a set of resource names (resKey) and objects (objNum, confObj)
+// looked up.
+type useSet map[any]struct{}
+
+// add adds every element of t to s.
+func (s useSet) add(t useSet) {
+	for k := range t {
+		s[k] = struct{}{}
+	}
+}
+
+// objects returns the objects any candidate binding reached (objNum).
+func (s useSet) objects() []int {
+	var out []int
+	for k := range s {
+		if n, ok := k.(objNum); ok {
+			out = append(out, int(n))
+		}
+	}
+	return out
+}
+
+// conforming returns the objects conforming bindings reached (confObj).
+func (s useSet) conforming() []int {
+	var out []int
+	for k := range s {
+		if n, ok := k.(confObj); ok {
+			out = append(out, int(n))
+		}
+	}
+	return out
+}
+
+// walkResult is a memoized walk: its error and the resources it looked up.
+type walkResult struct {
+	err  error
+	uses useSet
+}
+
+// use records the binding raw of name in category by the scope s: every
+// binding as reachable (objNum); the conforming one (conforming set) also as
+// the name resource GC keeps in that scope (resKey) and as a kept object
+// (confObj).
+func (w *walker) use(s *scope, category, name parse.Name, raw parse.Object, conforming bool) {
+	if w.uses == nil {
+		return
+	}
+	addRefs(w.uses, raw, 0, func(n int) any { return objNum(n) })
+	if conforming {
+		w.uses[resKey{s.id, category, name}] = struct{}{}
+		addRefs(w.uses, raw, 0, func(n int) any { return confObj(n) })
+	}
+}
+
+// addRefs adds key(n) for every reference n in o, at any depth up to a
+// bound, to s.
+func addRefs(s useSet, o parse.Object, depth int, key func(int) any) {
+	if depth > 32 {
+		return
+	}
+	switch v := o.(type) {
+	case parse.Reference:
+		s[key(v.Number)] = struct{}{}
+	case parse.Array:
+		for _, e := range v {
+			addRefs(s, e, depth+1, key)
+		}
+	case parse.Dict:
+		for _, e := range v {
+			addRefs(s, e, depth+1, key)
+		}
+	case *parse.Stream:
+		addRefs(s, v.Dict, depth+1, key)
+	}
+}
+
+// note records a lookup of name in category without walking what it binds:
+// the names and objects scopes bind, for resource GC and the D5 deny set. A
+// resolve error is ignored: the operator paints nothing then.
+func (w *walker) note(sc *scope, category, name parse.Name) {
+	_, _ = w.lookup(sc, category, name)
+}
+
+// collect runs f with a fresh collector and returns what f looked up; the
+// lookups are also added to the enclosing collector.
+func (w *walker) collect(f func() error) walkResult {
+	outer := w.uses
+	w.uses = useSet{}
+	err := f()
+	r := walkResult{err: err, uses: w.uses}
+	w.uses = outer
+	w.replay(r)
+	return r
+}
+
+// replay adds a memoized walk's lookups to the current collector.
+func (w *walker) replay(r walkResult) {
+	if w.uses != nil {
+		w.uses.add(r.uses)
+	}
+}
+
+// refuse returns a refusal; form_text and unsupported_xobject refusals wrap
+// ErrFormXObjectText.
 func refuse(reason Reason, format string, args ...any) error {
-	return &RefusalError{Reason: reason, Detail: fmt.Sprintf(format, args...)}
+	r := &Refusal{Reason: reason, Detail: fmt.Sprintf(format, args...)}
+	if reason == ReasonFormText || reason == ReasonUnsupportedXObject {
+		r.Err = ErrFormXObjectText
+	}
+	return r
+}
+
+// scanRefusal is the refusal for a strict-scan error in the named unit:
+// budget_exceeded past the operator budget, inline_image for an inline image
+// some reader could read differently, content_ambiguous otherwise. The scan
+// error's message holds no document bytes.
+func scanRefusal(unit string, err error) error {
+	switch {
+	case errors.Is(err, parse.ErrOpLimit):
+		return budget("operator")
+	}
+	// The detail is the loss without the parser's own prefix.
+	detail := unit + ": " + strings.TrimPrefix(err.Error(), "parse: lexer error: ")
+	if errors.Is(err, parse.ErrInlineImageLoss) {
+		return &Refusal{Reason: ReasonInlineImage, Detail: detail, Err: err}
+	}
+	return &Refusal{Reason: ReasonContentAmbiguous, Detail: detail, Err: err}
+}
+
+// scanLimit is the most operators a strict scan may return
+// (StrictOptions.MaxOps): what the operator budget can still pay for, at two
+// visits per operator — one to scan it (a materialized span costs memory), one
+// to interpret it. At least 1.
+func (w *walker) scanLimit() int {
+	return int(max((w.lim.ops-w.ops)/2, 1))
+}
+
+// strictScan scans content strictly within the operator budget and charges
+// one visit per operator returned (interpreting them charges another).
+// Returns the spans, or the scan's refusal for the named unit.
+func (w *walker) strictScan(unit string, content parse.ContentSegments, sc *scope) ([]parse.ContentOpSpan, error) {
+	if w.lenient {
+		spans := parse.ScanContentSpansWithInlineImages(content.Data)
+		if err := w.visit(int64(len(spans))); err != nil {
+			return nil, err
+		}
+		return spans, nil
+	}
+	spans, err := parse.ScanContentStrict(content,
+		parse.StrictOptions{InlineColorSpace: w.colorSpaces(sc), MaxOps: w.scanLimit()})
+	if err != nil {
+		return nil, scanRefusal(unit, err)
+	}
+	if err := w.visit(int64(len(spans))); err != nil {
+		return nil, err
+	}
+	return spans, nil
 }
 
 // budget returns a budget refusal.
@@ -250,7 +458,12 @@ func (w *walker) decode(st *parse.Stream) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	w.unitDecoded += int64(len(data))
+	if w.cacheLimit > 0 && w.cached+int64(len(data)) > w.cacheLimit {
+		return data, nil
+	}
 	w.content[st] = data
+	w.cached += int64(len(data))
 	return data, nil
 }
 
@@ -258,7 +471,7 @@ func (w *walker) decode(st *parse.Stream) ([]byte, error) {
 // the decode budget too. A budget hit is kept, and the page is refused.
 func (w *walker) decodeFont(st *parse.Stream) ([]byte, error) {
 	data, err := w.decode(st)
-	var re *RefusalError
+	var re *Refusal
 	if errors.As(err, &re) && w.budgetErr == nil {
 		w.budgetErr = err
 	}
@@ -283,8 +496,9 @@ func (w *walker) font(obj parse.Object) *fontmodel.Font {
 	return f
 }
 
-// dictID is a dictionary's identity. The Resolver caches parsed objects, so
-// one object always resolves to the same map.
+// dictID is a dictionary's identity. It is a safe key because the Resolver
+// caches every object it parses for the document's lifetime: one object
+// always resolves to the same map, and a map is never reused for another.
 func dictID(d parse.Dict) uintptr { return reflect.ValueOf(d).Pointer() }
 
 // child returns the scope of a unit whose own /Resources is res (resolved),
@@ -293,12 +507,118 @@ func (w *walker) child(sc *scope, res parse.Dict, tag string) *scope {
 	if res == nil {
 		return sc
 	}
-	id, ok := w.ids[dictID(res)]
-	if !ok {
-		id = len(w.ids) + 1
-		w.ids[dictID(res)] = id
+	id := w.scopeID(res)
+	return &scope{res: res, parent: sc, key: sc.key + ">" + tag + strconv.Itoa(id), id: id}
+}
+
+// scopeID is a small id for a resource dictionary that is equal for
+// dictionaries with equal contents (references compared as references): a
+// unit walked in one page's resources is then memoized for another page whose
+// own resource dictionary holds the same bindings (SF-1). Contents are
+// fingerprinted once per dictionary object.
+func (w *walker) scopeID(d parse.Dict) int {
+	if id, ok := w.ids[dictID(d)]; ok {
+		return id
 	}
-	return &scope{res: res, parent: sc, key: sc.key + ">" + tag + strconv.Itoa(id)}
+	w.nextScopeID++
+	id := w.nextScopeID
+	enc, ok := exactEncoding(d)
+	if !ok {
+		w.ids[dictID(d)] = id // too deep to compare: an id of its own
+		return id
+	}
+	h := sha256.Sum256(enc)
+	for _, f := range w.fingerprints[h] {
+		if other, _ := exactEncoding(f.dict); bytes.Equal(other, enc) {
+			w.nextScopeID--
+			w.ids[dictID(d)] = f.id
+			return f.id
+		}
+	}
+	w.fingerprints[h] = append(w.fingerprints[h], fingerprint{dict: d, id: id})
+	w.ids[dictID(d)] = id
+	return id
+}
+
+// fingerprint is a resource dictionary with its scopeID; its encoding is
+// recomputed on a hash hit rather than kept.
+type fingerprint struct {
+	dict parse.Dict
+	id   int
+}
+
+// exactEncoding encodes o so that two values encode equally exactly when
+// they bind the same objects: every value type-tagged, integers and reals
+// apart (1 is not 1.0) and reals by their bits, strings and names by their
+// bytes, references by number and generation, dictionary keys sorted. It
+// reports false past a nesting bound (the value then compares unequal to all).
+func exactEncoding(o parse.Object) ([]byte, bool) {
+	var b bytes.Buffer
+	ok := encodeExact(&b, o, 0)
+	return b.Bytes(), ok
+}
+
+func encodeExact(b *bytes.Buffer, o parse.Object, depth int) bool {
+	if depth > 64 {
+		return false
+	}
+	bytesOf := func(tag byte, v []byte) {
+		b.WriteByte(tag)
+		b.WriteString(strconv.Itoa(len(v)))
+		b.WriteByte(':')
+		b.Write(v)
+	}
+	switch v := o.(type) {
+	case nil, parse.Null:
+		b.WriteByte('z')
+	case parse.Boolean:
+		if v {
+			b.WriteString("b1")
+		} else {
+			b.WriteString("b0")
+		}
+	case parse.Integer:
+		b.WriteString("i" + strconv.FormatInt(int64(v), 10) + ";")
+	case parse.Real:
+		b.WriteString("r" + strconv.FormatUint(math.Float64bits(float64(v)), 16) + ";")
+	case parse.Name:
+		bytesOf('n', []byte(v))
+	case parse.String:
+		bytesOf('s', v.Value)
+	case parse.Reference:
+		b.WriteString("R" + strconv.Itoa(v.Number) + "," + strconv.Itoa(v.Generation) + ";")
+	case parse.Array:
+		b.WriteByte('[')
+		for _, e := range v {
+			if !encodeExact(b, e, depth+1) {
+				return false
+			}
+		}
+		b.WriteByte(']')
+	case parse.Dict:
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, string(k))
+		}
+		sort.Strings(keys)
+		b.WriteByte('<')
+		for _, k := range keys {
+			bytesOf('n', []byte(k))
+			if !encodeExact(b, v[parse.Name(k)], depth+1) {
+				return false
+			}
+		}
+		b.WriteByte('>')
+	case *parse.Stream:
+		b.WriteByte('S')
+		if !encodeExact(b, v.Dict, depth+1) {
+			return false
+		}
+		bytesOf('d', v.Raw)
+	default:
+		return false
+	}
+	return true
 }
 
 // resolveDict resolves obj to a dictionary (nil when it is not one).
@@ -326,6 +646,7 @@ func (w *walker) resolve(obj parse.Object) (parse.Object, error) {
 func (w *walker) lookup(sc *scope, category, name parse.Name) ([]candidate, error) {
 	var out []candidate
 	seen := map[any]bool{}
+	found := false
 	for s := sc; s != nil; s = s.parent {
 		if s.res == nil {
 			continue
@@ -338,6 +659,8 @@ func (w *walker) lookup(sc *scope, category, name parse.Name) ([]candidate, erro
 		if !ok {
 			continue
 		}
+		w.use(s, category, name, raw, !found) // the innermost binding conforms
+		found = true
 		obj, err := w.resolve(raw)
 		if err != nil {
 			return nil, err
@@ -386,6 +709,9 @@ func (w *walker) colorSpaces(sc *scope) func(parse.Name) (parse.Object, bool) {
 				return nil, false
 			}
 			raw, ok := sub[name]
+			if ok {
+				w.use(s, "ColorSpace", name, raw, true)
+			}
 			if !ok {
 				if abbr {
 					continue
@@ -468,10 +794,16 @@ func (w *walker) pageScope(pi parse.PageInfo) *scope {
 		}
 	}
 	// Link innermost first. Child scope keys extend the innermost key; the
-	// chain is the same for every unit of the page.
-	sc := &scope{key: "p"}
+	// chain is the same for every unit of the page. The key names the chain's
+	// dictionaries, so a walker shared by several pages (Painter) memoizes a
+	// unit walked in one page's scopes apart from another's.
+	key := "p"
+	for _, d := range chain {
+		key += "," + strconv.Itoa(w.scopeID(d))
+	}
+	sc := &scope{key: key}
 	for i := len(chain) - 1; i >= 0; i-- {
-		sc = &scope{res: chain[i], parent: sc, key: "p"}
+		sc = &scope{res: chain[i], parent: sc, key: key, id: w.scopeID(chain[i])}
 	}
 	return sc
 }
@@ -519,31 +851,34 @@ func (w *walker) walkUnit(st *parse.Stream, num int, kind unitKind, sc *scope, d
 	}
 	usc := w.child(sc, res, "u")
 	key := memoKey{st: st, kind: kind, scope: usc.key}
-	if err, ok := w.memo[key]; ok {
+	if r, ok := w.memo[key]; ok {
 		if verr := w.visit(1); verr != nil {
 			return verr
 		}
-		return err
+		w.replay(r)
+		return r.err
 	}
-	err = w.scanUnit(st, num, kind, usc, res != nil, depth)
-	w.memo[key] = err
-	return err
+	r := w.collect(func() error { return w.scanUnit(st, num, kind, usc, res != nil, depth) })
+	w.memo[key] = r
+	return r.err
 }
 
 // scanUnit decodes, strictly scans and checks one child unit.
 func (w *walker) scanUnit(st *parse.Stream, num int, kind unitKind, sc *scope, ownRes bool, depth int) error {
 	data, err := w.decode(st)
 	if err != nil {
-		var re *RefusalError
+		var re *Refusal
 		if errors.As(err, &re) {
 			return err
 		}
+		if w.lenient {
+			return nil // like the renderer: a unit that does not decode paints nothing
+		}
 		return fmt.Errorf("%s: %w", unitName(kind, num), err)
 	}
-	spans, err := parse.ScanContentStrict(parse.ContentSegments{Data: data},
-		parse.StrictOptions{InlineColorSpace: w.colorSpaces(sc)})
+	spans, err := w.strictScan(unitName(kind, num), parse.ContentSegments{Data: data}, sc)
 	if err != nil {
-		return fmt.Errorf("%s: %w", unitName(kind, num), err)
+		return err
 	}
 	w.path[st] = true
 	defer delete(w.path, st)
@@ -563,6 +898,9 @@ func unitName(kind unitKind, num int) string {
 // selected or not (§6.3: a reader's colour-space tracking may differ from
 // ours, so reachability rather than selection decides).
 func (w *walker) reachPatterns(sc *scope, kind unitKind, ownRes bool, depth int) error {
+	if w.lenient {
+		return nil // PaintedObjects counts only the patterns content selects
+	}
 	for _, res := range ownScopes(sc, kind, ownRes) {
 		pats, err := w.resolveDict(res["Pattern"])
 		if err != nil {
@@ -621,6 +959,9 @@ func (w *walker) xobject(c candidate, sc *scope, depth int) (image bool, err err
 		return true, nil
 	case isName && name == "Form":
 	case isName:
+		if w.lenient {
+			return false, nil
+		}
 		return false, refuse(ReasonUnsupportedXObject, "draws an XObject (object %d) of an unsupported subtype", c.num)
 	default:
 		_, hasW := st.Dict["Width"]
@@ -633,26 +974,95 @@ func (w *walker) xobject(c candidate, sc *scope, depth int) (image bool, err err
 	return false, w.walkUnit(st, c.num, unitForm, sc, depth)
 }
 
+// xobjectBox is the page-space box an XObject candidate of a Do paints under
+// ctm (§6.10): the unit square for an image (§8.9.5), the form's /BBox
+// through its /Matrix for a form (§8.10.1). A form whose /BBox or /Matrix
+// cannot be read is unbounded; a candidate that is not a stream paints
+// nothing.
+func (w *walker) xobjectBox(c candidate, image bool, ctm matrix) box4 {
+	st, ok := c.obj.(*parse.Stream)
+	if !ok {
+		return emptyBox4()
+	}
+	if image {
+		return placeBox(ctm, 0, 0, 1, 1)
+	}
+	bbox, ok := w.numbers(st.Dict["BBox"], 4)
+	if !ok {
+		return box4{unbounded: true}
+	}
+	m := identity()
+	if raw, has := st.Dict["Matrix"]; has {
+		vals, ok := w.numbers(raw, 6)
+		if !ok {
+			return box4{unbounded: true}
+		}
+		m = matrix(vals)
+	}
+	return placeBox(m.mul(ctm), min(bbox[0], bbox[2]), min(bbox[1], bbox[3]), max(bbox[0], bbox[2]), max(bbox[1], bbox[3]))
+}
+
+// numbers resolves obj to an array of exactly n numbers.
+func (w *walker) numbers(obj parse.Object, n int) ([]float64, bool) {
+	v, err := w.resolve(obj)
+	if err != nil {
+		return nil, false
+	}
+	arr, ok := v.(parse.Array)
+	if !ok || len(arr) != n {
+		return nil, false
+	}
+	out := make([]float64, n)
+	for i, e := range arr {
+		ev, err := w.resolve(e)
+		if err != nil {
+			return nil, false
+		}
+		switch x := ev.(type) {
+		case parse.Integer:
+			out[i] = float64(x)
+		case parse.Real:
+			out[i] = float64(x)
+		default:
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+// extGSParams are the parameters an ExtGState sets that the text model and
+// the D5 geometry track: the font and size (§8.4.5, Table 58, N6), the line
+// width /LW and miter limit /ML. A parameter present with a value that is not
+// a number is +Inf (a reader may apply anything).
+type extGSParams struct {
+	font         parse.Object
+	size         float64
+	hasFont      bool
+	lw, ml       float64
+	hasLW, hasML bool
+}
+
 // extGState handles a gs of the candidate c: a soft mask's transparency group
-// (/SMask /G, §11.6.5.2) is walked, and a /Font entry (§8.4.5, Table 58) is
-// returned so the caller can select it; a Type 3 font is checked.
-func (w *walker) extGState(c candidate, sc *scope, depth int) (font parse.Object, size float64, hasFont bool, err error) {
+// (/SMask /G, §11.6.5.2) is walked, a Type 3 /Font is checked, and the
+// parameters the caller tracks are returned.
+func (w *walker) extGState(c candidate, sc *scope, depth int) (extGSParams, error) {
+	var out extGSParams
 	d, ok := c.obj.(parse.Dict)
 	if !ok {
 		if st, isStream := c.obj.(*parse.Stream); isStream {
 			d = st.Dict
 		} else {
-			return nil, 0, false, nil
+			return out, nil
 		}
 	}
 	smask, err := w.resolveDict(d["SMask"])
 	if err != nil {
-		return nil, 0, false, err
+		return out, err
 	}
 	if smask != nil {
 		g, err := w.resolve(smask["G"])
 		if err != nil {
-			return nil, 0, false, err
+			return out, err
 		}
 		if st, ok := g.(*parse.Stream); ok {
 			num := 0
@@ -660,25 +1070,46 @@ func (w *walker) extGState(c candidate, sc *scope, depth int) (font parse.Object
 				num = ref.Number
 			}
 			if err := w.walkUnit(st, num, unitSoftMask, sc, depth); err != nil {
-				return nil, 0, false, err
+				return out, err
 			}
+		}
+	}
+	for _, p := range []struct {
+		key parse.Name
+		v   *float64
+		has *bool
+	}{{"LW", &out.lw, &out.hasLW}, {"ML", &out.ml, &out.hasML}} {
+		raw, ok := d[p.key]
+		if !ok {
+			continue
+		}
+		v, err := w.resolve(raw)
+		if err != nil {
+			return out, err
+		}
+		*p.has = true
+		switch n := v.(type) {
+		case parse.Integer, parse.Real:
+			*p.v = math.Abs(num(n))
+		default:
+			*p.v = math.Inf(1)
 		}
 	}
 	fobj, err := w.resolve(d["Font"])
 	if err != nil {
-		return nil, 0, false, err
+		return out, err
 	}
 	if arr, ok := fobj.(parse.Array); ok && len(arr) == 2 {
 		szObj, err := w.resolve(arr[1])
 		if err != nil {
-			return nil, 0, false, err
+			return out, err
 		}
 		if err := w.checkFont(arr[0], sc, depth); err != nil {
-			return nil, 0, false, err
+			return out, err
 		}
-		return arr[0], num(szObj), true, nil
+		out.font, out.size, out.hasFont = arr[0], num(szObj), true
 	}
-	return nil, 0, false, nil
+	return out, nil
 }
 
 // checkFont checks a font selected by Tf or gs /Font: a Type 3 font's glyph
@@ -697,15 +1128,16 @@ func (w *walker) checkFont(obj parse.Object, sc *scope, depth int) error {
 	}
 	fsc := w.child(sc, res, "f")
 	key := strconv.FormatUint(uint64(dictID(fd)), 16) + "@" + fsc.key
-	if err, ok := w.type3[key]; ok {
-		return err
+	if r, ok := w.type3[key]; ok {
+		w.replay(r)
+		return r.err
 	}
-	err = w.checkCharProcs(fd, fsc, depth)
-	w.type3[key] = err
-	if err == nil {
+	r := w.collect(func() error { return w.checkCharProcs(fd, fsc, depth) })
+	w.type3[key] = r
+	if r.err == nil {
 		w.noteType3Advance(f)
 	}
-	return err
+	return r.err
 }
 
 // noteType3Advance records the hull of 0 and the d0/d1 widths of a Type 3

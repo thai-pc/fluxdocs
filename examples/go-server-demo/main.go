@@ -130,6 +130,23 @@ func handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	w.Write(img)
 }
 
+// redactionRefused answers a redaction the core refused as unsafe
+// (core.ErrRedactionUnsupported) with 422 and its reason code, and reports
+// whether it did. Redaction fails closed on content other viewers could read
+// differently; the error never holds document text.
+func redactionRefused(w http.ResponseWriter, err error) bool {
+	var re *core.RedactionError
+	if !errors.As(err, &re) {
+		return false
+	}
+	where := fmt.Sprintf("on page %d", re.Page)
+	if re.Page < 0 {
+		where = "for the document"
+	}
+	http.Error(w, fmt.Sprintf("redaction refused %s: %s", where, re.Reason), http.StatusUnprocessableEntity)
+	return true
+}
+
 // handleRedact removes text matching ?pattern from every page and returns the
 // redacted PDF.
 func handleRedact(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +162,17 @@ func handleRedact(w http.ResponseWriter, r *http.Request) {
 	defer doc.Close()
 	for p := 0; p < doc.PageCount; p++ {
 		if _, err := doc.RedactText(p, pattern); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			if !redactionRefused(w, err) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			}
 			return
 		}
 	}
 	redacted, err := doc.RedactAndFlatten()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if !redactionRefused(w, err) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")

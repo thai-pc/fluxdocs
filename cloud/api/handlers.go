@@ -83,12 +83,16 @@ func (s *Server) redactPII(w http.ResponseWriter, r *http.Request) {
 
 	counts, err := doc.AutoRedactPII(core.PIIKindsFromStrings(body.Kinds)...)
 	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "could not scan for PII")
+		if !writeRedactionUnsupported(w, err) {
+			writeError(w, http.StatusUnprocessableEntity, "could not scan for PII")
+		}
 		return
 	}
 	out, err := doc.RedactAndFlatten()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "redaction failed")
+		if !writeRedactionUnsupported(w, err) {
+			writeError(w, http.StatusInternalServerError, "redaction failed")
+		}
 		return
 	}
 	raw, err := out.Bytes() // leak-free verbatim output
@@ -106,6 +110,26 @@ func (s *Server) redactPII(w http.ResponseWriter, r *http.Request) {
 		byKind[string(k)] = n
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "redacted": byKind})
+}
+
+// writeRedactionUnsupported answers a redaction the core refused as unsafe
+// (core.ErrRedactionUnsupported: content other readers could read
+// differently, text in a route redaction does not rewrite yet, a budget) with
+// 422 {"error": "redaction_unsupported", "reason": …, "page": …}, and reports
+// whether err was such a refusal. page is the 0-based page index, or -1 when
+// the refusal concerns the document as a whole. The reason
+// and page carry no document text.
+func writeRedactionUnsupported(w http.ResponseWriter, err error) bool {
+	var re *core.RedactionError
+	if !errors.As(err, &re) {
+		return false
+	}
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+		"error":  "redaction_unsupported",
+		"reason": string(re.Reason),
+		"page":   re.Page,
+	})
+	return true
 }
 
 // extractStructured runs AI structured extraction. It is 501 until an AI backend

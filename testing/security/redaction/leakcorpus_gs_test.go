@@ -4,6 +4,8 @@ package redaction
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,4 +43,34 @@ func gsText(t *testing.T, pdf []byte) (string, bool) {
 		t.Fatalf("gs txtwrite: %v", err)
 	}
 	return string(out), true
+}
+
+// gsRender returns a hash of Ghostscript's 36 DPI rendering of each page of
+// pdf, and false when gs is not installed.
+func gsRender(t *testing.T, pdf []byte) ([]string, bool) {
+	t.Helper()
+	if gsPath == "" {
+		return nil, false
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "in.pdf")
+	if err := os.WriteFile(path, pdf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gsPath, "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-r36",
+		"-sDEVICE=png16m", "-sOutputFile="+filepath.Join(dir, "p%03d.png"), path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gs png16m: %v: %s", err, out)
+	}
+	var hashes []string
+	for i := 1; ; i++ {
+		b, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("p%03d.png", i)))
+		if err != nil {
+			break
+		}
+		hashes = append(hashes, fmt.Sprintf("%x", sha256.Sum256(b)))
+	}
+	return hashes, true
 }

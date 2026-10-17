@@ -73,10 +73,13 @@ func TestRunBoxesWithMetrics(t *testing.T) {
 	res := "<< /Font << /W 6 0 R /V 7 0 R /T3 9 0 R >> >>"
 	extra := map[int]string{
 		// 'W' is 3 em wide by /Widths; 'i' 0.25 em.
-		6: "<< /Type /Font /Subtype /TrueType /BaseFont /X /FirstChar 87 /LastChar 105 /Widths [3000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 250] >>",
-		7: "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-V /DescendantFonts [8 0 R] >>",
-		8: "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X >>",
-		9: "<< /Type /Font /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << >> >>",
+		// Embedded (/FontFile2), so no substitute's ink widens it.
+		6:  "<< /Type /Font /Subtype /TrueType /BaseFont /X /FirstChar 87 /LastChar 105 /Widths [3000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 250] /FontDescriptor 10 0 R >>",
+		10: "<< /FontFile2 11 0 R >>",
+		11: stm("", "x"),
+		7:  "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-V /DescendantFonts [8 0 R] >>",
+		8:  "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X >>",
+		9:  "<< /Type /Font /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << >> >>",
 	}
 	runs := runsOf(t, fixture{content: "BT /W 10 Tf 0 700 Td (WW) Tj (i) Tj ET " +
 		"BT /V 10 Tf 200 400 Td <000100020003> Tj ET " +
@@ -181,10 +184,11 @@ func TestMatch(t *testing.T) {
 			if tc.matches == 0 {
 				return
 			}
-			out, _, err := p.Rewrite(nil, nil, m.Marks)
+			res, err := p.Rewrite(nil, nil, m.Marks)
 			if err != nil {
 				t.Fatal(err)
 			}
+			out := res.Content
 			if !strings.Contains(string(out), "BT") || strings.Contains(string(out), "Tj") || strings.Contains(string(out), "TJ") {
 				t.Errorf("matched operator not removed by its mark alone: %q", out)
 			}
@@ -215,7 +219,9 @@ func TestPropertyListMatch(t *testing.T) {
 			"", nil, 3, 1, "(b)", "keep", false},
 		{"named /Properties", "/Span /MC0 BDC BT (XXX) Tj ET EMC", "<< /Properties << /MC0 6 0 R >> >>",
 			map[int]string{6: "<< /ActualText (SECRET-1234) /Lang (en) >>"}, 2, 1, "XXX", "/MC0", true},
-		{"no match leaves the page alone", "/Span << /ActualText (public) >> BDC BT (x) Tj ET EMC", "", nil, 0, 0, "", "public", false},
+		// No match marks nothing; once the page is redacted for another
+		// reason, D7 strips every text key anyway.
+		{"no match marks nothing", "/Span << /ActualText (public) >> BDC BT (x) Tj ET EMC", "", nil, 0, 0, "public", "/Span", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _, err := analyze(t, fixture{content: tc.content, res: tc.res, extra: tc.extra}, nil)
@@ -226,10 +232,11 @@ func TestPropertyListMatch(t *testing.T) {
 			if len(m.Marks) != tc.marks || len(m.Rects) != tc.rects {
 				t.Fatalf("%d marks, %d rects; want %d, %d", len(m.Marks), len(m.Rects), tc.marks, tc.rects)
 			}
-			out, res, err := p.Rewrite(nil, nil, m.Marks)
+			rw, err := p.Rewrite(nil, nil, m.Marks)
 			if err != nil {
 				t.Fatal(err)
 			}
+			out, res := rw.Content, rw.Resources
 			if tc.gone != "" && strings.Contains(string(out), tc.gone) {
 				t.Errorf("%q survives: %q", tc.gone, out)
 			}
@@ -246,8 +253,6 @@ func TestPropertyListMatch(t *testing.T) {
 				if s := string(parse.SerializeObject(res)); strings.Contains(s, "SECRET") || !strings.Contains(s, "/Lang") {
 					t.Errorf("resources %s: want /ActualText stripped and /Lang kept", s)
 				}
-			} else if res != nil {
-				t.Errorf("resources replaced for an inline strip: %v", res)
 			}
 		})
 	}
@@ -258,10 +263,10 @@ func TestRewriteRejectsForeignMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := p.Rewrite(nil, nil, []Mark{{start: 1, end: 2}}); err == nil {
+	if _, err := p.Rewrite(nil, nil, []Mark{{start: 1, end: 2}}); err == nil {
 		t.Error("Rewrite accepted a mark naming no operator")
 	}
-	if _, _, err := p.Rewrite(nil, nil, []Mark{{start: 3, end: 10, strip: "Alt"}}); err == nil {
+	if _, err := p.Rewrite(nil, nil, []Mark{{start: 3, end: 10, strip: "Alt"}}); err == nil {
 		t.Error("Rewrite accepted a strip naming no property list")
 	}
 }
@@ -282,7 +287,7 @@ func TestTextString(t *testing.T) {
 }
 
 func TestRewriteNormalizesRects(t *testing.T) {
-	out, err := RedactContent([]byte("BT /F1 12 Tf 100 700 Td (SECRET) Tj ET"), []Rect{{X: 200, Y: 720, Width: -150, Height: -40}})
+	out, err := redactContent([]byte("BT /F1 12 Tf 100 700 Td (SECRET) Tj ET"), []Rect{{X: 200, Y: 720, Width: -150, Height: -40}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,10 +303,11 @@ func TestRewriteQuoteOperatorsKeepLineMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := p.Match(regexp.MustCompile("SECRET"))
-	out, _, err := p.Rewrite(nil, nil, m.Marks)
+	rw, err := p.Rewrite(nil, nil, m.Marks)
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := rw.Content
 	want := "BT /F1 24 Tf 30 TL 72 700 Td (keep1) Tj 0.5 Tw -1.25 Tc T*  T*  (keep2) Tj ET"
 	if string(out) != want {
 		t.Errorf("rewritten\n%q, want\n%q", out, want)
@@ -338,10 +344,11 @@ func TestMatchRectsAreDisplayBoxes(t *testing.T) {
 	if box := p.runs[1].box; box[3] < 686.2+12 {
 		t.Errorf("removal box %v ignores the /FontBBox", box)
 	}
-	out, _, err := p.Rewrite(nil, m.Rects, m.Marks)
+	rw, err := p.Rewrite(nil, m.Rects, m.Marks)
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := rw.Content
 	if !strings.Contains(string(out), "(above)") || !strings.Contains(string(out), "(below)") {
 		t.Errorf("neighbouring lines removed: %q", out)
 	}
@@ -370,14 +377,14 @@ func TestRewriteRejectsMarksOfAnotherPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := p0.Match(regexp.MustCompile("SECRET"))
-	if _, _, err := p1.Rewrite(nil, nil, m.Marks); !errors.Is(err, ErrMarkMismatch) {
+	if _, err := p1.Rewrite(nil, nil, m.Marks); !errors.Is(err, ErrMarkMismatch) {
 		t.Errorf("page 0's marks on page 1: %v, want ErrMarkMismatch", err)
 	}
 	again, err := AnalyzePage(r, pages[0], seg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := again.Rewrite(nil, nil, m.Marks); err != nil {
+	if _, err := again.Rewrite(nil, nil, m.Marks); err != nil {
 		t.Errorf("marks on the same page analysed again: %v", err)
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"math"
 	"regexp"
 
-	"github.com/thai-pc/fluxdocs/core/docops/redact"
+	"github.com/thai-pc/fluxdocs/core/internal/redact"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
@@ -34,14 +34,14 @@ import (
 //
 // Returns ErrPageNotFound if pageIndex is out of range, ErrInvalidPDF if the
 // document was not opened from bytes, or a regexp compile error — argument
-// errors that leave the plan untouched. Any later failure (reading the page,
-// ErrInternal, ErrInvalidPDF for page content the strict scanner cannot read —
-// operands it would discard or that a viewer could pair differently, which
-// could hide matching text — or a *redact.RefusalError if the page paints text
-// through a Form XObject (matching redact.ErrFormXObjectText), a tiling
-// pattern, a soft-mask group or a Type 3 glyph procedure, or exceeds a
-// redaction budget) also marks the plan incomplete, so RedactAndFlatten
-// refuses to run rather than save the page without the text asked for.
+// errors that leave the plan untouched. Any later failure also marks the plan
+// incomplete, so RedactAndFlatten refuses to run rather than save the page
+// without the text asked for: a *RedactionError (matching
+// ErrRedactionUnsupported) for a page that cannot be redacted safely — content
+// other readers could read differently, which could hide matching text, text
+// shown through a form XObject, tiling pattern, soft-mask group or Type 3
+// glyph procedure, or a redaction budget exceeded; ErrInvalidPDF (wrapped)
+// for page content that cannot be decoded; or ErrInternal.
 func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err error) {
 	accepted := false
 	// Deferred before guard so it runs after guard has turned a panic into err.
@@ -94,9 +94,17 @@ func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err erro
 }
 
 // RedactArea marks a region (in PDF user space) on a page for redaction. A
-// rect with a negative width or height is normalized (flipped) first. Every
-// text-showing operator whose box meets the region — touching its edge, or
-// collapsed to a point inside it, counts — is removed by RedactAndFlatten.
+// rect with a negative width or height is normalized (flipped) first.
+// RedactAndFlatten removes everything the page paints that meets the region —
+// touching its edge, or collapsed to a point inside it, counts — whole: every
+// text-showing operator, and every image (a full-page scan under any region
+// is blanked entirely), inline image, form XObject without text, painted path
+// and shading. A pattern colour, colour space or ExtGState (such as a soft
+// mask) that only removed content painted with goes too. What is removed this
+// way is not written anywhere else in the output either — not through a
+// resource dictionary another page shares, nor a form's or pattern's
+// resources — unless a page of the output still paints it. The page's
+// marked-content /ActualText, /Alt and /E entries are stripped too.
 //
 // Returns ErrPageNotFound if pageIndex is out of range, or ErrInvalidArgument
 // (and marks nothing) if any coordinate of rect is NaN or infinite.
@@ -125,28 +133,41 @@ func (d *Document) RedactArea(pageIndex int, rect Rect) error {
 	return nil
 }
 
-// RedactAndFlatten PERMANENTLY removes the planned content — every
-// text-showing operator RedactText matched, and every one whose box meets a
-// RedactArea region, is deleted from its page's content stream; matched
-// marked-content property entries are stripped; and the page's original
-// /Annots are dropped — then draws a solid black rectangle over each region
-// and each RedactText match for display, and returns a new document. The
-// source document is unchanged; the returned document carries no FluxDocs
-// annotation layer (it is re-opened from the redacted bytes). This is IRREVERSIBLE: the removed text does not
-// exist in the output.
+// RedactAndFlatten PERMANENTLY removes the planned content and returns a new
+// document. On each page with a plan:
+//   - every text-showing operator RedactText matched, and everything that
+//     meets a RedactArea region (see RedactArea), is deleted from the page's
+//     content stream;
+//   - every marked-content /ActualText, /Alt and /E entry is stripped;
+//   - the page keeps only the resources its remaining content uses, and only
+//     the page-dictionary entries needed to paint it (its annotations,
+//     thumbnail, metadata and the like are not written);
+//   - a solid black rectangle is drawn over each region and each RedactText
+//     match, for display.
+//
+// References from other pages to a redacted page (a link destination, an
+// annotation's /P) point at its redacted copy; its original annotations are
+// written nowhere. Images, forms, patterns and soft masks removed under a
+// region are written nowhere unless content kept in the output uses them; a
+// resource dictionary that lists one keeps its other entries. To know, each
+// page that is not redacted but can reach one is walked, within one
+// redaction budget for the call (past it the call fails with a
+// budget_exceeded *RedactionError naming that page).
+//
+// The source document is unchanged; the returned document carries no FluxDocs
+// annotation layer (it is re-opened from the redacted bytes). This is
+// IRREVERSIBLE: the removed content does not exist in the output.
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes, a
 // "redaction plan incomplete" error wrapping the first failure if any earlier
 // RedactText/AutoRedactPII call failed after accepting its arguments (the plan
-// may be missing regions; re-open the source and redact again), ErrInvalidPDF
-// if a page to redact has content the strict scanner cannot read, a
-// *redact.RefusalError if such a page paints text through a Form XObject
-// (matching redact.ErrFormXObjectText), a tiling pattern, a soft-mask group or
-// a Type 3 glyph procedure, or exceeds a redaction budget (redaction fails
-// closed rather than miss text other viewers render; ExtractText and
-// RenderPage stay lenient on such content), a build/re-open error, or
-// ErrInternal if a planned mark no longer fits its page (a bug). With no
-// pending redactions it returns a faithful copy.
+// may be missing regions; re-open the source and redact again), a
+// *RedactionError (matching ErrRedactionUnsupported) if a page to redact
+// cannot be redacted safely (redaction fails closed rather than miss content
+// other viewers render; ExtractText and RenderPage stay lenient on such
+// content), ErrInvalidPDF (wrapped) for page content that cannot be decoded, a
+// build/re-open error, or ErrInternal if a planned mark no longer fits its
+// page (a bug). With no pending redactions it returns a faithful copy.
 func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 	defer guard("RedactAndFlatten", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
@@ -174,6 +195,7 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 	d.mu.Unlock()
 
 	sources := make([]parse.PageSource, len(d.pageInfos))
+	outs := map[int]redact.Output{}
 	for i := range d.pageInfos {
 		src := parse.PageSource{Resolver: d.resolver, Page: d.pageInfos[i]}
 		if rects := plan[i]; len(rects) > 0 || len(marks[i]) > 0 {
@@ -181,23 +203,38 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 			if err != nil {
 				return nil, err
 			}
-			content, resources, err := page.Rewrite(toRedactRects(regions[i]), toRedactRects(rects), marks[i])
+			out, err := page.Rewrite(toRedactRects(regions[i]), toRedactRects(rects), marks[i])
 			if errors.Is(err, redact.ErrMarkMismatch) {
 				return nil, fmt.Errorf("%w: page %d: %v", ErrInternal, i, err)
 			}
 			if err != nil {
-				return nil, fmt.Errorf("page %d: %w", i, err)
+				// The cause is not quoted: resolver errors can quote the file.
+				return nil, fmt.Errorf("%w: page %d resources cannot be read for redaction", ErrInvalidPDF, i)
 			}
-			src.ReplaceContent = content
-			src.ReplaceResources = resources
-			src.DropAnnots = true // annotation objects may carry the removed text
+			outs[i] = out
+			src.ReplaceContent = out.Content
+			src.ReplaceResources = out.Resources
+			// Only what paints the page is copied: annotations, thumbnails
+			// and metadata may carry the removed content.
+			src.Redacted = true
 		}
 		sources[i] = src
+	}
+	// What was removed under a region must not survive through another
+	// route (a shared resource dictionary, a form's resources).
+	deny, err := d.redactionDenySet(outs)
+	if err != nil {
+		return nil, err
+	}
+	if len(sources) > 0 {
+		sources[0].Deny = deny
 	}
 
 	built, err := parse.BuildDocument(sources, buildInfoDict(d))
 	if err != nil {
-		return nil, err
+		// The copier's error can quote the file (a token of an object that
+		// does not parse); it is not reported.
+		return nil, fmt.Errorf("%w: the redacted document cannot be built", ErrInvalidPDF)
 	}
 	return OpenBytes(built)
 }
@@ -210,12 +247,11 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 // the page's resource scopes, and every route to another content stream
 // walked (redact.AnalyzePage).
 //
-// Returns the page model, a read error, or the scan error or refusal wrapped
-// by redactionScanError.
+// Returns the page model, or the failure as redactionScanError reports it.
 func (d *Document) redactionPage(pageIndex int) (*redact.Page, error) {
 	seg, err := d.resolver.PageContentSegments(d.pageInfos[pageIndex])
 	if err != nil {
-		return nil, err
+		return nil, redactionScanError(pageIndex, err)
 	}
 	page, err := redact.AnalyzePage(d.resolver, d.pageInfos[pageIndex], seg)
 	if err != nil {
@@ -224,18 +260,24 @@ func (d *Document) redactionPage(pageIndex int) (*redact.Page, error) {
 	return page, nil
 }
 
-// redactionScanError wraps a failure to read a page's content safely for
-// redaction. A refusal (*redact.RefusalError: text drawn through a form,
-// pattern, soft-mask group or Type 3 glyph procedure, an unsupported XObject,
-// a budget) is reported as is ("page N shows text through a form XObject
-// (object 6); redaction of form XObjects is not supported yet"); content the
-// strict scanner cannot read is ErrInvalidPDF.
+// redactionScanError reports a failure to read a page safely for redaction.
+// A refusal (content other readers could read differently, text drawn
+// through a route redaction does not rewrite, an unsupported XObject, a
+// budget) is a *RedactionError naming the page and reason, not ErrInvalidPDF
+// (decision D2): viewers open such files. Content too large to read is a
+// budget refusal too. Anything else — a stream that does not decode, an
+// object that does not resolve — is a broken file: ErrInvalidPDF.
 func redactionScanError(page int, err error) error {
-	var refusal *redact.RefusalError
-	if errors.As(err, &refusal) {
-		return fmt.Errorf("page %d %w", page, err)
+	var refusal *redact.Refusal
+	switch {
+	case errors.As(err, &refusal):
+		return &RedactionError{Page: page, Reason: RedactionReason(refusal.Reason), Detail: refusal.Error(), Err: refusal.Err}
+	case errors.Is(err, parse.ErrDecodeLimit):
+		return &RedactionError{Page: page, Reason: RedactionBudgetExceeded,
+			Detail: "page content exceeds the decode limit", Err: err}
 	}
-	return fmt.Errorf("%w: page %d content cannot be scanned safely for redaction: %v", ErrInvalidPDF, page, err)
+	// The cause is not quoted: decode and resolver errors can quote the file.
+	return fmt.Errorf("%w: page %d content cannot be read for redaction", ErrInvalidPDF, page)
 }
 
 // failRedactionPlan records the first failure that left the redaction plan
