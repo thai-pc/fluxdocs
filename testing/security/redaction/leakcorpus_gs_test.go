@@ -3,6 +3,7 @@
 package redaction
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -42,7 +43,10 @@ func gsText(t *testing.T, pdf []byte) (string, bool) {
 	if err != nil {
 		t.Fatalf("gs txtwrite: %v", err)
 	}
-	return string(out), true
+	// Some Ghostscript versions (10.02) write text from CID fonts as UTF-16,
+	// one NUL before each ASCII character. Dropping NULs only ever makes a
+	// secret easier to find, so it cannot hide a leak.
+	return string(bytes.ReplaceAll(out, []byte{0}, nil)), true
 }
 
 // gsRender returns a hash of Ghostscript's 36 DPI rendering of each page of
