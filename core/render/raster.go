@@ -863,18 +863,22 @@ const cubicSegments = 16
 
 // flattenCubic appends a polyline approximation of the cubic Bézier from p0
 // through control points p1, p2 to p3 (all device space) to dst. The endpoint
-// p3 is included; p0 is assumed already present.
+// p3 is included; p0 is assumed already present. Every product is rounded to
+// float64 before the sum: the Go spec lets a compiler fuse x*y + z into one
+// multiply-add, and an explicit conversion forbids it, so curves flatten to
+// the same points on targets that fuse (arm64) and those that do not (amd64,
+// wasm); on the latter the conversions change nothing.
 func flattenCubic(dst []point, p0, p1, p2, p3 point) []point {
 	for i := 1; i <= cubicSegments; i++ {
 		t := float64(i) / cubicSegments
 		u := 1 - t
-		a := u * u * u
-		b := 3 * u * u * t
-		c := 3 * u * t * t
-		d := t * t * t
+		a := float64(u*u) * u
+		b := float64(3*u*u) * t
+		c := float64(3*u*t) * t
+		d := float64(t*t) * t
 		dst = append(dst, point{
-			X: a*p0.X + b*p1.X + c*p2.X + d*p3.X,
-			Y: a*p0.Y + b*p1.Y + c*p2.Y + d*p3.Y,
+			X: float64(a*p0.X) + float64(b*p1.X) + float64(c*p2.X) + float64(d*p3.X),
+			Y: float64(a*p0.Y) + float64(b*p1.Y) + float64(c*p2.Y) + float64(d*p3.Y),
 		})
 	}
 	return dst
