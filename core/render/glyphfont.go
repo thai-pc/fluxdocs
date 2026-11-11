@@ -333,8 +333,9 @@ func (p *sfntProgram) subpaths(gid uint32, x glyphXform) ([][]point, bool) {
 	}
 	sg := x.fontSize / 1000.0
 	// glyph -> text space (fontSize scale + horizontal scale + rise), then text
-	// matrix, then CTM.
-	glyphToText := matrix{sg * x.hScale, 0, 0, sg, 0, x.rise}
+	// matrix, then CTM. sfnt outlines are y-down and text space is y-up
+	// (ISO 32000-1 §9.2.4), so the y scale is negated.
+	glyphToText := matrix{sg * x.hScale, 0, 0, -sg, 0, x.rise}
 	full := glyphToText.mul(x.tm).mul(x.ctm)
 	return segmentsToSubpaths(segs, full), true
 }

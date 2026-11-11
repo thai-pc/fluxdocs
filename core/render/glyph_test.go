@@ -223,3 +223,40 @@ func TestBuildFontPDF_EmbedsFont(t *testing.T) {
 		t.Fatalf("goregular.TTF too small: %d", len(goregular.TTF))
 	}
 }
+
+// inkRows returns the first and last image rows holding near-black ink, or
+// -1, -1 when there is none.
+func inkRows(img image.Image) (top, bottom int) {
+	top, bottom = -1, -1
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, _ := img.At(x, y).RGBA()
+			if r>>8 < 128 && g>>8 < 128 && bl>>8 < 128 {
+				if top < 0 {
+					top = y
+				}
+				bottom = y
+				break
+			}
+		}
+	}
+	return top, bottom
+}
+
+func TestGlyph_TrueTypeSitsOnBaseline(t *testing.T) {
+	// sfnt outlines are y-down; text space is y-up. An "H" at baseline y=80 on
+	// a 200 pt page (device row 120 at 72 DPI) must rise above the baseline by
+	// about its cap height, not hang below it.
+	img := renderFontPDF(t, "BT /F1 60 Tf 20 80 Td (H) Tj ET")
+	top, bottom := inkRows(img)
+	if top < 0 {
+		t.Fatal("no ink drawn for 'H'")
+	}
+	if bottom > 121 {
+		t.Errorf("ink bottom row = %d, want <= 121 (glyph must not hang below the baseline at row 120)", bottom)
+	}
+	if top > 90 {
+		t.Errorf("ink top row = %d, want <= 90 (cap height of a 60 pt 'H' is ~40 pt above the baseline)", top)
+	}
+}
