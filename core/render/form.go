@@ -148,18 +148,20 @@ func (in *interp) syncClip() {
 	in.rs.clip = in.gs.clip
 }
 
-// formFonts returns the fonts for a form's /Resources, cached by the form's
-// XObject reference so a form stamped repeatedly parses its embedded fonts once.
-// parse.Reference is a comparable struct and is a safe map key; parse.Dict is
-// not. An inline (reference-less) form reloads its fonts without caching.
-func (in *interp) formFonts(ref parse.Reference, hasRef bool, formRes parse.Dict) map[parse.Name]*glyphFont {
+// formFonts returns the font scope of a form's /Resources, cached by the form's
+// XObject reference so a form stamped repeatedly resolves its /Font dictionary
+// once. The fonts themselves are loaded on first use and cached by reference
+// for the whole render (fontLoader), so a font shared with the page or other
+// forms is parsed once. parse.Reference is a comparable struct and is a safe
+// map key; parse.Dict is not. An inline (reference-less) form gets a new scope.
+func (in *interp) formFonts(ref parse.Reference, hasRef bool, formRes parse.Dict) *fontScope {
 	if !hasRef {
-		return loadFonts(in.res, formRes, in.b)
+		return in.fonts.fl.scope(formRes)
 	}
 	if cached, ok := in.fontCache[ref]; ok {
 		return cached
 	}
-	fonts := loadFonts(in.res, formRes, in.b)
+	fonts := in.fonts.fl.scope(formRes)
 	in.fontCache[ref] = fonts
 	return fonts
 }

@@ -1,9 +1,11 @@
 // Package render rasterizes a parsed PDF page to an image. Wave 1 supports PNG
 // and JPEG output of vector graphics (path fills/strokes in RGB/gray/CMYK) and
-// text glyphs from embedded TrueType (/FontFile2) and OpenType-CFF (/FontFile3)
-// fonts, parsed via golang.org/x/image/font/sfnt, plus a common subset of image
-// XObjects (see image.go). Type1 (/FontFile) and non-embedded standard-14 fonts,
-// Form XObjects, shadings, and clipping are not yet rendered; the interpreter
+// text glyphs from embedded TrueType (/FontFile2) and OpenType (/FontFile3)
+// fonts, parsed via golang.org/x/image/font/sfnt, and embedded Type 1 fonts
+// (/FontFile), parsed by core/internal/psfont, plus a common subset of image
+// XObjects (see image.go). Bare CFF programs (/FontFile3 /Type1C and
+// /CIDFontType0C), non-embedded fonts (the standard 14 included), Type 3
+// fonts, shadings, and path clipping are not yet rendered; the interpreter
 // ignores those operators rather than failing, so a page still rasterizes (minus
 // those elements) instead of erroring.
 //
@@ -133,8 +135,7 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 	// operator up front. used is what PageContentLimit counted (len(content)
 	// for content without filter chains).
 	if len(content) > 0 && b.chargeContent(used) {
-		fonts := loadFonts(r, pi.Resources, b)
-		run(rs, base, parse.ScanContent(content), fonts, r, pi.Resources)
+		run(rs, base, parse.ScanContent(content), r, pi.Resources)
 	}
 	if len(opts.Annotations) > 0 && !b.stopped() {
 		drawAnnotations(rs, base, opts.Annotations)

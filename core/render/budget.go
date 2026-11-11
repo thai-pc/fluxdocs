@@ -107,6 +107,43 @@ const (
 	// by BenchmarkCalibration/glyph-tiny-visible.
 	glyphPointCost = 6
 
+	// charstringOpCost is the raster-work charge per charstring operator a
+	// Type 1 glyph build executes (subroutines and seac components included),
+	// charged once per glyph per render (the outline is cached; design
+	// docs/design/type1-std14-fonts.md §5.2). The design's initial 1 measured
+	// ≈ 17 pixel visits per unit (BenchmarkCalibration/charstring-ops, an
+	// interpreter step plus its share of outline growth); 16 brings it to ≈ 1.
+	// A real glyph runs < 1,000 operators, so a text page pays well under a
+	// million units; a glyph that runs into the 16,384-operator bound costs
+	// 256 Ki.
+	charstringOpCost = 16
+
+	// fontLoadCost is the raster-work charge per font dictionary a render
+	// loads (fontLoader.load, once per dictionary: later Tf operators that
+	// select it hit the cache): resolving the dictionary and its descriptor,
+	// reading its metrics through fontmodel, and building the code-to-glyph
+	// map, which every dictionary pays even when it shares an already parsed
+	// program. Calibrated by BenchmarkCalibration/font-load (dictionaries
+	// sharing one Type 1 program): ≈ 1.2 px/unit at 1024, ≈ 0.95 at 1280
+	// (≈ 20 µs native per dictionary). Decoding and parsing the program
+	// itself is charged separately, to decoded bytes.
+	fontLoadCost = 1280
+
+	// maxFontLoads bounds the font dictionaries one render loads; past it a
+	// Tf selecting a new one selects no font and its text is skipped. Real
+	// pages use tens; the cap bounds what a page of many dictionaries over
+	// one program holds, ≈ 5 KiB each (code map, metrics, cache entries):
+	// ≈ 20 MiB at 4096.
+	maxFontLoads = 4096
+
+	// maxCachedSegments bounds the built glyph outline segments a render
+	// keeps across all its Type 1 programs (design
+	// docs/design/type1-std14-fonts.md §5.2); past it, glyphs are built, and
+	// charged, every time they are drawn. A psfont.Segment is 56 bytes, so
+	// the cache holds at most ≈ 14 MiB of outlines (plus one map entry per
+	// cached glyph, itself counted as a segment) per render.
+	maxCachedSegments = 256 << 10
+
 	// pollPaintQuantum and pollStepQuantum set how much work accumulates
 	// between context polls: ≈ 5 ms native / 25 ms wasm of raster work.
 	pollPaintQuantum = 1 << 20

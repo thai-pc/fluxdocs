@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thai-pc/fluxdocs/core/internal/psfont"
+	tb "github.com/thai-pc/fluxdocs/core/internal/psfont/t1build"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
@@ -289,8 +291,11 @@ func TestBudget_Trips(t *testing.T) {
 			resource: "decoded bytes",
 		},
 		{
-			name:     "font program Flate bomb",
-			page:     func(t *testing.T) (*parse.Resolver, parse.PageInfo) { return bombPage(t, "font", 1<<20, "q Q") },
+			// Fonts load on first Tf (type1-std14-fonts.md §4.2): select it.
+			name: "font program Flate bomb",
+			page: func(t *testing.T) (*parse.Resolver, parse.PageInfo) {
+				return bombPage(t, "font", 1<<20, "BT /F1 10 Tf ET")
+			},
 			opts:     Options{testLimits: withLimit(func(l *budgetLimits) { l.decoded = 512 << 10 })},
 			resource: "decoded bytes",
 		},
@@ -778,6 +783,10 @@ func charged(rs *raster, paint func()) func() int64 {
 //   - glyph-tiny-visible: visible glyphs too small to cover a row (outline
 //     load, flatten, fill setup), per unit of steps + paint; sets
 //     glyphPointCost;
+//   - charstring-ops: Type 1 charstring operators of a glyph build (subrs,
+//     lines), charged at charstringOpCost each;
+//   - font-load: font dictionaries sharing one Type 1 program, each loaded
+//     once; sets fontLoadCost;
 //   - step-*: one interpreter step with no painting (a q/Q operator, a glyph
 //     advanced in an invisible render mode); the slowest sets
 //     defaultMaxOperators so a steps-only page stays ≲ 1 s native;
@@ -855,6 +864,40 @@ func BenchmarkCalibration(b *testing.B) {
 		calibrate(b, charged(rs, func() { drawImage(rs, matrix{side, 0, 0, side, 0, 0}, img) }))
 	})
 
+	// A Type 1 glyph that fans out through two subroutine levels into the
+	// per-glyph operator bound: the interpreter's cost per executed operator,
+	// charged as charstringOpCost.
+	bombFont := tb.Font{
+		Subrs: [][]byte{tb.CS(tb.Return), append(bytes.Repeat(tb.CS(2, tb.CallSubr), 40), tb.CS(tb.Return)...),
+			append(bytes.Repeat(tb.CS(1, 2, tb.RLineTo), 40), tb.CS(tb.Return)...)},
+		Glyphs: []tb.Glyph{{Name: "bomb", CS: append(tb.CS(0, 500, tb.HSBW), bytes.Repeat(tb.CS(1, tb.CallSubr), 40)...)}},
+	}
+	bomb, err := psfont.ParseType1(bombFont.Bytes(), psfont.Options{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Run("charstring-ops", func(b *testing.B) {
+		calibrate(b, func() int64 {
+			g, _ := bomb.Outline(0)
+			return int64(g.Ops) * charstringOpCost
+		})
+	})
+
+	// Font dictionaries sharing one Type 1 program, each selected once: the
+	// per-dictionary load (resolve, metrics, code map), charged as
+	// fontLoadCost; the shared program's parse is amortized over them.
+	fontsR, fontsPage, fontNames := manyFontsPage(b, maxFontLoads)
+	b.Run("font-load", func(b *testing.B) {
+		calibrate(b, func() int64 {
+			rs := newRaster(1, 1)
+			sc := newFontLoader(fontsR, rs.b).scope(fontsPage.Resources)
+			for _, n := range fontNames {
+				sc.font(n)
+			}
+			return rs.b.paint
+		})
+	})
+
 	const glyphs = 1 << 14
 	// Visible glyphs too small to cover a row: LoadGlyph and the fill setup
 	// are the cost, charged as one step plus paint units per outline point.
@@ -864,11 +907,10 @@ func BenchmarkCalibration(b *testing.B) {
 		b.Fatal(err)
 	}
 	visible := parse.ScanContent(content2)
-	fonts2 := loadFonts(r2, pi2.Resources, unlimitedBudget())
 	b.Run("glyph-tiny-visible", func(b *testing.B) {
 		calibrate(b, func() int64 {
 			rs := newRaster(1, 1)
-			run(rs, identity(), visible, fonts2, r2, pi2.Resources)
+			run(rs, identity(), visible, r2, pi2.Resources)
 			return rs.b.paint + rs.b.steps
 		})
 	})
@@ -887,7 +929,7 @@ func BenchmarkCalibration(b *testing.B) {
 	b.Run("do-tiny-image", func(b *testing.B) {
 		calibrate(b, func() int64 {
 			rs := newRaster(100, 100)
-			run(rs, identity(), tinyDos, nil, r3, pi3.Resources)
+			run(rs, identity(), tinyDos, r3, pi3.Resources)
 			return rs.b.paint + rs.b.steps
 		})
 	})
@@ -897,7 +939,7 @@ func BenchmarkCalibration(b *testing.B) {
 	b.Run("step-qQ", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			rs := newRaster(1, 1)
-			run(rs, identity(), qq, nil, nil, nil)
+			run(rs, identity(), qq, nil, nil)
 		}
 		perUnit(b, 2*pairs, "ns/step")
 	})
@@ -908,11 +950,10 @@ func BenchmarkCalibration(b *testing.B) {
 		b.Fatal(err)
 	}
 	invisible := parse.ScanContent(content)
-	fonts := loadFonts(r, pi.Resources, unlimitedBudget())
 	b.Run("step-invisible-glyph", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			rs := newRaster(1, 1)
-			run(rs, identity(), invisible, fonts, r, pi.Resources)
+			run(rs, identity(), invisible, r, pi.Resources)
 		}
 		perUnit(b, glyphs, "ns/step")
 	})

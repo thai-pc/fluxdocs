@@ -51,17 +51,17 @@ type interp struct {
 	res       *parse.Resolver
 	resources parse.Dict
 
-	fonts map[parse.Name]*glyphFont
-	tm    matrix // text matrix (set by Tm/Td/…, reset by BT)
-	tlm   matrix // text line matrix
+	fonts *fontScope // the current content stream's /Font resources, loaded on first Tf
+	tm    matrix     // text matrix (set by Tm/Td/…, reset by BT)
+	tlm   matrix     // text line matrix
 
 	// Form XObject recursion controls (SECURITY.md §2–3, see form.go).
-	formDepth  int                                           // current form nesting depth
-	formPath   map[parse.Reference]bool                      // XObject refs on the active recursion path (cycle guard)
-	formBudget int                                           // remaining form executions for this page render
-	fontCache  map[parse.Reference]map[parse.Name]*glyphFont // per-form fonts, keyed by XObject reference
-	stackFloor int                                           // Q may not pop below this stack length (form q/Q isolation)
-	skippedQ   int                                           // q operators ignored past maxSaveDepth, awaiting their Q
+	formDepth  int                            // current form nesting depth
+	formPath   map[parse.Reference]bool       // XObject refs on the active recursion path (cycle guard)
+	formBudget int                            // remaining form executions for this page render
+	fontCache  map[parse.Reference]*fontScope // per-form font scopes, keyed by XObject reference
+	stackFloor int                            // Q may not pop below this stack length (form q/Q isolation)
+	skippedQ   int                            // q operators ignored past maxSaveDepth, awaiting their Q
 
 	// Current path, in device space. Each subpath is a polyline; closed marks
 	// subpaths finished with h/re (relevant only to stroking).
@@ -85,12 +85,14 @@ type interp struct {
 const maxSaveDepth = 1024
 
 // run interprets a page's ops against the raster, using base as the initial CTM
-// (PDF user space to device pixels) and fonts for text. res and resources let
-// the Do operator resolve image and form XObjects from the page's /Resources;
-// both may be nil, in which case Do is a no-op. run is the top-level entry point:
-// it builds the interpreter (initialising the form-recursion controls and the
-// full-canvas clip) and hands the operator loop to interpret.
-func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*glyphFont, res *parse.Resolver, resources parse.Dict) {
+// (PDF user space to device pixels). res and resources let the Do operator
+// resolve image and form XObjects, and Tf the fonts, from the page's
+// /Resources; both may be nil, in which case Do and text are no-ops. run is
+// the top-level entry point: it builds the interpreter (initialising the
+// form-recursion controls, the full-canvas clip and the render's font loader)
+// and hands the operator loop to interpret.
+func run(rs *raster, base matrix, ops []parse.ContentOp, res *parse.Resolver, resources parse.Dict) {
+	fonts := newFontLoader(res, rs.b).scope(resources)
 	in := &interp{
 		rs: rs,
 		b:  rs.b,
@@ -109,7 +111,7 @@ func run(rs *raster, base matrix, ops []parse.ContentOp, fonts map[parse.Name]*g
 		tlm:        identity(),
 		formPath:   map[parse.Reference]bool{},
 		formBudget: maxFormBudget,
-		fontCache:  map[parse.Reference]map[parse.Name]*glyphFont{},
+		fontCache:  map[parse.Reference]*fontScope{},
 	}
 	in.interpret(ops)
 }
@@ -249,7 +251,7 @@ func (in *interp) apply(op parse.ContentOp) {
 	case "Tf":
 		if len(o) >= 2 {
 			if name, ok := o[len(o)-2].(parse.Name); ok {
-				in.gs.font = in.fonts[name]
+				in.gs.font = in.fonts.font(name)
 			}
 			in.gs.fontSize = num(o[len(o)-1])
 		}

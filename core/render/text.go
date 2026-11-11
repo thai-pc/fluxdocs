@@ -63,21 +63,17 @@ func (in *interp) drawTextArray(operands []parse.Object) {
 	}
 }
 
-// drawGlyph fills one glyph outline at the current text position. The glyph is
-// loaded at glyphPPEM (so its coordinates are in thousandths of an em), scaled
-// to text space by fontSize/1000, then mapped through the text matrix and CTM.
-func (in *interp) drawGlyph(gf *glyphFont, gid sfnt.GlyphIndex) {
-	segs, err := gf.sf.LoadGlyph(&gf.buf, gid, glyphPPEM, nil)
-	if err != nil {
+// drawGlyph fills one glyph outline at the current text position: the
+// program maps it from glyph space through the text state (font size,
+// horizontal scale, rise), the text matrix and the CTM.
+func (in *interp) drawGlyph(gf *glyphFont, gid uint32) {
+	subpaths, ok := gf.prog.subpaths(gid, glyphXform{
+		fontSize: in.gs.fontSize, hScale: in.gs.hScale, rise: in.gs.rise,
+		tm: in.tm, ctm: in.gs.ctm,
+	})
+	if !ok {
 		return
 	}
-	sg := in.gs.fontSize / 1000.0
-	// glyph -> text space (fontSize scale + horizontal scale + rise), then text
-	// matrix, then CTM.
-	glyphToText := matrix{sg * in.gs.hScale, 0, 0, sg, 0, in.gs.rise}
-	full := glyphToText.mul(in.tm).mul(in.gs.ctm)
-
-	subpaths := segmentsToSubpaths(segs, full)
 	// Loading and flattening an outline costs more per point than fillPath's
 	// fillPointCost setup charge: charge the difference, so a flood of tiny
 	// visible glyphs is bounded like any other raster work.

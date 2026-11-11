@@ -105,6 +105,74 @@ func TestSkipToUnicode(t *testing.T) {
 	}
 }
 
+func TestDifferencesAndBaseEncoding(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		objs   map[int]string
+		base   parse.Name
+		baseOK bool
+		diffs  map[byte]parse.Name
+	}{
+		{
+			name:   "encoding name",
+			objs:   map[int]string{2: "<< /Type /Font /Subtype /Type1 /Encoding /WinAnsiEncoding >>"},
+			base:   "WinAnsiEncoding",
+			baseOK: true,
+		},
+		{
+			name: "dictionary with base and differences",
+			objs: map[int]string{
+				2: "<< /Type /Font /Subtype /Type1 /Encoding 3 0 R >>",
+				3: "<< /Type /Encoding /BaseEncoding /MacRomanEncoding /Differences [65 /square /ring 97 /x] >>",
+			},
+			base:   "MacRomanEncoding",
+			baseOK: true,
+			diffs:  map[byte]parse.Name{65: "square", 66: "ring", 97: "x"},
+		},
+		{
+			name:  "differences only",
+			objs:  map[int]string{2: "<< /Type /Font /Subtype /TrueType /Encoding << /Differences [32 /space] >> >>"},
+			diffs: map[byte]parse.Name{32: "space"},
+		},
+		{
+			name: "Type 0 has no base encoding",
+			objs: map[int]string{2: "<< /Type /Font /Subtype /Type0 /Encoding /Identity-H >>"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := loadFont(t, tt.objs)
+			base, ok := f.BaseEncoding()
+			if base != tt.base || ok != tt.baseOK {
+				t.Errorf("BaseEncoding() = %q, %v; want %q, %v", base, ok, tt.base, tt.baseOK)
+			}
+			d := f.Differences()
+			if len(d) != len(tt.diffs) {
+				t.Fatalf("Differences() = %v, want %v", d, tt.diffs)
+			}
+			for c, n := range tt.diffs {
+				if d[c] != n {
+					t.Errorf("Differences()[%d] = %q, want %q", c, d[c], n)
+				}
+			}
+			if len(d) > 0 {
+				for c := range d {
+					d[c] = "changed"
+				}
+				if again := f.Differences(); len(tt.diffs) > 0 && again[firstKey(tt.diffs)] == "changed" {
+					t.Error("Differences() returned the font's own map")
+				}
+			}
+		})
+	}
+}
+
+func firstKey(m map[byte]parse.Name) byte {
+	for k := range m {
+		return k
+	}
+	return 0
+}
+
 func TestHasWidths(t *testing.T) {
 	for _, tt := range []struct {
 		name string

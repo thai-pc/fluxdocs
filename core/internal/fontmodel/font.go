@@ -90,6 +90,7 @@ type Font struct {
 	bbox    [4]float64          // /FontBBox llx lly urx ury, glyph units
 	bboxOK  bool                //
 	diffs   map[byte]parse.Name // simple fonts: /Encoding /Differences
+	baseEnc parse.Name          // simple fonts: /Encoding name or /BaseEncoding
 
 	tables fontTables // per-byte readings (Tables)
 
@@ -475,6 +476,31 @@ func (f *Font) MissingWidth() (float64, bool) {
 		return 0, false
 	}
 	return f.missingWidth * f.scale[0], true
+}
+
+// Differences returns a copy of a simple or Type 3 font's /Encoding
+// /Differences (§9.6.6.1): the glyph name of each code it lists, or nil.
+// Needs Options.Metrics.
+func (f *Font) Differences() map[byte]parse.Name {
+	if f == nil || len(f.diffs) == 0 {
+		return nil
+	}
+	out := make(map[byte]parse.Name, len(f.diffs))
+	for c, n := range f.diffs {
+		out[c] = n
+	}
+	return out
+}
+
+// BaseEncoding returns the predefined encoding a simple font names: its
+// /Encoding when that is a name, or the /BaseEncoding of its /Encoding
+// dictionary (§9.6.6.1). The name is not validated. Returns false when there
+// is none (or the font is not simple). Needs Options.Metrics.
+func (f *Font) BaseEncoding() (parse.Name, bool) {
+	if f == nil || !f.metrics || f.kind != Simple || f.baseEnc == "" {
+		return "", false
+	}
+	return f.baseEnc, true
 }
 
 // UnknownAdvance is Advance for a code whose value is unknown (the string's
@@ -901,11 +927,19 @@ func (f *Font) loadBBox(r *parse.Resolver, obj parse.Object) {
 }
 
 // loadDifferences reads /Encoding /Differences (§9.6.6.1): runs of a code
-// followed by glyph names for consecutive codes.
+// followed by glyph names for consecutive codes; and the base encoding the
+// font names (an /Encoding name, or its dictionary's /BaseEncoding).
 func (f *Font) loadDifferences(r *parse.Resolver) {
+	if n, ok := resolveName(r, f.dict["Encoding"]); ok {
+		f.baseEnc = n
+		return
+	}
 	enc, ok, err := r.ResolveDict(f.dict["Encoding"])
 	if err != nil || !ok {
 		return
+	}
+	if n, ok := resolveName(r, enc["BaseEncoding"]); ok {
+		f.baseEnc = n
 	}
 	diffs, ok := resolveArray(r, enc["Differences"])
 	if !ok {

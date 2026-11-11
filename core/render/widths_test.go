@@ -107,12 +107,12 @@ func TestGlyph_NoWidthsUsesProgramAdvance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gf := &glyphFont{sf: sf}
-	gid, ok := gf.gid('I')
+	prog := &sfntProgram{sf: sf}
+	gid, ok := prog.glyph('I')
 	if !ok {
 		t.Fatal("no glyph for I")
 	}
-	program := int(math.Round(gf.advanceEm(gid) * 50))
+	program := int(math.Round(prog.advanceEm(gid) * 50))
 	for _, tt := range []struct {
 		name, descExtra string
 		want            int
