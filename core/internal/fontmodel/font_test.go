@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
@@ -309,6 +311,98 @@ func TestLoadBoundsHostileArrays(t *testing.T) {
 	}
 	if !f.Unbounded() {
 		t.Error("a /W array read only up to the bound leaves the font bounded")
+	}
+}
+
+// TestCIDRangesFirstMatch: the indexed /W ranges (sortCIDRanges,
+// cidRangeWidth) give every CID the width a linear first-match scan of the
+// ranges in array order gives, over random overlapping, nested, adjacent and
+// MaxUint32-reaching ranges.
+func TestCIDRangesFirstMatch(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	linear := func(rngs []cidRange, cid uint32) (float64, bool) {
+		for _, r := range rngs {
+			if cid >= r.first && cid <= r.last {
+				return r.w, true
+			}
+		}
+		return 0, false
+	}
+	for trial := 0; trial < 500; trial++ {
+		n := 1 + rng.IntN(12)
+		var base uint32
+		if trial%10 == 0 {
+			base = math.MaxUint32 - 60
+		}
+		rngs := make([]cidRange, n)
+		for i := range rngs {
+			first := base + uint32(rng.IntN(50))
+			last := min(uint64(first)+uint64(rng.IntN(12)), math.MaxUint32)
+			rngs[i] = cidRange{first: first, last: uint32(last), w: float64(rng.IntN(4) * 100)}
+		}
+		f := &Font{cidRngs: sortCIDRanges(append([]cidRange(nil), rngs...))}
+		for i := 1; i < len(f.cidRngs); i++ {
+			if f.cidRngs[i].first <= f.cidRngs[i-1].last {
+				t.Fatalf("trial %d: ranges %v not disjoint and sorted", trial, f.cidRngs)
+			}
+		}
+		for d := uint32(0); d <= 61; d++ {
+			cid := base + d
+			if base == 0 && d == 61 {
+				break
+			}
+			want, wantOK := linear(rngs, cid)
+			if got, ok := f.cidRangeWidth(cid); got != want || ok != wantOK {
+				t.Fatalf("trial %d, ranges %v: CID %d = %g, %v; want %g, %v", trial, rngs, cid, got, ok, want, wantOK)
+			}
+		}
+	}
+}
+
+// TestCIDWidthsCharged: Options.Charge is called with the /W and /W2 items
+// before they are read, and a refusal leaves the widths partial.
+func TestCIDWidthsCharged(t *testing.T) {
+	objs := map[int]string{2: "<< /Subtype /Type0 /Encoding /Identity-H /DescendantFonts [3 0 R] >>",
+		3: "<< /Subtype /CIDFontType0 /W [1 [500 600 700] 10 20 300] /W2 [1 [-1000 250 880] 5 6 -1000 250 880] >>"}
+	charged := 0
+	f := Load(resolverWith(t, objs), parse.Reference{Number: 2}, Options{Metrics: true,
+		Charge: func(n int) bool { charged += n; return true }})
+	if charged != 3+1+3+1 {
+		t.Errorf("charged %d items, want 8 (/W 3 + 1, /W2 3 + 1)", charged)
+	}
+	if f.Unbounded() {
+		t.Error("a fully charged /W left the font unbounded")
+	}
+	f = Load(resolverWith(t, objs), parse.Reference{Number: 2}, Options{Metrics: true,
+		Charge: func(int) bool { return false }})
+	if !f.Unbounded() {
+		t.Error("a refused /W charge left the font bounded")
+	}
+}
+
+// TestCIDWidthsEmptyListsCharged: an empty "c []" list in /W or /W2 still
+// costs one item and counts toward maxWItems, so a /W of a million empty
+// lists is neither free nor unbounded (Phase 2 re-review, B1').
+func TestCIDWidthsEmptyListsCharged(t *testing.T) {
+	objs := map[int]string{2: "<< /Subtype /Type0 /Encoding /Identity-H /DescendantFonts [3 0 R] >>",
+		3: "<< /Subtype /CIDFontType0 /W [0 [] 1 [] 2 [500]] /W2 [0 [] 1 [-1000 250 880]] >>"}
+	charged := 0
+	Load(resolverWith(t, objs), parse.Reference{Number: 2}, Options{Metrics: true,
+		Charge: func(n int) bool { charged += n; return true }})
+	if charged != 1+1+1+1+3 {
+		t.Errorf("charged %d items, want 7 (/W 1+1+1, /W2 1+3)", charged)
+	}
+
+	n := maxWItems + 10
+	objs[3] = "<< /Subtype /CIDFontType0 /W [" + strings.Repeat("0 [] ", n) + "] >>"
+	charged = 0
+	f := Load(resolverWith(t, objs), parse.Reference{Number: 2}, Options{Metrics: true,
+		Charge: func(n int) bool { charged += n; return true }})
+	if charged > maxWItems+1 || charged < maxWItems {
+		t.Errorf("charged %d items for %d empty lists, want about maxWItems (%d)", charged, n, maxWItems)
+	}
+	if !f.Unbounded() {
+		t.Error("a /W past maxWItems left the font bounded")
 	}
 }
 

@@ -70,7 +70,7 @@ type t1interp struct {
 func (f *Font) runType1(gid GID) (Glyph, error) {
 	in := &t1interp{f: f}
 	err := in.run(f.charstrings[gid]) // a charstring without endchar ends at its last byte
-	g := Glyph{Width: in.width, Ops: in.ops}
+	g := Glyph{Width: in.width, Ops: in.ops, Matrix: f.matrix}
 	if err != nil {
 		return g, err
 	}

@@ -17,7 +17,9 @@
 package fontmodel
 
 import (
+	"container/heap"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
@@ -50,6 +52,13 @@ type Options struct {
 	// SkipToUnicode leaves /ToUnicode unread, for a caller that needs only
 	// the metrics (the renderer). Text then decodes as if the font had none.
 	SkipToUnicode bool
+	// Charge, when set, is called with the number of CIDFont /W and /W2
+	// items Load is about to read, before it reads them, so a caller that
+	// meters work (the render budget) pays for a large width array in
+	// proportion to its size. A false return stops the read there: the
+	// widths are left partial, as for an array that cannot be read to its
+	// end. Nil charges nothing.
+	Charge func(items int) bool
 }
 
 // Font is the model of one font dictionary. A Font is immutable after Load
@@ -86,7 +95,7 @@ type Font struct {
 	cidLo   float64             // Type 0: the smallest of /DW and every /W width
 	cidHi   float64             // Type 0: the largest of /DW and every /W width
 	cidW    map[uint32]float64  // Type 0 /W "c [w1 w2 …]" entries
-	cidRngs []cidRange          // Type 0 /W "cfirst clast w" entries
+	cidRngs []cidRange          // Type 0 /W "cfirst clast w" entries, disjoint and sorted (sortCIDRanges)
 	bbox    [4]float64          // /FontBBox llx lly urx ury, glyph units
 	bboxOK  bool                //
 	diffs   map[byte]parse.Name // simple fonts: /Encoding /Differences
@@ -109,6 +118,8 @@ type Font struct {
 	// a reader paints it with a font of its own, whose glyphs may reach
 	// past the em defaults.
 	substituted bool
+
+	charge func(items int) bool // Options.Charge, during Load only
 }
 
 // cidRange is one "cfirst clast w" entry of a CIDFont /W array.
@@ -167,7 +178,9 @@ func Load(r *parse.Resolver, obj parse.Object, opts Options) *Font {
 		}
 	}
 	if opts.Metrics {
+		f.charge = opts.Charge
 		f.loadMetrics(r, decode)
+		f.charge = nil
 	}
 	return f
 }
@@ -421,13 +434,8 @@ func (f *Font) Advance(c Code) (lo, hi float64) {
 			w := f.dw
 			if v, ok := f.cidW[c.Value]; ok {
 				w = v
-			} else {
-				for _, r := range f.cidRngs {
-					if c.Value >= r.first && c.Value <= r.last {
-						w = r.w
-						break
-					}
-				}
+			} else if v, ok := f.cidRangeWidth(c.Value); ok {
+				w = v
 			}
 			w *= f.scale[0]
 			return w, w
@@ -746,9 +754,11 @@ func (f *Font) loadSimpleWidths(r *parse.Resolver) {
 }
 
 // loadCIDWidths reads a CIDFont /W array (§9.7.4.3): "c [w1 w2 …]" and
-// "cfirst clast w" entries, at most maxWItems items. An array it cannot read
-// to the end (malformed, or past the bound) leaves the font's widths partial:
-// a code not read could have any width, so the font is Unbounded.
+// "cfirst clast w" entries, at most maxWItems items, each charged (chargeItems)
+// before it is read. An array it cannot read to the end (malformed, past the
+// bound, or refused by the charge) leaves the font's widths partial: a code
+// not read could have any width, so the font is Unbounded. The ranges read
+// are then indexed for lookup (sortCIDRanges).
 func (f *Font) loadCIDWidths(r *parse.Resolver, obj parse.Object) {
 	if obj == nil {
 		return
@@ -760,6 +770,7 @@ func (f *Font) loadCIDWidths(r *parse.Resolver, obj parse.Object) {
 	}
 	f.cidW = map[uint32]float64{}
 	f.wPartial = true // until the loop reads the whole array
+	defer func() { f.cidRngs = sortCIDRanges(f.cidRngs) }()
 	items := 0
 	for i := 0; i < len(w); {
 		if i+1 >= len(w) || items >= maxWItems {
@@ -774,6 +785,14 @@ func (f *Font) loadCIDWidths(r *parse.Resolver, obj parse.Object) {
 			return
 		}
 		if arr, isArr := next.(parse.Array); isArr {
+			// An empty list still costs one item, so a /W of many "c []"
+			// entries is charged and stops at maxWItems.
+			if !f.chargeItems(max(1, min(len(arr), maxWItems-items+1))) {
+				return
+			}
+			if len(arr) == 0 {
+				items++
+			}
 			for j, e := range arr {
 				if items++; items > maxWItems {
 					return
@@ -788,7 +807,7 @@ func (f *Font) loadCIDWidths(r *parse.Resolver, obj parse.Object) {
 			i += 2
 			continue
 		}
-		if i+2 >= len(w) {
+		if i+2 >= len(w) || !f.chargeItems(1) {
 			return
 		}
 		last, ok1 := resolveNumber(r, next)
@@ -802,6 +821,84 @@ func (f *Font) loadCIDWidths(r *parse.Resolver, obj parse.Object) {
 		i += 3
 	}
 	f.wPartial = false
+}
+
+// chargeItems charges n /W or /W2 items to Options.Charge, reporting whether
+// they may be read.
+func (f *Font) chargeItems(n int) bool {
+	return f.charge == nil || f.charge(n)
+}
+
+// cidRangeWidth returns the width of the first /W "cfirst clast w" entry, in
+// array order, whose range holds cid, by binary search over the disjoint
+// ranges sortCIDRanges built.
+func (f *Font) cidRangeWidth(cid uint32) (float64, bool) {
+	i := sort.Search(len(f.cidRngs), func(i int) bool { return f.cidRngs[i].last >= cid })
+	if i < len(f.cidRngs) && f.cidRngs[i].first <= cid {
+		return f.cidRngs[i].w, true
+	}
+	return 0, false
+}
+
+// sortCIDRanges turns /W ranges in array order, which may overlap, into
+// disjoint ranges sorted by CID that give every CID the width of the first
+// range in array order that holds it, the reading a linear first-match scan
+// gives. It sweeps the range boundaries with a heap of the ranges open at
+// each, keyed by array position: O(n log n) for n ranges.
+func sortCIDRanges(rngs []cidRange) []cidRange {
+	if len(rngs) < 2 {
+		return rngs
+	}
+	// Boundaries are uint64 so last+1 cannot wrap at math.MaxUint32.
+	order := make([]int, len(rngs)) // range indices by first CID
+	cuts := make([]uint64, 0, 2*len(rngs))
+	for i, rg := range rngs {
+		order[i] = i
+		cuts = append(cuts, uint64(rg.first), uint64(rg.last)+1)
+	}
+	sort.SliceStable(order, func(a, b int) bool { return rngs[order[a]].first < rngs[order[b]].first })
+	sort.Slice(cuts, func(a, b int) bool { return cuts[a] < cuts[b] })
+	out := make([]cidRange, 0, len(rngs))
+	open := &rangeHeap{}
+	next := 0 // into order
+	for k := 0; k+1 < len(cuts); k++ {
+		lo, hi := cuts[k], cuts[k+1] // the elementary interval [lo, hi)
+		if lo == hi {
+			continue
+		}
+		for next < len(order) && uint64(rngs[order[next]].first) <= lo {
+			heap.Push(open, order[next])
+			next++
+		}
+		for open.Len() > 0 && uint64(rngs[(*open)[0]].last) < lo {
+			heap.Pop(open)
+		}
+		if open.Len() == 0 {
+			continue
+		}
+		w := rngs[(*open)[0]].w
+		if n := len(out); n > 0 && uint64(out[n-1].last)+1 == lo && out[n-1].w == w {
+			out[n-1].last = uint32(hi - 1)
+			continue
+		}
+		out = append(out, cidRange{first: uint32(lo), last: uint32(hi - 1), w: w})
+	}
+	return out
+}
+
+// rangeHeap is a min-heap of /W range indices (array positions), for
+// sortCIDRanges: its top is the first range in array order.
+type rangeHeap []int
+
+func (h rangeHeap) Len() int           { return len(h) }
+func (h rangeHeap) Less(i, j int) bool { return h[i] < h[j] }
+func (h rangeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *rangeHeap) Push(x any)        { *h = append(*h, x.(int)) }
+func (h *rangeHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
 }
 
 // loadVerticalMetrics reads a CIDFont's /DW2 and /W2 (§9.7.4.3) into the
@@ -862,7 +959,9 @@ func (f *Font) loadVerticalMetrics(r *parse.Resolver, cid parse.Dict) {
 		}
 		if arr, isArr := next.(parse.Array); isArr {
 			// c [w1y vx vy w1y vx vy …]
-			if len(arr)%3 != 0 || items+len(arr) > maxWItems {
+			// An empty list still costs one item (see loadCIDWidths).
+			cost := max(1, len(arr))
+			if len(arr)%3 != 0 || items+cost > maxWItems || !f.chargeItems(cost) {
 				return
 			}
 			v, ok := nums(arr)
@@ -872,12 +971,12 @@ func (f *Font) loadVerticalMetrics(r *parse.Resolver, cid parse.Dict) {
 			for j := 0; j < len(v); j += 3 {
 				add(v[j], v[j+1], v[j+2])
 			}
-			items += len(arr)
+			items += cost
 			i += 2
 			continue
 		}
 		// cfirst clast w1y vx vy
-		if i+4 >= len(w2) {
+		if i+4 >= len(w2) || !f.chargeItems(1) {
 			return
 		}
 		v, ok := nums(w2[i+2 : i+5])

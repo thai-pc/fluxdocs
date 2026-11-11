@@ -2,10 +2,10 @@
 // and JPEG output of vector graphics (path fills/strokes in RGB/gray/CMYK) and
 // text glyphs from embedded TrueType (/FontFile2) and OpenType (/FontFile3)
 // fonts, parsed via golang.org/x/image/font/sfnt, and embedded Type 1 fonts
-// (/FontFile), parsed by core/internal/psfont, plus a common subset of image
-// XObjects (see image.go). Bare CFF programs (/FontFile3 /Type1C and
-// /CIDFontType0C), non-embedded fonts (the standard 14 included), Type 3
-// fonts, shadings, and path clipping are not yet rendered; the interpreter
+// (/FontFile) and bare CFF fonts (/FontFile3 /Type1C and /CIDFontType0C),
+// parsed by core/internal/psfont, plus a common subset of image XObjects (see
+// image.go). Non-embedded fonts (the standard 14 included), Type 3 fonts,
+// shadings, and path clipping are not yet rendered; the interpreter
 // ignores those operators rather than failing, so a page still rasterizes (minus
 // those elements) instead of erroring.
 //

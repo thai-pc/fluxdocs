@@ -37,4 +37,21 @@ const (
 	// maxEncodingPuts bounds the `dup code /name put` entries read from a
 	// cleartext /Encoding array.
 	maxEncodingPuts = 256
+
+	// maxT2Stack bounds the Type 2 argument stack (TN #5177 Appendix B).
+	maxT2Stack = 48
+	// maxStems bounds the Type 2 stem hints of one glyph (TN #5177
+	// Appendix B), which size every hintmask and cntrmask.
+	maxStems = 96
+	// t2TransientSize is the number of Type 2 transient array slots that
+	// put and get may address (TN #5177 Appendix B).
+	t2TransientSize = 32
+	// maxDictOperands bounds the operands before one CFF DICT operator (the
+	// Type 2 stack limit; TN #5176 Table 2 operators take at most 13).
+	maxDictOperands = 48
+	// maxRealNibbles bounds the nibbles of one DICT real number.
+	maxRealNibbles = 64
+	// maxFDs bounds a CID-keyed font's FDArray: FDSelect stores an FD index
+	// in a Card8.
+	maxFDs = 256
 )

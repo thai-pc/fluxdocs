@@ -1,6 +1,8 @@
 // Package psfont parses the PostScript-based font programs a PDF may embed and
 // builds glyph outlines from them: Type 1 (/FontFile, ISO 32000-1:2008 §9.9)
-// in this version; CFF follows (docs/design/type1-std14-fonts.md §2.3).
+// with Type 1 charstrings, and bare CFF (/FontFile3 /Type1C and
+// /CIDFontType0C, §9.9 Table 127), CID-keyed or not, with Type 2 charstrings
+// (docs/design/type1-std14-fonts.md §2.2, §2.3).
 //
 // A program is untrusted input: every read is bounds-checked, recursion is
 // bounded by an explicit depth, and limits.go caps sizes, counts and executed
@@ -8,8 +10,8 @@
 // Outline); callers treat both as "not drawn" and never fail a page on them.
 //
 // Clean-room: written from Adobe's Type 1 Font Format (version 1.1, Chapters
-// 6–8), Technical Notes #5015 and #5040, and ISO 32000-1 only. Pure Go; Core
-// (MIT).
+// 6–8), Technical Notes #5015, #5040, #5176 (CFF) and #5177 (Type 2
+// charstrings), and ISO 32000-1 only. Pure Go; Core (MIT).
 package psfont
 
 import (
@@ -57,8 +59,13 @@ type Segment struct {
 type Glyph struct {
 	// Segs is the outline in glyph space, filled with the nonzero rule.
 	Segs []Segment
-	// Width is the advance's x component in glyph space (hsbw or sbw).
+	// Width is the advance's x component in glyph space (hsbw or sbw; for
+	// CFF the charstring's width or the Private DICT's defaultWidthX).
 	Width float64
+	// Matrix maps this glyph's space to text space at font size 1: the
+	// font's FontMatrix, or for a CID-keyed CFF the one its Font DICT
+	// selects (§2.3), validated like Font.Matrix.
+	Matrix [6]float64
 	// Ops is the number of charstring operators executed to build it,
 	// subroutines and seac components included. It is set on error too, so
 	// a caller can charge the work done.
@@ -69,8 +76,10 @@ type Glyph struct {
 type Options struct {
 	// Charge, when non-nil, is called with the size of each buffer the
 	// parser allocates for a decoded copy of the program (PFB segments
-	// stripped, hex decoded, eexec decrypted, charstrings decrypted),
-	// before allocating it. Returning false aborts the parse with an error.
+	// stripped, hex decoded, eexec decrypted, charstrings decrypted) or,
+	// for CFF, for the lookup tables it builds (charset, glyph names, the
+	// name and CID maps, an estimate per entry), before allocating it.
+	// Returning false aborts the parse with an error.
 	Charge func(n int64) bool
 }
 
@@ -90,9 +99,11 @@ type Font struct {
 	hasEncoding bool
 
 	names       []string // glyph names by GID
-	charstrings [][]byte // decrypted charstrings by GID (lenIV bytes removed)
+	charstrings [][]byte // Type 1: decrypted charstrings by GID (lenIV bytes removed)
 	byName      map[string]GID
-	subrs       [][]byte // decrypted subroutines (nil entries are missing)
+	subrs       [][]byte // Type 1: decrypted subroutines (nil entries are missing)
+
+	cff *cffData // CFF programs: charstrings, subroutines, Font DICTs
 }
 
 // Matrix returns the program's validated FontMatrix (glyph space to text
@@ -113,14 +124,43 @@ func (f *Font) GlyphByName(name string) (GID, bool) {
 	return g, ok
 }
 
+// GlyphByCID returns the glyph a CIDFont selects for CID cid (§9.7.4.2): in
+// a CID-keyed CFF the glyph its charset gives that CID; in any other program
+// the glyph whose index is cid. ok is false when there is none.
+func (f *Font) GlyphByCID(cid uint32) (GID, bool) {
+	if f.cff != nil && f.cff.cidKeyed {
+		if cid > 0xFFFF {
+			return 0, false
+		}
+		g, ok := f.cff.byCID[uint16(cid)]
+		return g, ok
+	}
+	if int64(cid) >= int64(f.NumGlyphs()) {
+		return 0, false
+	}
+	return GID(cid), true
+}
+
+// CIDKeyed reports whether the program is a CID-keyed CFF (its Top DICT
+// starts with ROS): its glyphs have CIDs, not names.
+func (f *Font) CIDKeyed() bool { return f.cff != nil && f.cff.cidKeyed }
+
 // NumGlyphs returns the number of glyphs in the program.
-func (f *Font) NumGlyphs() int { return len(f.charstrings) }
+func (f *Font) NumGlyphs() int {
+	if f.cff != nil {
+		return f.cff.charstrings.count
+	}
+	return len(f.charstrings)
+}
 
 // Outline builds glyph gid. On error (a malformed charstring or a limit) the
 // glyph must not be drawn; Glyph.Ops still reports the operators executed.
 func (f *Font) Outline(gid GID) (Glyph, error) {
-	if int64(gid) >= int64(len(f.charstrings)) {
+	if int64(gid) >= int64(f.NumGlyphs()) {
 		return Glyph{}, errMalformed
+	}
+	if f.cff != nil {
+		return f.runType2(gid)
 	}
 	return f.runType1(gid)
 }

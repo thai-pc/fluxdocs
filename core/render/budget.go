@@ -108,11 +108,12 @@ const (
 	glyphPointCost = 6
 
 	// charstringOpCost is the raster-work charge per charstring operator a
-	// Type 1 glyph build executes (subroutines and seac components included),
-	// charged once per glyph per render (the outline is cached; design
-	// docs/design/type1-std14-fonts.md §5.2). The design's initial 1 measured
-	// ≈ 17 pixel visits per unit (BenchmarkCalibration/charstring-ops, an
-	// interpreter step plus its share of outline growth); 16 brings it to ≈ 1.
+	// Type 1 or Type 2 (CFF) glyph build executes (subroutines and seac
+	// components included), charged once per glyph per render (the outline is
+	// cached; design docs/design/type1-std14-fonts.md §5.2). The design's
+	// initial 1 measured ≈ 17 pixel visits per unit
+	// (BenchmarkCalibration/charstring-ops, an interpreter step plus its share
+	// of outline growth); 16 brings it to ≈ 1.
 	// A real glyph runs < 1,000 operators, so a text page pays well under a
 	// million units; a glyph that runs into the 16,384-operator bound costs
 	// 256 Ki.
@@ -129,6 +130,15 @@ const (
 	// itself is charged separately, to decoded bytes.
 	fontLoadCost = 1280
 
+	// cidWidthItemCost is the raster-work charge per CIDFont /W or /W2 item
+	// a composite font's metrics read (fontmodel.Options.Charge), once per
+	// descendant CIDFont and /Encoding per render (cidMetrics), so a font of
+	// 64 Ki widths pays in proportion (≈ 1.8 Mi units, ≈ 30 ms native).
+	// Calibrated by BenchmarkCalibration/cid-widths-*: ≈ 1.0 px/unit for
+	// ranges (read, then indexed), ≈ 0.7 for lists (≈ 400 and ≈ 280 ns
+	// native per item).
+	cidWidthItemCost = 28
+
 	// maxFontLoads bounds the font dictionaries one render loads; past it a
 	// Tf selecting a new one selects no font and its text is skipped. Real
 	// pages use tens; the cap bounds what a page of many dictionaries over
@@ -137,7 +147,7 @@ const (
 	maxFontLoads = 4096
 
 	// maxCachedSegments bounds the built glyph outline segments a render
-	// keeps across all its Type 1 programs (design
+	// keeps across all its Type 1 and CFF programs (design
 	// docs/design/type1-std14-fonts.md §5.2); past it, glyphs are built, and
 	// charged, every time they are drawn. A psfont.Segment is 56 bytes, so
 	// the cache holds at most ≈ 14 MiB of outlines (plus one map entry per

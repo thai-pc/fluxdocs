@@ -18,10 +18,11 @@ var glyphPPEM = fixed.I(1000)
 
 // glyphFont is a loaded font resource: the embedded program it draws glyphs
 // from (glyphProgram: TrueType /FontFile2 or OpenType /FontFile3 through
-// x/image/font/sfnt, Type 1 /FontFile through psfont) plus how its character
-// codes map to glyphs and how far each advances. Bare CFF programs and
-// non-embedded fonts (the standard 14 included) are not loaded yet: their
-// text does not render (docs/design/type1-std14-fonts.md, Phases 2–3).
+// x/image/font/sfnt; Type 1 /FontFile and bare CFF /FontFile3 /Type1C or
+// /CIDFontType0C through psfont) plus how its character codes map to glyphs
+// and how far each advances. Non-embedded fonts (the standard 14 included)
+// are not loaded yet: their text does not render
+// (docs/design/type1-std14-fonts.md, Phase 3).
 //
 // A simple font's advances come from its /Widths (ISO 32000-1 §9.4.4,
 // §9.6.2.1), read through fontmodel; see advance.
@@ -30,8 +31,17 @@ var glyphPPEM = fixed.I(1000)
 // is built per page render, and a single page is interpreted sequentially.
 type glyphFont struct {
 	prog    glyphProgram
-	twoByte bool            // composite (Type0/Identity) font: codes are 2-byte glyph IDs
-	model   *fontmodel.Font // simple fonts: /Widths, /MissingWidth, /Encoding; nil for composite fonts
+	twoByte bool // composite (Type0/Identity) font: codes are 2-byte CIDs
+	// model holds a simple font's /Widths, /MissingWidth and /Encoding, and
+	// a composite font's /W and /DW when cidWidths; nil for other composite
+	// fonts.
+	model *fontmodel.Font
+	// cidWidths marks a composite font over a Type 1 or CFF program (any
+	// psProgram: a CIDFontType0 with /FontFile3 /CIDFontType0C, or the
+	// nonstandard /FontFile Type 1), whose advances come from the CIDFont's
+	// /W and /DW (§9.7.4.3) through model. Composite TrueType fonts still
+	// advance by the program (hmtx).
+	cidWidths bool
 }
 
 // glyphProgram is the font program a glyphFont draws from.
@@ -59,9 +69,10 @@ type glyphXform struct {
 // (a decode error or a trip); fontmodel treats it as absent.
 var errFontStream = errors.New("render: font stream not decoded")
 
-// loadMetrics reads a simple font's layout metrics (/Widths, /MissingWidth,
-// /Encoding) through fontmodel. /ToUnicode is not read; any other stream
-// fontmodel decodes goes through b.
+// loadMetrics reads a font's layout metrics through fontmodel: a simple
+// font's /Widths, /MissingWidth and /Encoding, a composite font's /W and /DW.
+// /ToUnicode is not read; any other stream fontmodel decodes goes through b,
+// and each CIDFont /W or /W2 item costs cidWidthItemCost raster work.
 func loadMetrics(r *parse.Resolver, fd parse.Dict, b *budget) *fontmodel.Font {
 	return fontmodel.Load(r, fd, fontmodel.Options{
 		Metrics:       true,
@@ -72,7 +83,57 @@ func loadMetrics(r *parse.Resolver, fd parse.Dict, b *budget) *fontmodel.Font {
 			}
 			return nil, errFontStream
 		},
+		Charge: func(items int) bool { return b.chargePaint(int64(items) * cidWidthItemCost) },
 	})
+}
+
+// cidMetricsKey identifies what a composite font's metrics are read from:
+// the descendant CIDFont (/W, /DW, /W2, its descriptor) and the Type 0
+// dictionary's /Encoding, the only other entry fontmodel's metrics read
+// (/ToUnicode is skipped). Type 0 dictionaries with equal keys have equal
+// metrics.
+type cidMetricsKey struct {
+	desc parse.Reference
+	enc  parse.Object // a parse.Name or parse.Reference
+}
+
+// cidMetrics loads a composite font's metrics (loadMetrics), cached by
+// cidMetricsKey, so Type 0 dictionaries sharing one CIDFont read and pay for
+// its /W once per render; a CIDFont reached directly, or an /Encoding that
+// is neither a name nor a reference, is not cached.
+func (fl *fontLoader) cidMetrics(fd parse.Dict) *fontmodel.Font {
+	key, cacheable := fl.cidKey(fd)
+	if cacheable {
+		if m, ok := fl.cidModels[key]; ok {
+			return m
+		}
+	}
+	m := loadMetrics(fl.r, fd, fl.b)
+	if cacheable && !fl.b.stopped() {
+		fl.cidModels[key] = m
+	}
+	return m
+}
+
+// cidKey returns fd's cidMetricsKey, and false when it has none.
+func (fl *fontLoader) cidKey(fd parse.Dict) (cidMetricsKey, bool) {
+	resolved, err := fl.r.Resolve(fd["DescendantFonts"])
+	if err != nil {
+		return cidMetricsKey{}, false
+	}
+	arr, ok := resolved.(parse.Array)
+	if !ok || len(arr) == 0 {
+		return cidMetricsKey{}, false
+	}
+	desc, ok := arr[0].(parse.Reference)
+	if !ok {
+		return cidMetricsKey{}, false
+	}
+	switch enc := fd["Encoding"].(type) {
+	case parse.Name, parse.Reference:
+		return cidMetricsKey{desc: desc, enc: enc}, true
+	}
+	return cidMetricsKey{}, false
 }
 
 // loadOneFont resolves a font dictionary to an embedded program. For a Type0
@@ -104,6 +165,9 @@ func (fl *fontLoader) loadOneFont(fd parse.Dict) *glyphFont {
 	if gf.prog = fl.program(fdesc, gf); gf.prog == nil {
 		return nil
 	}
+	if _, ps := gf.prog.(*psProgram); ps && twoByte {
+		gf.model, gf.cidWidths = fl.cidMetrics(fd), true
+	}
 	return gf
 }
 
@@ -132,7 +196,7 @@ const (
 	programUnknown programKind = iota
 	programSFNT                // TrueType or OpenType (an sfnt wrapper)
 	programType1               // a Type 1 program (cleartext + eexec)
-	programCFF                 // a bare CFF program (not drawn yet: Phase 2)
+	programCFF                 // a bare CFF program (Type1C or CIDFontType0C)
 )
 
 // sniffProgram classifies a decoded program by its first bytes
@@ -206,7 +270,9 @@ func (fl *fontLoader) decodeProgram(obj parse.Object, key parse.Name) any {
 
 // parseProgram parses a decoded program: an *sfnt.Font, a *psEntry, or nil.
 // A program the sniff does not recognize is parsed as its key says
-// (/FontFile: Type 1; otherwise sfnt, as before the sniff existed).
+// (/FontFile: Type 1; otherwise sfnt, as before the sniff existed): a bare
+// CFF always sniffs as one, since ParseCFF needs the same header bytes.
+// Parsing a Type 1 or CFF program polls the render's context first.
 func (fl *fontLoader) parseProgram(data []byte, key parse.Name) any {
 	kind := sniffProgram(data)
 	if kind == programUnknown && key == "FontFile" {
@@ -219,7 +285,10 @@ func (fl *fontLoader) parseProgram(data []byte, key parse.Name) any {
 		}
 		return parsePSEntry(data, fl.b)
 	case programCFF:
-		return nil
+		if !fl.b.poll() {
+			return nil
+		}
+		return parseCFFEntry(data, fl.b)
 	}
 	sf, err := sfnt.Parse(data)
 	if err != nil {
@@ -248,11 +317,19 @@ func (gf *glyphFont) gid(code uint32) (uint32, bool) { return gf.prog.glyph(code
 // advance returns the horizontal displacement w0 of code in text space at font
 // size 1 (§9.4.4): for a simple font with a /Widths array, the code's entry,
 // else (a code outside /FirstChar–/LastChar or a non-numeric entry) the
-// descriptor's /MissingWidth; otherwise (a composite font, a simple font with
-// no /Widths at all, or neither entry) the program's advance of the code's
-// glyph, or 0.5 em when the code has no glyph. ok and gid are gf.gid(code)'s
-// results.
+// descriptor's /MissingWidth; for a composite font over a Type 1 or CFF
+// program (cidWidths) with an Identity encoding, the CID's /W entry, else /DW (default 1000, §9.7.4.3);
+// otherwise (another composite font, a simple font with no /Widths at all, or
+// neither entry) the program's advance of the code's glyph, or 0.5 em when
+// the code has no glyph. ok and gid are gf.gid(code)'s results.
 func (gf *glyphFont) advance(code, gid uint32, ok bool) float64 {
+	if gf.cidWidths {
+		// fontmodel's advance is exact (lo == hi) for an Identity encoding;
+		// for another CMap it is only bounds, and the program decides.
+		if lo, hi := gf.model.Advance(fontmodel.Code{End: 2, Value: code}); lo == hi {
+			return lo
+		}
+	}
 	if gf.model.HasWidths() {
 		if w, has := gf.model.Width(code); has {
 			return w

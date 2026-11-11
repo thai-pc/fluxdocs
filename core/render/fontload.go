@@ -1,6 +1,7 @@
 package render
 
 import (
+	"github.com/thai-pc/fluxdocs/core/internal/fontmodel"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
@@ -27,6 +28,9 @@ type fontLoader struct {
 	// whose result (nil, not drawable) a second key would not change in
 	// practice. A direct (unreferenced) program stream is not cached.
 	progs map[parse.Reference]any // by program stream: decodeProgram's result
+	// cidModels holds composite fonts' metrics (cidMetrics), by descendant
+	// CIDFont and /Encoding.
+	cidModels map[cidMetricsKey]*fontmodel.Font
 
 	// loads counts the font dictionaries loaded, bounded by maxFontLoads.
 	loads int
@@ -41,6 +45,8 @@ func newFontLoader(r *parse.Resolver, b *budget) *fontLoader {
 		b:     b,
 		fonts: map[parse.Reference]*glyphFont{},
 		progs: map[parse.Reference]any{},
+
+		cidModels: map[cidMetricsKey]*fontmodel.Font{},
 	}
 }
 

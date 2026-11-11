@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/thai-pc/fluxdocs/core/internal/psfont"
+	cb "github.com/thai-pc/fluxdocs/core/internal/psfont/cffbuild"
 	tb "github.com/thai-pc/fluxdocs/core/internal/psfont/t1build"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
@@ -783,10 +784,13 @@ func charged(rs *raster, paint func()) func() int64 {
 //   - glyph-tiny-visible: visible glyphs too small to cover a row (outline
 //     load, flatten, fill setup), per unit of steps + paint; sets
 //     glyphPointCost;
-//   - charstring-ops: Type 1 charstring operators of a glyph build (subrs,
-//     lines), charged at charstringOpCost each;
+//   - charstring-ops, charstring-ops-cff: Type 1 and Type 2 charstring
+//     operators of a glyph build (subrs, lines), charged at charstringOpCost
+//     each;
 //   - font-load: font dictionaries sharing one Type 1 program, each loaded
 //     once; sets fontLoadCost;
+//   - cid-widths-lists, cid-widths-ranges: a composite font's metrics over a
+//     64 Ki-item CIDFont /W; the costlier (ranges) sets cidWidthItemCost;
 //   - step-*: one interpreter step with no painting (a q/Q operator, a glyph
 //     advanced in an invisible render mode); the slowest sets
 //     defaultMaxOperators so a steps-only page stays ≲ 1 s native;
@@ -882,6 +886,23 @@ func BenchmarkCalibration(b *testing.B) {
 			return int64(g.Ops) * charstringOpCost
 		})
 	})
+	// Its Type 2 twin (a CFF glyph through local subroutines, bias 107):
+	// the same charge must fit the Type 2 interpreter.
+	cffBombFont := cb.Font{
+		Subrs: [][]byte{cb.CS(cb.Return), append(bytes.Repeat(cb.CS(-105, cb.CallSubr), 40), cb.CS(cb.Return)...),
+			append(bytes.Repeat(cb.CS(1, 2, cb.RLineTo), 40), cb.CS(cb.Return)...)},
+		Glyphs: []cb.Glyph{{Name: ".notdef", CS: append(cb.CS(0, 0, cb.RMoveTo), bytes.Repeat(cb.CS(-106, cb.CallSubr), 40)...)}},
+	}
+	cffBomb, err := psfont.ParseCFF(cffBombFont.Bytes(), psfont.Options{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Run("charstring-ops-cff", func(b *testing.B) {
+		calibrate(b, func() int64 {
+			g, _ := cffBomb.Outline(0)
+			return int64(g.Ops) * charstringOpCost
+		})
+	})
 
 	// Font dictionaries sharing one Type 1 program, each selected once: the
 	// per-dictionary load (resolve, metrics, code map), charged as
@@ -897,6 +918,20 @@ func BenchmarkCalibration(b *testing.B) {
 			return rs.b.paint
 		})
 	})
+
+	// A composite font's metrics over a CIDFont /W of maxWItems items, as
+	// "c [w1 w2 …]" lists and as "cfirst clast w" ranges (indexed for lookup
+	// after the read), each item charged cidWidthItemCost.
+	for _, form := range []string{"lists", "ranges"} {
+		r, fd := cidWidthsFont(b, form, 1<<16)
+		b.Run("cid-widths-"+form, func(b *testing.B) {
+			calibrate(b, func() int64 {
+				rs := newRaster(1, 1)
+				loadMetrics(r, fd, rs.b)
+				return rs.b.paint
+			})
+		})
+	}
 
 	const glyphs = 1 << 14
 	// Visible glyphs too small to cover a row: LoadGlyph and the fill setup
@@ -993,4 +1028,35 @@ func fontPageB(b *testing.B, content string) (*parse.Resolver, parse.PageInfo) {
 		b.Fatal(err)
 	}
 	return r, pages[0]
+}
+
+// cidWidthsFont returns a Type 0 font dictionary (Identity-H) whose CIDFont
+// /W holds n items: one "0 [w …]" list, or n "c c w" ranges ("ranges").
+func cidWidthsFont(tb testing.TB, form string, n int) (*parse.Resolver, parse.Dict) {
+	tb.Helper()
+	var w strings.Builder
+	if form == "ranges" {
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&w, "%d %d %d ", 2*i, 2*i, 400+i%7)
+		}
+	} else {
+		w.WriteString("0 [")
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&w, "%d ", 400+i%7)
+		}
+		w.WriteString("]")
+	}
+	r, err := parse.NewResolver(buildRenderPDF(map[int]string{
+		1: "<< /Type /Catalog >>",
+		2: "<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /DescendantFonts [3 0 R] >>",
+		3: "<< /Type /Font /Subtype /CIDFontType0 /W [" + w.String() + "] >>",
+	}, "<< /Size 4 /Root 1 0 R >>"))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	fd, ok, err := r.ResolveDict(parse.Reference{Number: 2})
+	if err != nil || !ok {
+		tb.Fatalf("font dictionary: %v", err)
+	}
+	return r, fd
 }
