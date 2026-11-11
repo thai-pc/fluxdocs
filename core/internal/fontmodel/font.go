@@ -47,6 +47,9 @@ type Options struct {
 	// Nil uses parse.DecodeStream. A caller that meters decoded bytes passes
 	// its own; a failed decode is treated as an absent stream.
 	Decode func(*parse.Stream) ([]byte, error)
+	// SkipToUnicode leaves /ToUnicode unread, for a caller that needs only
+	// the metrics (the renderer). Text then decodes as if the font had none.
+	SkipToUnicode bool
 }
 
 // Font is the model of one font dictionary. A Font is immutable after Load
@@ -77,6 +80,7 @@ type Font struct {
 	widths       [256]float64 // simple fonts, glyph units
 	hasWidth     [256]bool
 	missingWidth float64 // simple fonts, glyph units (/MissingWidth, default 0)
+	hasMissing   bool    // simple fonts: the descriptor has a numeric /MissingWidth
 
 	dw      float64             // Type 0 /DW, glyph units (default 1000)
 	cidLo   float64             // Type 0: the smallest of /DW and every /W width
@@ -156,7 +160,7 @@ func Load(r *parse.Resolver, obj parse.Object, opts Options) *Font {
 	if sub, ok := fd.GetName("Subtype"); ok && sub == "Type0" {
 		f.twoByte = true
 	}
-	if st, ok := resolveStream(r, fd["ToUnicode"]); ok {
+	if st, ok := resolveStream(r, fd["ToUnicode"]); ok && !opts.SkipToUnicode {
 		if dec, err := decode(st); err == nil {
 			f.toUni = parseCMap(dec)
 		}
@@ -445,6 +449,34 @@ func (f *Font) Advance(c Code) (lo, hi float64) {
 	}
 }
 
+// Width returns the /Widths entry of code c of a simple or Type 3 font in
+// text space at font size 1 (glyph units times the Type 3 /FontMatrix, or
+// 1/1000 for every other font, whatever the program's own matrix:
+// §9.6.2.1), and false when the font has no numeric entry for c (or is a
+// Type 0 font, or the Type 3 matrix is unusable). Needs Options.Metrics.
+func (f *Font) Width(c uint32) (float64, bool) {
+	if f == nil || !f.metrics || f.kind == Composite || c > 255 || !f.hasWidth[c] || !f.scaleOK {
+		return 0, false
+	}
+	return f.widths[c] * f.scale[0], true
+}
+
+// HasWidths reports whether a simple or Type 3 font has a /Widths array
+// (with a usable /FirstChar), whatever its entries. Needs Options.Metrics.
+func (f *Font) HasWidths() bool {
+	return f != nil && f.metrics && f.kind != Composite && f.hasWidths
+}
+
+// MissingWidth returns a simple font's /FontDescriptor /MissingWidth in text
+// space at font size 1, and false when the descriptor has no numeric entry
+// (or the font is not simple). Needs Options.Metrics.
+func (f *Font) MissingWidth() (float64, bool) {
+	if f == nil || !f.metrics || f.kind != Simple || !f.hasMissing {
+		return 0, false
+	}
+	return f.missingWidth * f.scale[0], true
+}
+
 // UnknownAdvance is Advance for a code whose value is unknown (the string's
 // segmentation is uncertain).
 func (f *Font) UnknownAdvance() (lo, hi float64) {
@@ -586,6 +618,7 @@ func (f *Font) loadMetrics(r *parse.Resolver, decode func(*parse.Stream) ([]byte
 		f.substituted = !f.embedded
 		if v, ok := resolveNumber(r, fdesc["MissingWidth"]); ok {
 			f.missingWidth = v
+			f.hasMissing = true
 		}
 		f.loadBBox(r, fdesc["FontBBox"])
 		f.loadDifferences(r)

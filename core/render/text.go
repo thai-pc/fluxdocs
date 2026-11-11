@@ -7,10 +7,11 @@ import (
 )
 
 // drawText rasterizes a shown string with the current font and text state,
-// advancing the text matrix by each glyph's width (plus character and word
-// spacing). Invisible render modes (3, 7) advance without drawing. Every glyph,
-// drawn or only advanced, is one budget step, so one Tj with a huge string is
-// bounded like a huge operator list.
+// advancing the text matrix by each code's width w0 (glyphFont.advance: a
+// simple font's /Widths) plus character and word spacing. Invisible render
+// modes (3, 7) advance without drawing. Every glyph, drawn or only advanced,
+// is one budget step, so one Tj with a huge string is bounded like a huge
+// operator list.
 func (in *interp) drawText(raw []byte) {
 	gf := in.gs.font
 	if gf == nil || len(raw) == 0 {
@@ -27,11 +28,7 @@ func (in *interp) drawText(raw []byte) {
 			in.drawGlyph(gf, gid)
 		}
 
-		wEm := 0.5
-		if ok {
-			wEm = gf.advanceEm(gid)
-		}
-		tx := (wEm*in.gs.fontSize + in.gs.charSpace)
+		tx := (gf.advance(code, gid, ok)*in.gs.fontSize + in.gs.charSpace)
 		if isSpace {
 			tx += in.gs.wordSpace
 		}

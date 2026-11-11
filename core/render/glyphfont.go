@@ -1,6 +1,9 @@
 package render
 
 import (
+	"errors"
+
+	"github.com/thai-pc/fluxdocs/core/internal/fontmodel"
 	"github.com/thai-pc/fluxdocs/core/parse"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/sfnt"
@@ -17,12 +20,16 @@ var glyphPPEM = fixed.I(1000)
 // glyphs. Type1 (/FontFile) and non-embedded standard-14 fonts are not loaded
 // in Wave 1 — their text simply does not render.
 //
+// A simple font's advances come from its /Widths (ISO 32000-1 §9.4.4,
+// §9.6.2.1), read through fontmodel; see advance.
+//
 // A glyphFont is not safe for concurrent use (sfnt.Buffer is scratch state); one
 // is built per page render, and a single page is interpreted sequentially.
 type glyphFont struct {
 	sf      *sfnt.Font
 	buf     sfnt.Buffer
-	twoByte bool // composite (Type0/Identity) font: codes are 2-byte glyph IDs
+	twoByte bool            // composite (Type0/Identity) font: codes are 2-byte glyph IDs
+	model   *fontmodel.Font // simple fonts: /Widths and /MissingWidth; nil for composite fonts
 }
 
 // loadFonts builds a glyphFont for each entry of a page's /Font resources.
@@ -82,7 +89,31 @@ func loadOneFont(r *parse.Resolver, fd parse.Dict, b *budget) *glyphFont {
 	if err != nil {
 		return nil
 	}
-	return &glyphFont{sf: sf, twoByte: twoByte}
+	gf := &glyphFont{sf: sf, twoByte: twoByte}
+	if !twoByte {
+		gf.model = loadMetrics(r, fd, b)
+	}
+	return gf
+}
+
+// errFontStream reports to fontmodel a font stream the budget did not decode
+// (a decode error or a trip); fontmodel treats it as absent.
+var errFontStream = errors.New("render: font stream not decoded")
+
+// loadMetrics reads a simple font's layout metrics (/Widths, /MissingWidth)
+// through fontmodel. /ToUnicode is not read; any other stream fontmodel
+// decodes goes through b.
+func loadMetrics(r *parse.Resolver, fd parse.Dict, b *budget) *fontmodel.Font {
+	return fontmodel.Load(r, fd, fontmodel.Options{
+		Metrics:       true,
+		SkipToUnicode: true,
+		Decode: func(st *parse.Stream) ([]byte, error) {
+			if data, ok := b.decode(st, 0); ok {
+				return data, nil
+			}
+			return nil, errFontStream
+		},
+	})
 }
 
 // descendantFont returns the CIDFont dictionary from a Type0 font's
@@ -145,6 +176,31 @@ func (gf *glyphFont) gid(code uint32) (sfnt.GlyphIndex, bool) {
 		return 0, false
 	}
 	return g, true
+}
+
+// advance returns the horizontal displacement w0 of code in text space at font
+// size 1 (§9.4.4): for a simple font with a /Widths array, the code's entry,
+// else (a code outside /FirstChar–/LastChar or a non-numeric entry) the
+// descriptor's /MissingWidth; otherwise (a composite font, a simple font with
+// no /Widths at all, or neither entry) the program's advance of the code's
+// glyph, or 0.5 em when the code has no glyph. ok and gid are gf.gid(code)'s
+// results.
+func (gf *glyphFont) advance(code uint32, gid sfnt.GlyphIndex, ok bool) float64 {
+	if gf.model.HasWidths() {
+		if w, has := gf.model.Width(code); has {
+			return w
+		}
+		if w, has := gf.model.MissingWidth(); has {
+			return w
+		}
+		// Deliberately lenient: Table 122 makes an absent /MissingWidth 0,
+		// but the program's advance is a better guess for a code /Widths
+		// does not cover.
+	}
+	if !ok {
+		return 0.5
+	}
+	return gf.advanceEm(gid)
 }
 
 // advanceEm returns a glyph's horizontal advance in em units (0..~1).
