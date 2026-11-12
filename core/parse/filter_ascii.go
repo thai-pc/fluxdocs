@@ -40,8 +40,15 @@ func (o *limitedOut) done() []byte {
 	return o.buf
 }
 
-// fail charges what was produced before an error.
+// fail charges what was produced before an error. Under a truncating
+// allowance (decodeStreamPrefix) reaching the allowance is not an error: the
+// output produced so far — whole chunks, a prefix of the full output — is
+// kept.
 func (o *limitedOut) fail(err error) ([]byte, error) {
+	if o.lim.truncate && errors.Is(err, ErrDecodeLimit) {
+		o.lim.truncated = true
+		return o.done(), nil
+	}
 	o.done()
 	return nil, err
 }
