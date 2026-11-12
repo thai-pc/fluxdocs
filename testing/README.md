@@ -9,7 +9,7 @@ Test strategy for the Go core + WASM. See security constraints in
 testing/
 ├── corpus/              # real PDFs for parser/render tests (NO real PII)
 │   ├── clean/           # spec-compliant PDFs (Word, LaTeX, Chrome print, Adobe)
-│   ├── malformed/       # spec-violating / corrupt PDFs — must parse leniently
+│   ├── malformed/       # spec-violating / corrupt PDFs — outcome per file pinned (TestCorpusMalformed)
 │   ├── encrypted/       # encrypted PDFs — test ErrEncryptedDocument
 │   ├── forms/           # AcroForm/XFA — test parse + fill (Pro)
 │   └── scanned/         # scanned images — test OCR fallback (Pro)
@@ -49,6 +49,20 @@ Each Go package also has its own `testdata/` (e.g.
    `FLUXDOCS_REQUIRE_GS=1`, so the oracle cannot be skipped there (the job is
    non-blocking until it has run green and stable on CI).
 5. Golden diffs (if any) reviewed by hand.
+
+## Cross-reference repair: the byte-identity gate
+
+Repair of damaged cross-reference data (docs/design/xref-reconstruction.md)
+runs only when the strict open fails, so a file that opens today must open
+exactly as before. `TestOpenManifest` (`corpus/manifest_test.go`) checks it:
+`corpus/testdata/open_manifest.tsv`, recorded at the commit before repair,
+holds per file the open outcome, page count, `ExtractText` hash, 72-DPI page-0
+pixel hash and a canonical `SaveTo` hash (object numbering is not stable from
+run to run). A row that opened there must match exactly; only `open_failed`
+rows may change. With `FLUXDOCS_EXTRA_CORPUS`, the extra corpus is compared
+with the manifest named by `FLUXDOCS_EXTRA_MANIFEST`
+(`FLUXDOCS_EXTRA_MANIFEST_WRITE` records one). `TestRepairCensus` measures the
+scan's object counts over the extra corpus.
 
 ## Redaction oracle (Ghostscript)
 

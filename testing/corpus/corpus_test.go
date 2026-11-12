@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/thai-pc/fluxdocs/core"
@@ -80,15 +81,49 @@ func TestCorpusClean(t *testing.T) {
 	}
 }
 
-// TestCorpusMalformed feeds each malformed PDF through the full pipeline. The
-// only requirement is robustness: OpenBytes may return an error or a document,
-// but nothing may panic or hang. If a document opens, every accessor is
-// exercised to reach the lenient-parsing code paths. The test completing is the
-// pass signal (a panic fails it; a hang trips the go-test timeout).
+// malformedOutcome is what opening one malformed corpus file must give
+// (docs/design/xref-reconstruction.md §1.1): whether it opens, its page count,
+// how it was repaired ("" for a strict open), whether its text holds the
+// corpus sample, and whether a repaired one saves.
+type malformedOutcome struct {
+	opens  bool
+	pages  int
+	method core.RepairMethod
+	text   bool
+	saves  bool
+}
+
+// malformedOutcomes pins every file in malformed/. truncated.pdf keeps its
+// catalog, page tree and page, but its content stream runs past the end of the
+// file, so its text does not load and SaveTo, which copies it, fails (as for
+// any such stream, repaired or not).
+var malformedOutcomes = map[string]malformedOutcome{
+	"bad_xref.pdf":       {true, 1, core.RepairObjectScan, true, true},
+	"cyclic_pages.pdf":   {true, 0, "", false, true},
+	"junk_prefix.pdf":    {true, 1, core.RepairHeaderOffset, true, true},
+	"missing_endobj.pdf": {true, 1, core.RepairObjectScan, true, true},
+	"no_trailer.pdf":     {true, 1, core.RepairObjectScan, true, true},
+	"truncated.pdf":      {true, 1, core.RepairObjectScan, false, false},
+}
+
+// TestCorpusMalformed feeds each malformed PDF through the full pipeline.
+// Each must give its malformedOutcomes row — accepting any clean rejection
+// hid that five of six files did not open — and nothing may panic or hang.
+// If a document opens, every accessor is exercised to reach the
+// lenient-parsing code paths, and a repaired one that saves must save to a
+// file that opens without repair.
 func TestCorpusMalformed(t *testing.T) {
-	for _, path := range pdfFiles(t, "malformed") {
+	files := pdfFiles(t, "malformed")
+	if len(files) != len(malformedOutcomes) {
+		t.Errorf("%d malformed files, %d expected outcomes: pin every file", len(files), len(malformedOutcomes))
+	}
+	for _, path := range files {
 		path := path
 		t.Run(filepath.Base(path), func(t *testing.T) {
+			want, known := malformedOutcomes[filepath.Base(path)]
+			if !known {
+				t.Fatalf("no expected outcome for %s", path)
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -104,8 +139,19 @@ func TestCorpusMalformed(t *testing.T) {
 			}
 			doc, err := core.OpenBytes(data)
 			noPanic(err)
+			if (err == nil) != want.opens {
+				t.Fatalf("OpenBytes err = %v, want opens=%v", err, want.opens)
+			}
 			if err != nil {
-				return // rejected cleanly — acceptable
+				return // rejected cleanly, as expected
+			}
+			rep, _ := doc.RepairReport()
+			if doc.PageCount != want.pages || rep.Method != want.method {
+				t.Errorf("%d pages, repair %q; want %d pages, repair %q", doc.PageCount, rep.Method, want.pages, want.method)
+			}
+			text, _ := doc.ExtractText(core.ExtractOptions{})
+			if strings.Contains(text, "Corpus text sample") != want.text {
+				t.Errorf("text %q: contains the corpus sample = %v, want %v", text, !want.text, want.text)
 			}
 			// Opened leniently: exercise the accessors; none may panic.
 			n := doc.GetPageCount()
@@ -118,6 +164,24 @@ func TestCorpusMalformed(t *testing.T) {
 			}
 			_, err = doc.ExtractText(core.ExtractOptions{})
 			noPanic(err)
+			if want.method != "" {
+				var buf bytes.Buffer
+				err := doc.SaveTo(&buf)
+				noPanic(err)
+				if (err == nil) != want.saves {
+					t.Fatalf("SaveTo err = %v, want saves=%v", err, want.saves)
+				}
+				if err != nil {
+					return
+				}
+				out, err := core.OpenBytes(buf.Bytes())
+				if err != nil {
+					t.Fatalf("re-open the saved repair: %v", err)
+				}
+				if _, again := out.RepairReport(); again || out.PageCount != doc.PageCount {
+					t.Errorf("saved repair: repaired %v, %d pages; want a strict open of %d", again, out.PageCount, doc.PageCount)
+				}
+			}
 		})
 	}
 }

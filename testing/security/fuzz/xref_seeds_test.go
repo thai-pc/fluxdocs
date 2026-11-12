@@ -51,12 +51,40 @@ func xrefSeedBytes() [][]byte {
 	}
 }
 
-// TestXrefSeedsRejected pins the seeds' contract beyond "no panic": each is an
-// ErrInvalidPDF, not a partial table that opens.
+// TestXrefSeedsRejected pins the seeds' contract beyond "no panic": a seed
+// over the entry cap is an ErrInvalidPDF (a resource bound is never retried
+// through repair), not a partial table that opens. The overflowing /Index
+// (the last seed) is damage rather than a bound: its table is rebuilt by the
+// object scan, which reports it, and the one page opens.
 func TestXrefSeedsRejected(t *testing.T) {
-	for i, s := range xrefSeedBytes() {
-		if _, err := core.OpenBytes(s); !errors.Is(err, core.ErrInvalidPDF) {
-			t.Errorf("seed %d: OpenBytes err = %v, want ErrInvalidPDF", i, err)
+	seeds := xrefSeedBytes()
+	want := []struct {
+		name     string
+		repaired bool // damage, rebuilt by the object scan; else a bound: ErrInvalidPDF
+	}{
+		{"/Size over the cap", false},
+		{"/Index, one range over the cap", false},
+		{"/Index, several ranges over the cap", false},
+		{"/Index, start+count overflows", true},
+	}
+	if len(want) != len(seeds) {
+		t.Fatalf("%d seeds, %d expectations", len(seeds), len(want))
+	}
+	for i, s := range seeds {
+		w := want[i]
+		doc, err := core.OpenBytes(s)
+		if !w.repaired {
+			if !errors.Is(err, core.ErrInvalidPDF) {
+				t.Errorf("%s: OpenBytes err = %v, want ErrInvalidPDF", w.name, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: OpenBytes: %v, want a repaired open", w.name, err)
+			continue
+		}
+		if _, ok := doc.RepairReport(); !ok || doc.PageCount != 1 {
+			t.Errorf("%s: repaired %v, %d pages; want a repaired open of 1 page", w.name, ok, doc.PageCount)
 		}
 	}
 }

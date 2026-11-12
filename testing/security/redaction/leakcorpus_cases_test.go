@@ -785,6 +785,7 @@ func leakCases() []leakCase {
 
 	cases = append(cases, inlineImageCases()...)
 	cases = append(cases, rvdCases()...)
+	cases = append(cases, repairCases()...)
 
 	// The malformed-content table: unreadable content fails closed.
 	for _, tc := range unreadableContentCases {

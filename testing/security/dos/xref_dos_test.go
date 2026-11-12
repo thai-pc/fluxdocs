@@ -90,8 +90,11 @@ func hostileXrefPDF(w, xrefDict string, body []byte, hybrid bool) []byte {
 // for a ~260 KB one. /Index counts are charged against maxXrefEntries before
 // the stream is decoded; a stream without /Index is charged the rows it
 // holds, and only maxXrefEntries+1 of them are decoded to find out. The open
-// fails with ErrInvalidPDF promptly, and a hybrid /XRefStm over the cap fails
-// the open rather than being silently dropped.
+// fails with ErrInvalidPDF promptly — a resource bound is never retried
+// through cross-reference repair — and a hybrid /XRefStm over the cap fails
+// the open rather than being silently dropped. An /Index whose start+count
+// overflows is damage, not a bound: the table is rebuilt by the object scan
+// (docs/design/xref-reconstruction.md §1.2) within the same bounds.
 func TestDoS_XrefStreamEntriesAreCapped(t *testing.T) {
 	body := zlibZeros(t, hostileXrefZeros)
 	// The /Size cases decode one /W [1 0 0] row past the 2 Mi-row cap: 2 MiB,
@@ -109,13 +112,14 @@ func TestDoS_XrefStreamEntriesAreCapped(t *testing.T) {
 		dict     string
 		hybrid   bool
 		maxAlloc uint64
+		repaired bool // damage, not a bound: opens through the object scan
 	}{
-		{"/Size 2^28", "/Size 268435456", false, sizeAlloc},
-		{"/Size 2^21+1", "/Size 2097153", false, sizeAlloc},
-		{"/Index one huge range", "/Size 4 /Index [0 268435456]", false, indexAlloc},
-		{"/Index ranges summing past the cap", "/Size 4 /Index [0 1048576 1048576 1048576 2097152 1]", false, indexAlloc},
-		{"/Index start+count overflow", "/Size 4 /Index [9223372036854775807 2]", false, indexAlloc},
-		{"hybrid /XRefStm /Size 2^28", "/Size 268435456", true, sizeAlloc},
+		{"/Size 2^28", "/Size 268435456", false, sizeAlloc, false},
+		{"/Size 2^21+1", "/Size 2097153", false, sizeAlloc, false},
+		{"/Index one huge range", "/Size 4 /Index [0 268435456]", false, indexAlloc, false},
+		{"/Index ranges summing past the cap", "/Size 4 /Index [0 1048576 1048576 1048576 2097152 1]", false, indexAlloc, false},
+		{"/Index start+count overflow", "/Size 4 /Index [9223372036854775807 2]", false, indexAlloc, true},
+		{"hybrid /XRefStm /Size 2^28", "/Size 268435456", true, sizeAlloc, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pdf := hostileXrefPDF("[1 0 0]", tc.dict, body, tc.hybrid)
@@ -123,12 +127,19 @@ func TestDoS_XrefStreamEntriesAreCapped(t *testing.T) {
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
 			start := time.Now()
-			_, err := core.OpenBytes(pdf)
+			doc, err := core.OpenBytes(pdf)
 			elapsed := time.Since(start)
 			runtime.ReadMemStats(&after)
 			alloc := after.TotalAlloc - before.TotalAlloc
 
-			if !errors.Is(err, core.ErrInvalidPDF) {
+			if tc.repaired {
+				if err != nil {
+					t.Fatalf("OpenBytes: %v, want a repaired open", err)
+				}
+				if rep, ok := doc.RepairReport(); !ok || rep.Method != core.RepairObjectScan {
+					t.Fatalf("RepairReport = %+v, %v; want an object scan", rep, ok)
+				}
+			} else if !errors.Is(err, core.ErrInvalidPDF) {
 				t.Fatalf("OpenBytes err = %v, want ErrInvalidPDF", err)
 			}
 			if alloc > tc.maxAlloc {
@@ -285,8 +296,10 @@ func TestDoS_XrefAtTheCap(t *testing.T) {
 // /Size 2^28 stream over 255 MiB of zeros (~250 KB of file) decoded the full
 // 256 MiB per section — 572 MiB allocated for one section, 2.29 GiB for four,
 // ~36 GiB projected for a 64-section chain — and opened. A /W field wider
-// than 8 bytes is now damage: the open fails before the stream is decoded,
-// and a hybrid /XRefStm section like it is dropped and the document opens.
+// than 8 bytes is now damage: the strict parse fails before the stream is
+// decoded, and the table is rebuilt by the object scan, which never decodes
+// it (docs/design/xref-reconstruction.md §1.2); a hybrid /XRefStm section
+// like it is dropped and the document opens from its classic table.
 func TestDoS_XrefStreamWideRows(t *testing.T) {
 	body := zlibZeros(t, 255<<20)
 	for _, hybrid := range []bool{false, true} {
@@ -296,15 +309,16 @@ func TestDoS_XrefStreamWideRows(t *testing.T) {
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
 			start := time.Now()
-			_, err := core.OpenBytes(pdf)
+			doc, err := core.OpenBytes(pdf)
 			elapsed := time.Since(start)
 			runtime.ReadMemStats(&after)
 			alloc := after.TotalAlloc - before.TotalAlloc
-			if hybrid && err != nil {
-				t.Fatalf("hybrid: OpenBytes: %v; want the damaged /XRefStm dropped", err)
+			if err != nil {
+				t.Fatalf("OpenBytes: %v; want the damaged section dropped (hybrid) or the table rebuilt", err)
 			}
-			if !hybrid && !errors.Is(err, core.ErrInvalidPDF) {
-				t.Fatalf("OpenBytes err = %v, want ErrInvalidPDF", err)
+			rep, repaired := doc.RepairReport()
+			if hybrid == repaired {
+				t.Fatalf("hybrid %v: RepairReport = %+v, %v; want a repair only without the classic table", hybrid, rep, repaired)
 			}
 			// Mostly the parser's copy of the ~250 KB stream body.
 			if alloc > 1<<20 {
