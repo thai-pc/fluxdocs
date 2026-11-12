@@ -1,6 +1,9 @@
 # Design: cross-reference reconstruction (brute-force object scan)
 
-Status: design (docs only), not yet approved. The open questions are in §11.
+Status: **Phases 0–2 implemented** (manifest gate and census, repair ladder,
+object scan); Phase 3 (ObjStm expansion) and Phase 4 (full corpus, fuzz and
+DoS sweep) are not. The maintainer's §11 decisions and the deviations found
+while implementing are in §12.
 Tier: **Core (MIT)**. Packages: `core/parse` (new `repair.go`, plus hooks in
 `resolver.go`), `core` (`open.go` repair ladder, `RepairReport`), `wasm`
 (one additive result field), `packages/core` (TS mirror). Pure Go, no CGO, no
@@ -198,7 +201,11 @@ comes **last in file order wins**, whatever its generation number. Under
 revision, so the last definition is the newest one. A redefinition after the
 number was freed carries a higher generation and is also later in the file.
 The resolver already looks objects up by number only (`object(ref.Number)`).
-`RepairReport.Duplicates` counts the shadowed definitions.
+`RepairReport.Duplicates` counts the shadowed definitions. A definition whose
+value does not parse on its span (a write cut short, garbage after a header)
+wins its number only when no definition of it parses: it never replaces a good
+earlier one. A load through a repaired table (scan or shifted) also checks that
+the header at the offset names the requested object.
 
 Shadowed definitions and objects that a later revision freed stay in the index
 but are unreachable from the winning graph. They are never resolved, so they
@@ -280,6 +287,35 @@ hand redaction a model that contains none of the real text. So:
   or `/Recipients` (public-key handler). Objects are pre-filtered by byte
   search within their span. The last match becomes `/Encrypt <n> 0 R`. Under
   §7.5.7 it cannot be in an ObjStm, so plain objects suffice.
+- If neither finds one, the scan still fails closed with
+  `parse.ErrEncryptionLost`, which `core` reports as `ErrEncryptedDocument`,
+  when the file shows that an encryption dictionary was lost:
+  - a kept header that does not parse whose dictionary bytes (its span up to
+    the first `stream` or `endobj`, so it cannot borrow the next object's
+    names) hold `/Encrypt` (a cross-reference stream dictionary cut short),
+    or match `lostShaped`, in this order: `/Recipients`, `/Filter /Standard`,
+    `/Filter /Adobe.PubSec` or a public-key `/SubFilter` (`adbe.pkcs7.s`
+    and a digit: s3, s4, s5, §7.6.5; not the signature `adbe.pkcs7.sha1`),
+    never excluded; `/Filter` with one of `/O`, `/U`, `/CF`, `/StmF`,
+    `/StrF`; then a signature dictionary is excluded (`/ByteRange`, `/Type
+    /Sig`, `/Type /DocTimeStamp`; a `/SubFilter` alone is not a signature
+    marker); then `/Filter` with `/P`; then a dictionary with `/Subtype` (an
+    image or font file) is excluded when its `/Filter` value is missing, not
+    a name, a stream filter, or a cut-short prefix of one (`/JBIG2`);
+    finally `/Filter` with a value that is not a stream filter (Table 6,
+    Table 94);
+  - any other header (masked as stream data, shadowed, or a winner) whose
+    dictionary bytes have the shape and that parses to an encryption
+    dictionary it cannot be (masked or shadowed), does not parse, or has the
+    keys but cannot be read as one (an indirect `/Filter`, or a stream
+    dictionary whose `/Filter` is not a stream filter);
+  - a trailer keyword followed by bytes naming `/Encrypt` that do not parse.
+
+  Names match as whole tokens outside literal and hexadecimal strings. A
+  string not terminated in the bytes is not trusted to be one: from a stray
+  `(` or `<` on, the rest is searched plainly, so damage cannot hide the
+  names after it. The search is one pass (two with that fallback), whatever
+  the bytes hold.
 - After that the normal path applies: `EnableDecryption` either succeeds or
   ends the ladder with `ErrEncryptedDocument`. Handlers R2–R4 derive the key
   from `/ID[0]`. If `/ID` is lost, the key is wrong, which only a password
@@ -313,6 +349,14 @@ has no budget or context today. The repair adds at most two linear passes plus
 Peak extra memory for a hostile 64 MiB file at the caps is estimated at about
 130–150 MiB (index plus map), released once the table is built. The
 implementation PR must measure it natively and under js/wasm.
+
+Measured natively (§12): the header index is sized once (16 B per `obj`
+keyword, capped at 64 MiB), a header that fails to parse costs no formatted
+error, and an indirect `/Length` object is read once on its own span. Dense
+8-byte headers grow the heap by at most 2 MB per input MB (16 B each) up to
+the 64 MiB index cap (+64 MB measured on 48 MiB); a 36 MB file at the caps
+(1 Mi objects, 3 Mi duplicates) by about 4 MB per input MB (+147 MB, the
+retained table map included), with 324 MB allocated in total.
 
 ---
 
@@ -599,3 +643,113 @@ files: none of them uses object streams.
 - **Q7. Cap values.** Confirm 1 Mi objects, 4 Mi candidates, 256 MiB stage-2
   decode and 64 trailer/catalog candidates after the Phase 0 census. If F1 is
   fixed, the strict path takes the same object cap.
+
+---
+
+## 12. Implementation notes (Phases 0–2)
+
+**Decisions (§11), as implemented.** Q1 (a): redaction runs on a repaired
+document; `RedactionReport.SourceRepaired` says so, and the verifier re-opens
+the output strictly (`openStrict`). Q2: `SignDocument` returns `ErrInvalidPDF`
+wrapped with "document was repaired; save and re-open it before signing" (no
+new sentinel); `sign.Sign` also refuses a repaired resolver. Q3, Q4, Q5: no.
+Q6: no `OpenOptions`; `Document.RepairReport()` is the opt-out check. Q7: the
+§4 caps stand (census below). Alongside: `Document.Encrypted` is now set for an
+encrypted source, and `Save`/`SaveTo` document that the output is decrypted.
+
+**Phase 0 census** (`TestRepairCensus`, the 1,491-file extra corpus): file
+size p50 9.8 KB, p99 420 KB, max 6.6 MB; xref entries p50 13, p99 248, max
+8,371; scan candidates and objects p50 12, p99 143, max 974; duplicates max
+128; slowest scan 62 ms. The caps (4 Mi candidates, 1 Mi objects) are more
+than 100× the observed maxima. On all 1,450 strict-opening files where the
+scan applies, it gives the same page count as the strict open; 41 files
+(2.7%) keep objects in object streams, where the scan refuses (below). The
+corpus is small-file-skewed, so the caps rest on the §4 reasoning, not on it.
+
+**Byte-identity gate (§8.3).** `TestOpenManifest`; manifest recorded at
+`4381a44`. After the change, the 13 `testing/corpus` rows that were not
+`open_failed` there (10 opened, 3 needed a user password) and all 1,491
+extra-corpus rows are identical; only the 5 `open_failed` rows changed. The `SaveTo` column is a
+canonical hash (DFS from the trailer, sorted keys, objects renumbered):
+`BuildDocument` numbers objects in Go map order, so its bytes already differ
+from run to run at the base commit (finding F6).
+
+**Deviations from the design.**
+
+- *No lazy stage 2 for /Root.* With no ObjStm expansion, /Root, /Info and the
+  catalog scan are settled at construction by a bounded, memoized,
+  dictionary-only read (`repairScan.peek`) that never touches the Resolver's
+  caches, so nothing is cached before decryption. Phase 3 needs stage 2 when
+  the catalog may be in an object stream.
+- *A winning `/Type /ObjStm` fails the scan* until Phase 3. Its objects would
+  resolve to null, and the document would open with pages missing: exactly
+  the partial table §4 forbids.
+- *A strict-path resource limit ends the ladder.* `errXrefLimit`,
+  `ErrDecodeLimit`, scan-limit errors, and the failures that `limitf` marks
+  (the `/Prev` chain length, the nesting depth, the page tree's depth and page
+  count, the ObjStm re-decode budget) are not retried by repair
+  (`parse.IsLimitError`, CONVENTIONS.md §4). The mark leaves each error's
+  message and `errors.Is` matches as they were. Damage (a `/W` field wider than 8, an
+  overflowing `/Index` range) is repaired as §1.2 says. The DoS and fuzz
+  gates that pinned `ErrInvalidPDF` for the damage cases now pin a repaired
+  open, with the same allocation and time bounds.
+- *A usable /Root needs `/Pages` to resolve to a dictionary* also when `/Type
+  /Catalog` is present (§3.5 required it only without `/Type`). Otherwise a
+  catalog whose page tree is gone would beat a later usable one.
+- *Indirect `/Length` (rule (b))* checks only the last header with that
+  number, reads its tokens on that header's span only, and memoizes the
+  result per number (failures included), so each lookup is O(log n) and N
+  streams naming one huge object read it once: a hostile file cannot make it
+  walk back through many same-numbered headers, nor re-lex one object per
+  stream (400 streams naming a 4 MB unterminated string took 14.7 s and 8 GB
+  before; 0.1 s and 60 MB now).
+- *Scan memory.* `headers` is allocated once from a count of `obj` keywords
+  (capped), and `iparser` in dictionary-only mode returns one static error for
+  every syntax failure. On 1 Mi headers plus 3 Mi duplicates (36 MB) total
+  allocation fell from 994 MB to 324 MB and heap growth from 227 MB to
+  147–191 MB. The `TestDoS_RepairScanIsBounded` cases bound heap growth
+  (`HeapSys`) as well as allocation.
+- *Scan parsing cost.* Every dictionary-only parse of the scan (`head`, the
+  indirect `/Length` read) lexes quietly (`nextTokenQuiet`,
+  `nextTokenInterned`): a lexer error — an unterminated string, an invalid
+  character or real, a stray `>`, a bad hex digit — is the static
+  `errTruncated` or `errScanSyntax`, never a formatted message; the strict
+  path's messages and `errors.Is` matches are unchanged. The scan also
+  collects a dictionary's entries on a scratch stack and builds its map only
+  when it closes, interns repeated names (at most 4096 per scan), sizes the
+  object table once (by the kept count up to 16 Ki headers, past that by a
+  1 MiB bitset count of the distinct numbers), and skips
+  the reference lookahead for a value that cannot start with an integer.
+  Two lexer changes apply to every path and return the same tokens: a
+  name without `#` escapes is copied once, and a short integer is parsed
+  without a string. On 1,000,000 headers each followed by an unterminated
+  `(` (the lin probe, 64 MB) the open fell from 4.4 s to 1.2 s; the
+  `TestDoS_RepairScanIsBounded` case of that shape (1 Mi headers, 66 MB)
+  takes about 2 s CPU on Go 1.23.4 and on Go 1.27, under its 5 s bound, with
+  213–219 MB allocated.
+- *Pass 1 indexes no `stream` keywords.* Pass 2 learns each stream's start
+  from the dictionary-only parse. The endstream and trailer lists share the
+  candidate cap with the headers.
+- `NewResolverShifted` is exported (core calls it); the design called it
+  unexported.
+- `RepairReport.StrictError` elides every double-quoted run and every
+  single-quoted rune literal in the parse error (`elideQuoted`), since a
+  quoted keyword or character can be document text.
+- Every internal re-open of a file FluxDocs wrote (the redaction verifier and
+  its test hook, Merge, Split, the flatten, form, watermark and PDF/A writers,
+  SignDocument's signed output) uses `openStrict`.
+- *Fail-closed name search.* `scanNames` drives every name test of the
+  encryption checks in one pass; `TestDoS_RepairScanIsBounded` pins it on
+  4 Mi `(` and on 1 Mi `(/Type`. A damaged dictionary of a third-party
+  handler (`/Filter /FOPN_foweb`) fails closed even when its span runs into
+  an image dictionary's `/Subtype`.
+- *Fail-closed false positives are accepted.* An uncompressed encrypted PDF
+  embedded in a damaged, unencrypted outer file shows a masked encryption
+  dictionary, and the outer file then fails as `ErrEncryptedDocument`
+  instead of opening. That trade is deliberate: the alternative risks
+  opening ciphertext as plaintext.
+
+**F6 (new).** `parse.BuildDocument` output is not deterministic: object
+numbers follow Go map iteration, so the same document saves to different bytes
+from run to run. That does not affect correctness, but it is not
+reproducible. Out of scope here.

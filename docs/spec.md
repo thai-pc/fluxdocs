@@ -660,8 +660,18 @@ doc.Rotate(pageIndex int, degrees int) error
 doc.Reorder(newOrder []int) error
 doc.Save(path string) error
 doc.SaveTo(w io.Writer) error
+doc.RepairReport() (RepairReport, bool)
 doc.Close() error
 ```
+
+`Save` / `SaveTo` always write a full rewrite of the current pages (fresh object
+numbers, one xref, no earlier revisions), never an incremental update. The output
+is never encrypted: a document opened from an encrypted source (`Encrypted` is
+true) is written decrypted and without `/Encrypt`. Only sources the empty user
+password opens can be opened today, so no password protection is lost, but the
+file's encryption is. `RepairReport` reports whether the open had to rebuild
+damaged cross-reference data (§13.1); a server that rejects damaged uploads
+checks it after the open.
 
 `RenderPage` / `RenderAllPages` are `RenderPageContext` / `RenderAllPagesContext`
 with `context.Background()`. Every page render runs under the per-page budget in
@@ -1564,7 +1574,16 @@ function resolveObject(file, objectNumber, generation):
 
 **Edge cases to handle:**
 - Corrupt/truncated file — fall back to a brute-force scan of the whole file for
-  `obj`/`endobj` markers
+  `obj`/`endobj` markers. As implemented (`docs/design/xref-reconstruction.md`):
+  only when the strict open fails, so a file that opens from its own xref opens
+  identically; first a retry with every offset shifted by the bytes before
+  `%PDF-`, then a bounded two-pass scan (last definition in file order wins,
+  headers inside stream data masked, trailer synthesized, a lost `/Encrypt`
+  found by shape so an encrypted file never opens as plaintext). A strict-path
+  resource limit is never retried through the scan, and a scan that finds an
+  object stream fails until object-stream expansion lands. The document
+  reports it (`RepairReport`), saves only as a full rewrite, and refuses
+  `SignDocument`.
 - Multiple xref tables from incremental updates — must follow the `/Prev` order
   correctly to get the newest version
 - Nested object streams (a compressed object inside a compressed object — rare,
