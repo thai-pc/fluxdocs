@@ -15,6 +15,9 @@ const ALL_CODES = [
   "canceled",
   "invalid_pdf",
   "encrypted",
+  "password_required",
+  "wrong_password",
+  "save_would_decrypt",
   "page_not_found",
   "unsupported_format",
   "invalid_annotation",
@@ -189,4 +192,29 @@ test("open passes the repaired flag through, false when absent", () => {
   const repaired = new FluxDocs(mockAPI({}, { ...OK, repaired: true })).open(new Uint8Array([1]));
   assert.equal(repaired.repaired, true);
   assert.equal(repaired.pageCount, 1);
+});
+
+test("open passes the options to the core and the encrypted flag back", () => {
+  const seen = [];
+  const api = mockAPI({});
+  api.open = (_bytes, opts) => {
+    seen.push(opts);
+    return { ...OK, handle: 1, pageCount: 1, encrypted: true };
+  };
+  const rt = new FluxDocs(api);
+  const doc = rt.open(new Uint8Array([1]), { password: "pw", allowDecryptedSave: true });
+  assert.deepEqual(seen, [{ password: "pw", allowDecryptedSave: true }]);
+  assert.equal(doc.encrypted, true);
+  rt.open(new Uint8Array([1]));
+  assert.deepEqual(seen[1], {});
+  assert.equal(new FluxDocs(mockAPI({})).open(new Uint8Array([1])).encrypted, false);
+});
+
+test("password errors carry their codes", () => {
+  for (const code of ["password_required", "wrong_password"]) {
+    const rt = new FluxDocs(mockAPI({}, { error: `open: ${code}`, code }));
+    assert.equal(caught(() => rt.open(new Uint8Array([1]))).code, code);
+  }
+  const doc = new FluxDoc(mockAPI({ error: "save: x", code: "save_would_decrypt" }), 1, 1);
+  assert.equal(caught(() => doc.save()).code, "save_would_decrypt");
 });

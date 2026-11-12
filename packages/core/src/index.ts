@@ -7,6 +7,7 @@ import type {
   Annotation,
   AnnotationInput,
   FluxDocsErrorCode,
+  OpenOptions,
   PageSize,
   RenderOptions,
 } from "./types.js";
@@ -16,6 +17,7 @@ export type {
   AnnotationInput,
   AnnotationType,
   FluxDocsErrorCode,
+  OpenOptions,
   PageSize,
   Point,
   Rect,
@@ -30,6 +32,9 @@ const ERROR_CODES: ReadonlySet<string> = new Set<FluxDocsErrorCode>([
   "canceled",
   "invalid_pdf",
   "encrypted",
+  "password_required",
+  "wrong_password",
+  "save_would_decrypt",
   "page_not_found",
   "unsupported_format",
   "invalid_annotation",
@@ -85,7 +90,10 @@ interface Envelope {
 /** The raw function surface the WASM registers on globalThis.fluxdocs. */
 interface RawAPI {
   version(): Envelope & { version: string };
-  open(bytes: Uint8Array): Envelope & { handle: number; pageCount: number; repaired?: boolean };
+  open(
+    bytes: Uint8Array,
+    opts?: OpenOptions,
+  ): Envelope & { handle: number; pageCount: number; repaired?: boolean; encrypted?: boolean };
   close(handle: number): Envelope;
   pageCount(handle: number): Envelope & { count: number };
   pageSize(handle: number, index: number): Envelope & PageSize;
@@ -166,10 +174,20 @@ export class FluxDocs {
     return unwrap(this.api.version()).version;
   }
 
-  /** Opens a PDF from its bytes. Throws FluxDocsError on a parse failure. */
-  open(bytes: Uint8Array): FluxDoc {
-    const res = unwrap(this.api.open(bytes));
-    return new FluxDoc(this.api, res.handle, res.pageCount, res.repaired === true);
+  /**
+   * Opens a PDF from its bytes. Throws FluxDocsError on a parse failure; for
+   * an encrypted document that needs a password, code `"password_required"`
+   * (none given) or `"wrong_password"`.
+   */
+  open(bytes: Uint8Array, opts: OpenOptions = {}): FluxDoc {
+    const res = unwrap(this.api.open(bytes, opts));
+    return new FluxDoc(
+      this.api,
+      res.handle,
+      res.pageCount,
+      res.repaired === true,
+      res.encrypted === true,
+    );
   }
 }
 
@@ -189,6 +207,12 @@ export class FluxDoc {
      * renders and saves normally; `save()` writes a well-formed file.
      */
     public readonly repaired: boolean = false,
+    /**
+     * True when the source file is encrypted (the Go `Document.Encrypted`):
+     * its content is decrypted as it is read, and `save()` writes it
+     * unencrypted (or refuses, for a document opened with its password).
+     */
+    public readonly encrypted: boolean = false,
   ) {}
 
   private check(): void {
@@ -240,7 +264,12 @@ export class FluxDoc {
     return unwrap(this.api.exportAnnotations(this.handle)).json;
   }
 
-  /** Serializes the document (without baking in annotations) to PDF bytes. */
+  /**
+   * Serializes the document (without baking in annotations) to PDF bytes. The
+   * output is never encrypted; for a document opened with its password it
+   * throws code `"save_would_decrypt"` unless opened with
+   * `allowDecryptedSave`.
+   */
   save(): Uint8Array {
     this.check();
     return unwrap(this.api.save(this.handle)).bytes;

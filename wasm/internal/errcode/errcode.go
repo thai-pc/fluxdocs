@@ -22,7 +22,10 @@ const (
 	Timeout           = "timeout"
 	Canceled          = "canceled"
 	InvalidPDF        = "invalid_pdf"
-	Encrypted         = "encrypted"
+	Encrypted         = "encrypted"          // encrypted and cannot be opened (or signed); no password helps
+	PasswordRequired  = "password_required"  // encrypted; open again with a password
+	WrongPassword     = "wrong_password"     // the password is neither the user nor the owner password
+	SaveWouldDecrypt  = "save_would_decrypt" // a save of a password-protected document needs allowDecryptedSave
 	PageNotFound      = "page_not_found"
 	UnsupportedFormat = "unsupported_format"
 	InvalidAnnotation = "invalid_annotation"
@@ -54,13 +57,28 @@ var table = []struct {
 	{Internal, []error{core.ErrInternal}},
 }
 
-// Of returns the envelope code for err: "" for nil, the first matching table
-// entry, or Unknown. It never returns InvalidHandle, which only the WASM
+// Of returns the envelope code for err: "" for nil; PasswordRequired,
+// WrongPassword or SaveWouldDecrypt for a *core.EncryptionError with that
+// reason; otherwise the first matching table entry, or Unknown. It never returns InvalidHandle, which only the WASM
 // boundary's handle check sets. An unmapped error is Unknown, not Internal, so
 // it stays distinguishable from a recovered panic.
 func Of(err error) string {
 	if err == nil {
 		return ""
+	}
+	// An *EncryptionError's reason picks a finer code than Encrypted, so a
+	// viewer knows whether to prompt for a password; the other reasons stay
+	// Encrypted.
+	var ee *core.EncryptionError
+	if errors.As(err, &ee) {
+		switch ee.Reason {
+		case core.EncryptionPasswordRequired:
+			return PasswordRequired
+		case core.EncryptionWrongPassword:
+			return WrongPassword
+		case core.EncryptionSaveWouldDecrypt:
+			return SaveWouldDecrypt
+		}
 	}
 	for _, e := range table {
 		for _, s := range e.sentinel {

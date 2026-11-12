@@ -279,4 +279,34 @@ assert(hugeDPI.code === "canvas_too_large" && /exceeds/.test(hugeDPI.error), `dp
 assert(fluxdocs.extractText(again.handle).text.includes("Hello WASM"), "extractText after rejected render");
 fluxdocs.close(again.handle);
 
+// AES-256 (R6) with a user password (testing/corpus/encrypted, written by
+// qpdf and read by Ghostscript): the password option, its error codes, and the
+// save policy, all inside the WASM core.
+const r6 = new Uint8Array(readFileSync(join(repo, "testing", "corpus", "encrypted", "qpdf_r6_user.pdf")));
+const noPw = fluxdocs.open(r6);
+assert(noPw.code === "password_required" && noPw.handle === undefined, `R6 without a password: ${JSON.stringify(noPw)}`);
+const badPw = fluxdocs.open(r6, { password: "Guess-1234" });
+assert(badPw.code === "wrong_password" && !badPw.error.includes("Guess-1234"), `R6 wrong password: ${JSON.stringify(badPw)}`);
+const badType = fluxdocs.open(r6, { password: 42 });
+assert(badType.code === "invalid_argument", `R6 non-string password: ${JSON.stringify(badType)}`);
+const withPw = fluxdocs.open(r6, { password: "user" });
+assert(withPw.error === "" && withPw.encrypted === true, `R6 user password: ${withPw.error}`);
+assert(fluxdocs.extractText(withPw.handle).text.includes("AES256-OK-r6-user"), "R6 text decrypted");
+const refused = fluxdocs.save(withPw.handle);
+assert(refused.code === "save_would_decrypt" && refused.bytes === undefined, `R6 save refused: ${JSON.stringify(refused)}`);
+fluxdocs.close(withPw.handle);
+const allowed = fluxdocs.open(r6, { password: "owner", allowDecryptedSave: true });
+assert(allowed.error === "", `R6 owner password: ${allowed.error}`);
+const plainSave = fluxdocs.save(allowed.handle);
+assert(plainSave.error === "" && plainSave.bytes.length > 0, `R6 save with allowDecryptedSave: ${plainSave.error}`);
+const reopened = fluxdocs.open(plainSave.bytes);
+assert(reopened.error === "" && reopened.encrypted === false, `saved copy reopens unencrypted: ${reopened.error}`);
+assert(fluxdocs.extractText(reopened.handle).text.includes("AES256-OK-r6-user"), "saved copy text");
+fluxdocs.close(allowed.handle);
+fluxdocs.close(reopened.handle);
+const ownerOnly = fluxdocs.open(new Uint8Array(readFileSync(join(repo, "testing", "corpus", "encrypted", "qpdf_r6_owner_only.pdf"))));
+assert(ownerOnly.error === "" && ownerOnly.encrypted === true, `R6 owner-only opens: ${ownerOnly.error}`);
+assert(fluxdocs.save(ownerOnly.handle).error === "", "R6 owner-only saves");
+fluxdocs.close(ownerOnly.handle);
+
 console.log(`OK — ${passed} assertions passed`);

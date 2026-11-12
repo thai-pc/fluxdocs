@@ -38,7 +38,10 @@ one of a closed set, for programmatic handling:
 | `timeout` | the render passed `timeoutMs` |
 | `canceled` | the render was canceled |
 | `invalid_pdf` | not a valid PDF |
-| `encrypted` | the document is encrypted |
+| `encrypted` | the document is encrypted and cannot be opened (unsupported or damaged encryption) or signed; no password helps |
+| `password_required` | the document needs a password: call `open(bytes, {password})` |
+| `wrong_password` | the password is neither the user nor the owner password |
+| `save_would_decrypt` | `save` would write a document opened with its password unencrypted; open it with `allowDecryptedSave: true` to allow that |
 | `page_not_found` | page index out of range |
 | `unsupported_format` | unsupported `format` |
 | `invalid_annotation` | annotation failed validation, or not found |
@@ -50,7 +53,7 @@ one of a closed set, for programmatic handling:
 | Function | Returns |
 |---|---|
 | `version()` | `{error, version}` |
-| `open(bytes: Uint8Array)` | `{error, handle, pageCount}` |
+| `open(bytes: Uint8Array, opts?: {password?: string, allowDecryptedSave?: boolean})` | `{error, handle, pageCount, repaired, encrypted}` |
 | `close(handle)` | `{error}` |
 | `pageCount(handle)` | `{error, count}` |
 | `pageSize(handle, index)` | `{error, width, height, rotation}` |

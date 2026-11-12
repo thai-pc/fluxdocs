@@ -88,6 +88,25 @@ export interface RenderOptions {
   timeoutMs?: number;
 }
 
+/** Options for opening a document (the Go `core.OpenOptions`). */
+export interface OpenOptions {
+  /**
+   * The password of an encrypted document, tried as the user password and
+   * then as the owner password. Absent or empty means the empty user
+   * password, which opens documents that only restrict permissions. It is
+   * used only to derive the decryption key inside the WASM core: it is never
+   * sent anywhere, logged, put in an error message, or kept.
+   */
+  password?: string;
+  /**
+   * Lets `save()` write a document opened with its password unencrypted
+   * (saves are never encrypted). Without it such a save throws a
+   * FluxDocsError with code `"save_would_decrypt"`. Documents the empty
+   * password opens are saved decrypted either way.
+   */
+  allowDecryptedSave?: boolean;
+}
+
 /**
  * The machine-readable reason carried by {@link FluxDocsError}. The set is
  * closed; new codes are only ever added.
@@ -101,7 +120,16 @@ export interface RenderOptions {
  *   retry may succeed.
  * - `canceled`: the operation was canceled.
  * - `invalid_pdf`: the bytes are not a readable PDF.
- * - `encrypted`: the document is encrypted and cannot be opened.
+ * - `encrypted`: the document is encrypted and cannot be opened (an
+ *   unsupported or damaged encryption dictionary), or cannot be signed. No
+ *   password helps.
+ * - `password_required`: the document is encrypted and needs a password;
+ *   open it again with {@link OpenOptions.password}.
+ * - `wrong_password`: {@link OpenOptions.password} is neither the user nor
+ *   the owner password.
+ * - `save_would_decrypt`: `save()` would write a password-protected document
+ *   unencrypted; open it with {@link OpenOptions.allowDecryptedSave} to allow
+ *   that.
  * - `page_not_found`: the page index is out of range.
  * - `unsupported_format`: `RenderOptions.format` is not "png" or "jpeg".
  * - `invalid_annotation`: the annotation is invalid or was not found.
@@ -120,6 +148,9 @@ export type FluxDocsErrorCode =
   | "canceled"
   | "invalid_pdf"
   | "encrypted"
+  | "password_required"
+  | "wrong_password"
+  | "save_would_decrypt"
   | "page_not_found"
   | "unsupported_format"
   | "invalid_annotation"

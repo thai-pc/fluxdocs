@@ -171,12 +171,38 @@ func version(js.Value, []js.Value) any {
 	return o
 }
 
-// open(bytes: Uint8Array) -> {error, handle, pageCount, repaired}
+// open(bytes: Uint8Array, opts?) -> {error, code, handle, pageCount, repaired, encrypted}
+// opts: { password?: string, allowDecryptedSave?: boolean } (core.OpenOptions).
+//
+// An encrypted document that needs a password fails with code
+// "password_required" (none given) or "wrong_password"; a save of a document
+// opened with its password fails with "save_would_decrypt" unless
+// allowDecryptedSave was set. The password stays in this call: it is never
+// logged, echoed in an error, or kept.
 func open(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return errResult(errcode.InvalidArgument, "open: expected a Uint8Array of PDF bytes")
 	}
-	doc, err := core.OpenBytes(bytesArg(args[0]))
+	var opts core.OpenOptions
+	if len(args) >= 2 {
+		switch o := args[1]; o.Type() {
+		case js.TypeUndefined, js.TypeNull:
+		case js.TypeObject:
+			switch v := o.Get("password"); v.Type() {
+			case js.TypeUndefined, js.TypeNull:
+			case js.TypeString:
+				opts.Password = v.String()
+			default:
+				return errResult(errcode.InvalidArgument, "open: password must be a string")
+			}
+			if v := o.Get("allowDecryptedSave"); v.Type() == js.TypeBoolean {
+				opts.AllowDecryptedSave = v.Bool()
+			}
+		default:
+			return errResult(errcode.InvalidArgument, "open: options must be an object")
+		}
+	}
+	doc, err := core.OpenBytesWithOptions(bytesArg(args[0]), opts)
 	if err != nil {
 		return errFrom("open", err)
 	}
@@ -188,7 +214,8 @@ func open(_ js.Value, args []js.Value) any {
 	o.Set("handle", h)
 	o.Set("pageCount", doc.PageCount)
 	_, repaired := doc.RepairReport()
-	o.Set("repaired", repaired) // the cross-reference data was rebuilt at open
+	o.Set("repaired", repaired)       // the cross-reference data was rebuilt at open
+	o.Set("encrypted", doc.Encrypted) // the source is encrypted; content is decrypted as it is read
 	return o
 }
 
@@ -354,7 +381,9 @@ func int64Opt(v js.Value) (int64, bool) {
 	return jsopt.Int64(v.Float())
 }
 
-// save(handle) -> {error, bytes}
+// save(handle) -> {error, code, bytes}. The output is never encrypted; a
+// document opened with its password fails with "save_would_decrypt" unless
+// it was opened with allowDecryptedSave.
 func save(_ js.Value, args []js.Value) any {
 	doc, errObj, ok := docArg(args)
 	if !ok {

@@ -60,7 +60,8 @@ try {
 ```
 
 `code` is a `FluxDocsErrorCode`: `canvas_too_large`, `budget_exceeded`,
-`timeout`, `canceled`, `invalid_pdf`, `encrypted`, `page_not_found`,
+`timeout`, `canceled`, `invalid_pdf`, `encrypted`, `password_required`,
+`wrong_password`, `save_would_decrypt`, `page_not_found`,
 `unsupported_format`, `invalid_annotation`, `invalid_argument`,
 `invalid_handle` (also: any call on a closed `FluxDoc`), `internal` (a FluxDocs
 bug, or the runtime failed to load), or `unknown` (anything else, including a
@@ -87,8 +88,14 @@ render keeps the main thread busy until it finishes or hits a limit.
 ## API
 
 - `loadFluxDocs(wasm, opts?) => Promise<FluxDocs>` — instantiate the core.
-- `FluxDocs.open(bytes) => FluxDoc`, `FluxDocs.version()`.
-- `FluxDoc`: `pageCount`, `repaired`, `pageSize(i)`, `extractText()`, `extractTextByPage(i)`,
+- `FluxDocs.open(bytes, opts?) => FluxDoc`, `FluxDocs.version()`. `opts` is
+  `{ password?, allowDecryptedSave? }`: the password of an encrypted document
+  (RC4, AES-128, AES-256), used only inside the WASM core to derive the key
+  and never sent, logged or kept. Without one, a document that needs it throws
+  `password_required`; a wrong one throws `wrong_password`. `save()` output is
+  never encrypted, so saving a document opened with its password throws
+  `save_would_decrypt` unless `allowDecryptedSave` is set.
+- `FluxDoc`: `pageCount`, `repaired`, `encrypted`, `pageSize(i)`, `extractText()`, `extractTextByPage(i)`,
   `renderPage(i, opts?)`, `addAnnotation(a)`, `getAnnotations(i)`,
   `exportAnnotations()`, `save()`, `close()`.
 

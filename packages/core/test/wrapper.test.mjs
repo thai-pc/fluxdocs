@@ -174,3 +174,26 @@ test("render budget options: unlimited, ignored, and default values still render
     doc.close();
   }
 });
+
+test("AES-256 password and save policy through the wrapper", () => {
+  const r6 = new Uint8Array(
+    readFileSync(join(repo, "testing", "corpus", "encrypted", "qpdf_r6_user.pdf")),
+  );
+  assert.throws(() => runtime.open(r6), (err) => err instanceof FluxDocsError && err.code === "password_required");
+  assert.throws(
+    () => runtime.open(r6, { password: "nope" }),
+    (err) => err instanceof FluxDocsError && err.code === "wrong_password" && !err.message.includes("nope"),
+  );
+  const doc = runtime.open(r6, { password: "user" });
+  assert.equal(doc.encrypted, true);
+  assert.ok(doc.extractText().includes("AES256-OK-r6-user"));
+  assert.throws(() => doc.save(), (err) => err instanceof FluxDocsError && err.code === "save_would_decrypt");
+  doc.close();
+  const allowed = runtime.open(r6, { password: "owner", allowDecryptedSave: true });
+  const saved = allowed.save();
+  allowed.close();
+  const plain = runtime.open(saved);
+  assert.equal(plain.encrypted, false);
+  assert.ok(plain.extractText().includes("AES256-OK-r6-user"));
+  plain.close();
+});
