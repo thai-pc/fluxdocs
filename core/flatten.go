@@ -61,7 +61,7 @@ func (d *Document) FlattenAnnotations() (_ *Document, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenBytes(built)
+	return openStrict(built)
 }
 
 // flattenOps generates the PDF content-stream operators for one page's

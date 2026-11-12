@@ -34,6 +34,12 @@ type RedactionReport struct {
 	// (e.g. "Title"): they held text the plan removed, or matched a
 	// RedactText pattern.
 	RemovedInfoFields []string
+	// SourceRepaired is set when the redacted document's cross-reference
+	// data was repaired at open (Document.RepairReport): the redaction is of
+	// FluxDocs' reading of a damaged file. The output itself is a clean
+	// rebuild of exactly what was shown and verified, and opens without
+	// repair.
+	SourceRepaired bool
 }
 
 // RedactionExtension is one page the redaction was extended to.

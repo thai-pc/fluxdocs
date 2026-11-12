@@ -88,7 +88,7 @@ func (d *Document) Watermark(opts WatermarkOptions) (_ *Document, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenBytes(built)
+	return openStrict(built)
 }
 
 // watermarkTargets resolves the target page set. An empty list means all pages;

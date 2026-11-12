@@ -329,7 +329,7 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 			built = redactHooks.mutate(built)
 		}
 		if redactHooks.noVerify {
-			return OpenBytes(built)
+			return openStrict(built)
 		}
 		out, res, err := d.verifyRedaction(built, plan, ns, prepassed, budget)
 		if err != nil {
@@ -337,6 +337,7 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 		}
 		if res.empty() {
 			report := d.finishReport(plan)
+			report.SourceRepaired = d.repair != nil
 			out.mu.Lock()
 			out.redactionReport = &report
 			out.mu.Unlock()

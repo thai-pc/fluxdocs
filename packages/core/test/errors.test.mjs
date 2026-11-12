@@ -183,3 +183,10 @@ test("loadFluxDocs throws internal when the WASM does not register its API", asy
     return true;
   });
 });
+
+test("open passes the repaired flag through, false when absent", () => {
+  assert.equal(new FluxDocs(mockAPI({})).open(new Uint8Array([1])).repaired, false);
+  const repaired = new FluxDocs(mockAPI({}, { ...OK, repaired: true })).open(new Uint8Array([1]));
+  assert.equal(repaired.repaired, true);
+  assert.equal(repaired.pageCount, 1);
+});

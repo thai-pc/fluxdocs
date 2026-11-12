@@ -88,7 +88,7 @@ render keeps the main thread busy until it finishes or hits a limit.
 
 - `loadFluxDocs(wasm, opts?) => Promise<FluxDocs>` — instantiate the core.
 - `FluxDocs.open(bytes) => FluxDoc`, `FluxDocs.version()`.
-- `FluxDoc`: `pageCount`, `pageSize(i)`, `extractText()`, `extractTextByPage(i)`,
+- `FluxDoc`: `pageCount`, `repaired`, `pageSize(i)`, `extractText()`, `extractTextByPage(i)`,
   `renderPage(i, opts?)`, `addAnnotation(a)`, `getAnnotations(i)`,
   `exportAnnotations()`, `save()`, `close()`.
 

@@ -70,7 +70,10 @@ func (r *residuals) empty() bool {
 // Returns ErrRedactionVerification (wrapped) for a failure, or a
 // *RedactionError (budget_exceeded) past the call's budget.
 func (d *Document) verifyRedaction(built []byte, plan *redactPlan, ns *needleSets, prepassed bool, budget *callBudget) (*Document, *residuals, error) {
-	out, err := OpenBytes(built)
+	// Re-open strictly (xref-reconstruction.md §5 rule R.3): BuildDocument
+	// output is well-formed, so an output that needs repair is a writer bug,
+	// never something to re-scan.
+	out, err := openStrict(built)
 	if err != nil {
 		return nil, nil, verificationError("the redacted output does not open")
 	}

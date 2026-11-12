@@ -151,7 +151,7 @@ func (d *Document) FlattenForm() (_ *Document, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenBytes(built)
+	return openStrict(built)
 }
 
 // flattenFormContent generates the content-stream operators that draw each

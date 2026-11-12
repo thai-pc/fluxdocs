@@ -39,9 +39,16 @@ const byteRangeField = 10
 // updated catalog are appended, along with an incremental xref/trailer. This is
 // an invisible signature (no page widget).
 //
-// r must be the resolver the original bytes were parsed from. Returns an error
-// if the key/cert cannot be parsed or the document lacks an indirect /Root.
+// r must be the resolver the original bytes were parsed from, and must not be
+// a repaired one (parse.Resolver.Repair): appending to a file whose
+// cross-reference data had to be rebuilt keeps its damaged revisions
+// (docs/design/xref-reconstruction.md §5 rule R). Returns an error if r was
+// repaired, the key/cert cannot be parsed or the document lacks an indirect
+// /Root.
 func Sign(r *parse.Resolver, opts Options) ([]byte, error) {
+	if _, repaired := r.Repair(); repaired {
+		return nil, errors.New("sign: document was repaired; save and re-open it before signing")
+	}
 	cert, key, err := parseKeyPair(opts.CertPEM, opts.KeyPEM)
 	if err != nil {
 		return nil, err

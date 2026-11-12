@@ -171,7 +171,7 @@ func version(js.Value, []js.Value) any {
 	return o
 }
 
-// open(bytes: Uint8Array) -> {error, handle}
+// open(bytes: Uint8Array) -> {error, handle, pageCount, repaired}
 func open(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return errResult(errcode.InvalidArgument, "open: expected a Uint8Array of PDF bytes")
@@ -187,6 +187,8 @@ func open(_ js.Value, args []js.Value) any {
 	o := okResult()
 	o.Set("handle", h)
 	o.Set("pageCount", doc.PageCount)
+	_, repaired := doc.RepairReport()
+	o.Set("repaired", repaired) // the cross-reference data was rebuilt at open
 	return o
 }
 

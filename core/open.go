@@ -2,8 +2,10 @@ package core
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"unicode/utf16"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
@@ -37,44 +39,144 @@ func OpenDocument(path string) (*Document, error) {
 // OpenBytes parses an in-memory PDF. It is the WASM/client-friendly entry point
 // (no filesystem access), and OpenDocument delegates to it.
 //
-// Returns the opened *Document, ErrInvalidPDF on a structural parse failure,
-// ErrEncryptedDocument (wrapping the reason, which holds no document bytes) if
-// the file is encrypted and the empty user password does not open it — an
-// unsupported security handler or a document that needs a user password — or
-// ErrInternal (an
+// A file whose cross-reference data cannot be used — no startxref, a table at
+// the wrong offset, offsets that do not reach the catalog and page tree — is
+// repaired (docs/design/xref-reconstruction.md §2): first by shifting every
+// offset by the bytes before "%PDF-", then by rebuilding the object table
+// from a bounded scan of the file for "N G obj" headers. Repair is tried only
+// when the strict open fails, so a file that opens from its own
+// cross-reference data opens exactly as it would without it. A repaired
+// document reports how (RepairReport); it saves only as a full rewrite
+// (SaveTo), and SignDocument refuses it.
+//
+// Returns the opened *Document, ErrInvalidPDF on a structural parse failure
+// that repair could not fix either, ErrEncryptedDocument (wrapping the
+// reason, which holds no document bytes) if the file is encrypted and the
+// empty user password does not open it — an unsupported security handler or
+// a document that needs a user password; a repaired file whose encryption
+// dictionary survives, or shows signs of one the repair cannot read, is never
+// opened as plaintext — or ErrInternal (an
 // *InternalError) if parsing panicked — a FluxDocs bug, reported instead of
 // crashing the process.
 func OpenBytes(data []byte) (_ *Document, err error) {
 	defer guard("OpenBytes", -1, &err)
 	injectTestPanic("OpenBytes", -1)
+	return openBytes(data, true)
+}
 
-	if headerOffset(data) < 0 {
+// openStrict is OpenBytes without repair: a file whose cross-reference data
+// cannot be used fails with ErrInvalidPDF. Every internal re-open of
+// BuildDocument output uses it — the redaction verifier (xref-reconstruction.md
+// §5 rule R.3), Merge, Split, the flatten, form, watermark and PDF/A writers:
+// that output is always well-formed, so needing a repair there is a writer
+// bug, never a reason to re-scan. A recovered panic names it as the
+// operation, not OpenBytes.
+func openStrict(data []byte) (_ *Document, err error) {
+	defer guard("openStrict", -1, &err)
+	return openBytes(data, false)
+}
+
+// openBytes is the repair ladder (xref-reconstruction.md §2.2): the strict
+// open, then, when repair is set and the strict open failed structurally, the
+// header-offset retry and the object scan, each accepted only if it decrypts
+// and walks the page tree. ErrEncryptedDocument at any step ends the ladder.
+func openBytes(data []byte, repair bool) (*Document, error) {
+	h := headerOffset(data)
+	if h < 0 {
 		return nil, ErrInvalidPDF
 	}
 
-	resolver, err := parse.NewResolver(data)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPDF, err)
+	resolver, pageInfos, err := openResolver(parse.NewResolver(data))
+	if err == nil {
+		return newDocument(resolver, pageInfos, nil), nil
 	}
+	// No repair after a resource bound (parse.IsLimitError: the xref caps
+	// and /Prev chain length, a decode limit, the nesting depth, the page
+	// tree's depth and page count, the ObjStm re-decode budget): a hostile or
+	// oversized file fails the open (CONVENTIONS.md §4), whatever a shifted
+	// table or a scan could make of it.
+	var le limitError
+	if !repair || errors.Is(err, ErrEncryptedDocument) || errors.As(err, &le) {
+		return nil, err
+	}
+	strictErr := err
 
+	if h > 0 {
+		resolver, pageInfos, err = openResolver(parse.NewResolverShifted(data, h))
+		if errors.Is(err, ErrEncryptedDocument) || errors.As(err, &le) {
+			return nil, err
+		}
+		if err == nil {
+			return newDocument(resolver, pageInfos, strictErr), nil
+		}
+	}
+	resolver, pageInfos, err = openResolver(parse.NewRepairedResolver(data))
+	if errors.Is(err, ErrEncryptedDocument) {
+		return nil, err
+	}
+	if err == nil {
+		return newDocument(resolver, pageInfos, strictErr), nil
+	}
+	return nil, fmt.Errorf("%w; repair failed: %s", strictErr, withoutInvalid(err))
+}
+
+// limitError marks a rung that failed on a parse resource bound
+// (parse.IsLimitError). It wraps the ErrInvalidPDF error unchanged, so its
+// message and errors.Is behaviour are those of the error it carries.
+type limitError struct{ err error }
+
+func (e limitError) Error() string { return e.err.Error() }
+func (e limitError) Unwrap() error { return e.err }
+
+// openResolver finishes one rung of the ladder on a resolver: decryption,
+// when the trailer names /Encrypt, then the page-tree walk.
+//
+// Returns ErrInvalidPDF wrapping a parse failure (newErr included) — inside
+// a limitError when the failure is a resource bound — or ErrEncryptedDocument
+// wrapping a decryption failure or an object scan that lost the encryption
+// dictionary (parse.ErrEncryptionLost: never opened as plaintext).
+func openResolver(resolver *parse.Resolver, newErr error) (*parse.Resolver, []parse.PageInfo, error) {
+	invalid := func(cause error) error {
+		err := fmt.Errorf("%w: %v", ErrInvalidPDF, cause)
+		if parse.IsLimitError(cause) {
+			return limitError{err}
+		}
+		return err
+	}
+	if errors.Is(newErr, parse.ErrEncryptionLost) {
+		return nil, nil, fmt.Errorf("%w: %v", ErrEncryptedDocument, newErr)
+	}
+	if newErr != nil {
+		return nil, nil, invalid(newErr)
+	}
 	// Encryption is signalled by /Encrypt in the trailer. Set up the Standard
 	// Security Handler (empty user password — the common openable case) before
 	// resolving any content; an unsupported handler or wrong password reports
 	// ErrEncryptedDocument rather than returning garbled content.
-	trailer := resolver.Trailer()
-	if _, ok := trailer["Encrypt"]; ok {
+	if _, ok := resolver.Trailer()["Encrypt"]; ok {
 		if err := resolver.EnableDecryption(nil); err != nil {
 			// The parse error names the reason (unsupported handler, password
 			// mismatch) and never quotes document bytes.
-			return nil, fmt.Errorf("%w: %v", ErrEncryptedDocument, err)
+			return nil, nil, fmt.Errorf("%w: %v", ErrEncryptedDocument, err)
 		}
 	}
-
 	pageInfos, err := resolver.Pages()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPDF, err)
+		return nil, nil, invalid(err)
 	}
+	return resolver, pageInfos, nil
+}
 
+// withoutInvalid returns the message of a repair-rung error without its
+// ErrInvalidPDF prefix, so the combined error names ErrInvalidPDF once.
+func withoutInvalid(err error) string {
+	return strings.TrimPrefix(err.Error(), ErrInvalidPDF.Error()+": ")
+}
+
+// newDocument builds the Document for an opened resolver. strictErr, when
+// non-nil, is why the strict open failed: the resolver was repaired, and the
+// document carries its RepairReport.
+func newDocument(resolver *parse.Resolver, pageInfos []parse.PageInfo, strictErr error) *Document {
 	pages := make([]Page, len(pageInfos))
 	for i, pi := range pageInfos {
 		pages[i] = Page{
@@ -87,14 +189,92 @@ func OpenBytes(data []byte) (_ *Document, err error) {
 	}
 
 	md, title := readInfo(resolver)
-	return &Document{
+	_, encrypted := resolver.Trailer()["Encrypt"]
+	doc := &Document{
 		Title:     title,
 		PageCount: len(pages),
 		Pages:     pages,
 		Metadata:  md,
+		Encrypted: encrypted,
 		resolver:  resolver,
 		pageInfos: pageInfos,
-	}, nil
+	}
+	if info, ok := resolver.Repair(); ok && strictErr != nil {
+		rep := &RepairReport{
+			Method:          RepairObjectScan,
+			HeaderOffset:    info.HeaderOffset,
+			Objects:         info.Objects,
+			Duplicates:      info.Duplicates,
+			CatalogFromScan: info.CatalogFromScan,
+			Truncated:       info.Truncated,
+			StrictError:     elideQuoted(withoutInvalid(strictErr)),
+		}
+		if !info.Scanned {
+			rep.Method = RepairHeaderOffset
+		}
+		doc.repair = rep
+	}
+	return doc
+}
+
+// elideQuoted replaces the contents of every double-quoted run in msg, and of
+// every single-quoted rune literal, with "…": parse errors quote (%q) the
+// token or byte they stopped at, which can be document text (an unexpected
+// keyword inside a content stream, an invalid character), and a
+// RepairReport holds none. A backslash escape inside a run is skipped with
+// it, so an escaped quote does not end the run; an unterminated run is
+// elided to the end. A single-quoted run is elided only when it is what %q
+// prints for a rune — one character, or one backslash escape — so the
+// fixed keywords the messages quote ('startxref', 'obj') stay readable.
+func elideQuoted(msg string) string {
+	var b strings.Builder
+	in, esc := false, false
+	rs := []rune(msg)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case in && esc:
+			esc = false
+		case in && r == '\\':
+			esc = true
+		case r == '"':
+			if in {
+				b.WriteString("…")
+			}
+			in = !in
+			b.WriteRune(r)
+		case !in && r == '\'':
+			if n := runeLiteral(rs[i+1:]); n > 0 {
+				b.WriteString("'…'")
+				i += n
+				continue
+			}
+			b.WriteRune(r)
+		case !in:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// runeLiteral returns the length of the rest of a %q rune literal at the
+// start of rs (the opening quote already read), closing quote included: one
+// character other than a quote or backslash, or a backslash escape (\x, \xhh,
+// \uhhhh, \Uhhhhhhhh, \ooo), then a single quote. It returns 0 otherwise.
+func runeLiteral(rs []rune) int {
+	n := 1
+	if len(rs) > 0 && rs[0] == '\\' {
+		n = 2
+		for n < len(rs) && n < 10 && rs[n] != '\'' {
+			n++
+		}
+	} else if len(rs) == 0 || rs[0] == '\'' {
+		return 0
+	}
+	if n >= len(rs) || rs[n] != '\'' {
+		return 0
+	}
+	return n + 1
 }
 
 // headerOffset returns the index of the "%PDF-" header within the first

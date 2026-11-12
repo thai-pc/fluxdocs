@@ -50,7 +50,7 @@ func (d *Document) ConvertToPDFA() (_ *Document, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenBytes(built)
+	return openStrict(built)
 }
 
 // ValidatePDFA checks a document's PDF/A-1b structural markers: XMP metadata

@@ -323,7 +323,7 @@ func (d *Document) Merge(other *Document) (_ *Document, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPDF, err)
 	}
-	return OpenBytes(built)
+	return openStrict(built)
 }
 
 // Split divides d into multiple documents by page ranges [start, end] (0-based,
@@ -359,7 +359,7 @@ func (d *Document) Split(pageRanges [][2]int) (_ []*Document, err error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidPDF, err)
 		}
-		doc, err := OpenBytes(built)
+		doc, err := openStrict(built)
 		if err != nil {
 			return nil, err
 		}
@@ -375,6 +375,9 @@ func (d *Document) Split(pageRanges [][2]int) (_ []*Document, err error) {
 // are a separate JSON layer; flattening them onto a page is a future increment,
 // FlattenAnnotations). Original page /Annots present in the source PDF are
 // preserved. Save is native-only (filesystem); use SaveTo on the WASM path.
+//
+// The output is never encrypted: a document opened from an encrypted source
+// is saved decrypted, without its /Encrypt dictionary (see SaveTo).
 //
 // Returns the underlying os error if the file cannot be created/written, or
 // ErrInvalidPDF if the document was not opened from bytes/a file.
@@ -394,6 +397,15 @@ func (d *Document) Save(path string) error {
 // to stream a server response without touching disk, or to write into a browser
 // buffer under WASM (it never touches the filesystem or the network). The
 // FluxDocs annotation layer is not baked in (see Save).
+//
+// The output is always a full rewrite: a fresh object numbering, one
+// cross-reference table, no earlier revisions. So saving a document OpenBytes
+// repaired (RepairReport) writes a well-formed file that re-opens without
+// repair, holding only what the current pages use. The output is never
+// encrypted: a document opened from an encrypted source (Encrypted) is
+// written decrypted and without /Encrypt, so its encryption is not kept.
+// Only sources the empty user password opens can be opened today, so this
+// drops no password protection, but it does drop the file's encryption.
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes/a file (a
 // resolver-less, test-constructed Document cannot be serialized), or the writer
@@ -425,6 +437,9 @@ func (d *Document) SaveTo(w io.Writer) (err error) {
 // rebuild would break. It does NOT reflect uncommitted in-memory annotation-layer
 // edits.
 //
+// For a document OpenBytes repaired (RepairReport), these are the damaged
+// source bytes; use SaveTo for a well-formed file.
+//
 // Returns ErrInvalidPDF if the document was not opened from bytes/a file.
 func (d *Document) Bytes() ([]byte, error) {
 	if d.resolver == nil {
@@ -434,6 +449,18 @@ func (d *Document) Bytes() ([]byte, error) {
 	out := make([]byte, len(src))
 	copy(out, src)
 	return out, nil
+}
+
+// RepairReport returns how OpenBytes repaired the document's
+// cross-reference data, and true; it returns false for a document that
+// opened from its own cross-reference data (or was not opened from bytes).
+// A server that rejects damaged uploads checks it after the open. The report
+// holds no document text.
+func (d *Document) RepairReport() (RepairReport, bool) {
+	if d.repair == nil {
+		return RepairReport{}, false
+	}
+	return *d.repair, true
 }
 
 // buildInfoDict synthesizes a minimal /Info dictionary from a document's
@@ -509,12 +536,21 @@ func (d *Document) Close() error {
 // bytes are preserved verbatim (so the signature stays valid); an invisible
 // signature field is added. RSA + SHA-256 is supported.
 //
-// Returns ErrInvalidPDF if the document was not opened from bytes, or an error
-// if the certificate/key cannot be parsed or signing fails.
+// A document OpenBytes repaired (RepairReport) is refused: an incremental
+// update would keep its damaged revisions, which another reader may rebuild
+// differently from FluxDocs (docs/design/xref-reconstruction.md §5 rule R).
+// Save it with SaveTo, re-open the output, and sign that.
+//
+// Returns ErrInvalidPDF if the document was not opened from bytes or was
+// repaired at open, or an error if the certificate/key cannot be parsed or
+// signing fails.
 func (d *Document) SignDocument(opts SignatureOptions) (_ *Document, err error) {
 	defer guard("SignDocument", -1, &err)
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
+	}
+	if d.repair != nil {
+		return nil, fmt.Errorf("%w: document was repaired; save and re-open it before signing", ErrInvalidPDF)
 	}
 	signed, err := sign.Sign(d.resolver, sign.Options{
 		Reason:      opts.Reason,
@@ -527,7 +563,7 @@ func (d *Document) SignDocument(opts SignatureOptions) (_ *Document, err error) 
 	if err != nil {
 		return nil, err
 	}
-	return OpenBytes(signed)
+	return openStrict(signed)
 }
 
 // --- §7.6 Extraction ---

@@ -27,6 +27,9 @@ type Document struct {
 	PageCount int
 	Pages     []Page
 	Metadata  DocumentMetadata
+	// Encrypted is set when the source file is encrypted (its trailer names
+	// /Encrypt) and opened with the empty user password. Content is decrypted
+	// as it is read; SaveTo writes it unencrypted.
 	Encrypted bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -110,11 +113,47 @@ type Document struct {
 	resolver  *parse.Resolver
 	pageInfos []parse.PageInfo
 
+	// repair is set when OpenBytes rebuilt the cross-reference data
+	// (RepairReport); nil for a document that opened from its own. Immutable
+	// after open.
+	repair *RepairReport
+
 	// ai is an optional Cloud-tier LLM backend, injected via SetAIClient. The
 	// pure-Go core never makes network calls itself (privacy-first, WASM-safe);
 	// when ai is nil the Cloud methods return ErrFeatureRequiresCloud. Guarded
 	// by mu. Implementations live in cloud/ai.
 	ai AIClient
+}
+
+// RepairMethod names how OpenBytes rebuilt a document whose cross-reference
+// data could not be used (docs/design/xref-reconstruction.md §2.2).
+type RepairMethod string
+
+const (
+	// RepairHeaderOffset: every offset was shifted by the bytes before %PDF-.
+	RepairHeaderOffset RepairMethod = "header-offset"
+	// RepairObjectScan: the object table was rebuilt by scanning for "N G obj".
+	RepairObjectScan RepairMethod = "object-scan"
+)
+
+// RepairReport describes a repaired open (Document.RepairReport). It holds
+// counts, flags and the strict error with any quoted document bytes elided —
+// never document text.
+type RepairReport struct {
+	Method       RepairMethod
+	HeaderOffset int // bytes before %PDF- (RepairHeaderOffset)
+	// Objects is the number of objects in the rebuilt table.
+	Objects int
+	// Duplicates is the number of shadowed definitions; the last in file
+	// order was kept (RepairObjectScan).
+	Duplicates int
+	// CatalogFromScan is set when no trailer named a usable /Root.
+	CatalogFromScan bool
+	// Truncated is set when the file ends inside an object or a stream.
+	Truncated bool
+	// StrictError is why the strict open failed: offsets and keywords, with
+	// quoted bytes elided.
+	StrictError string
 }
 
 type DocumentMetadata struct {

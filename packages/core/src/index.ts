@@ -85,7 +85,7 @@ interface Envelope {
 /** The raw function surface the WASM registers on globalThis.fluxdocs. */
 interface RawAPI {
   version(): Envelope & { version: string };
-  open(bytes: Uint8Array): Envelope & { handle: number; pageCount: number };
+  open(bytes: Uint8Array): Envelope & { handle: number; pageCount: number; repaired?: boolean };
   close(handle: number): Envelope;
   pageCount(handle: number): Envelope & { count: number };
   pageSize(handle: number, index: number): Envelope & PageSize;
@@ -169,7 +169,7 @@ export class FluxDocs {
   /** Opens a PDF from its bytes. Throws FluxDocsError on a parse failure. */
   open(bytes: Uint8Array): FluxDoc {
     const res = unwrap(this.api.open(bytes));
-    return new FluxDoc(this.api, res.handle, res.pageCount);
+    return new FluxDoc(this.api, res.handle, res.pageCount, res.repaired === true);
   }
 }
 
@@ -183,6 +183,12 @@ export class FluxDoc {
     private readonly handle: number,
     /** The number of pages, captured at open time. */
     public readonly pageCount: number,
+    /**
+     * True when the file's cross-reference data was damaged and rebuilt at
+     * open (the Go `Document.RepairReport`). A repaired document reads,
+     * renders and saves normally; `save()` writes a well-formed file.
+     */
+    public readonly repaired: boolean = false,
   ) {}
 
   private check(): void {
