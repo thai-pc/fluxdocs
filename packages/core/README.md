@@ -119,6 +119,13 @@ import "@fluxdocs/core/styles.css";
   item without a width, `inline-block`, a float, an absolutely positioned box)
   it falls back to 320 px wide; give such containers an explicit width.
 
+## Third-party notices
+
+The WebAssembly module this package loads bundles font data under its own
+licenses (the standard-14 substitute faces and metric tables). The package
+ships [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and the license files
+in `LICENSES/`; keep them with any redistributed `fluxdocs.wasm`.
+
 ## Develop
 
 ```bash

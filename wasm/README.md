@@ -76,6 +76,16 @@ never yields to Go's timer.
 Documents are referenced by an integer `handle`; call `close(handle)` to release
 one.
 
+## Third-party notices
+
+`fluxdocs.wasm` contains bundled font data under its own licenses (the
+standard-14 substitute faces and metric tables). Ship
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) and the license files
+in `core/internal/std14/LICENSES/` alongside it, as the npm package
+`@fluxdocs/core` does. `-tags nostd14` builds the module without the font
+faces: text in non-embedded standard fonts then draws nothing, as before
+Phase 3, but advances by the AFM widths, which are new with Phase 3.
+
 ## Smoke test
 
 `smoke_test.mjs` builds the module and drives the real compiled core in a WASM

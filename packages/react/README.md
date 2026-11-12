@@ -104,6 +104,12 @@ The DOM uses `fd-` BEM classes (`.fd-viewer`, `.fd-viewer__toolbar`,
 `prefers-color-scheme`; force it with `data-fd-theme="dark"` (or `"light"`) on
 `<html>` or any ancestor of the viewer. See `@fluxdocs/core`'s README.
 
+## Third-party notices
+
+The WebAssembly core loaded through `@fluxdocs/core` bundles font data under
+its own licenses; see that package's `THIRD_PARTY_NOTICES.md` (repository
+copy: [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md)).
+
 ## Develop
 
 ```bash

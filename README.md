@@ -163,3 +163,11 @@ Report vulnerabilities to security@fluxdocs.dev.
 Core: [MIT](LICENSE). Optional features enabled via build tags (`mupdf` — AGPL,
 `ocr` — Apache-2.0) are governed by their own licenses — see the note in
 [`LICENSE`](LICENSE).
+
+The default build bundles font data for PDF text set in the 14 standard fonts.
+It keeps its own licenses: renamed subsets of Liberation (SIL OFL 1.1) and
+DejaVu Sans (Bitstream Vera and Arev licenses), and tables derived from the Adobe Core 14
+AFM files (APAFML) and the Adobe Glyph List (BSD 3-Clause). See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which must accompany
+distributed binaries, `fluxdocs.wasm` included. Building with `-tags nostd14`
+leaves the font faces out.

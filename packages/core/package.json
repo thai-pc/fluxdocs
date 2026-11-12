@@ -19,7 +19,9 @@
   "files": [
     "dist",
     "src",
-    "styles.css"
+    "styles.css",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
