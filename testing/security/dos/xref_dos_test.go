@@ -95,12 +95,14 @@ func hostileXrefPDF(w, xrefDict string, body []byte, hybrid bool) []byte {
 func TestDoS_XrefStreamEntriesAreCapped(t *testing.T) {
 	body := zlibZeros(t, hostileXrefZeros)
 	// The /Size cases decode one /W [1 0 0] row past the 2 Mi-row cap: 2 MiB,
-	// measured 4.7 MB with buffer growth (9.3 MB under the race detector,
-	// which roughly doubles it). The /Index cases decode nothing. Decoding
-	// the whole 32 MiB body would allocate several times 32 MiB.
-	var sizeAlloc, indexAlloc uint64 = 8 << 20, 4 << 20
+	// plus buffer growth that depends on the Go version (measured 4.7 MB on
+	// Go 1.27 and 10.4 MB on the CI toolchain; the race detector roughly
+	// doubles it). The bound only has to separate that from decoding the
+	// whole 32 MiB body, which allocates several times 32 MiB. The /Index
+	// cases decode nothing.
+	var sizeAlloc, indexAlloc uint64 = 24 << 20, 4 << 20
 	if raceEnabled {
-		sizeAlloc = 16 << 20
+		sizeAlloc = 48 << 20
 	}
 	for _, tc := range []struct {
 		name     string
