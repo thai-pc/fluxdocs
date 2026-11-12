@@ -283,8 +283,9 @@ hand redaction a model that contains none of the real text. So:
 - `/Encrypt` from any trailer candidate means the file is encrypted.
 - If no candidate has `/Encrypt`, every winning plain object is tested for the
   shape of an encryption dictionary: a top-level dictionary with a `/Filter`
-  name and either `/O`, `/U` and `/P` (standard handler, ISO 32000-1 Table 21)
-  or `/Recipients` (public-key handler). Objects are pre-filtered by byte
+  name and either `/O`, `/U` and `/P` (standard handler, ISO 32000-1 Table 21),
+  `/OE` or `/UE` (its AES-256 form, ISO 32000-2; added with
+  `aes256-decryption.md`), or `/Recipients` (public-key handler). Objects are pre-filtered by byte
   search within their span. The last match becomes `/Encrypt <n> 0 R`. Under
   §7.5.7 it cannot be in an ObjStm, so plain objects suffice.
 - If neither finds one, the scan still fails closed with
@@ -293,7 +294,8 @@ hand redaction a model that contains none of the real text. So:
   - a kept header that does not parse whose dictionary bytes (its span up to
     the first `stream` or `endobj`, so it cannot borrow the next object's
     names) hold `/Encrypt` (a cross-reference stream dictionary cut short),
-    or match `lostShaped`, in this order: `/Recipients`, `/Filter /Standard`,
+    or match `lostShaped`, in this order: `/Recipients`, `/OE`, `/UE`,
+    `/Filter /Standard`,
     `/Filter /Adobe.PubSec` or a public-key `/SubFilter` (`adbe.pkcs7.s`
     and a digit: s3, s4, s5, §7.6.5; not the signature `adbe.pkcs7.sha1`),
     never excluded; `/Filter` with one of `/O`, `/U`, `/CF`, `/StmF`,

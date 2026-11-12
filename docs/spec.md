@@ -645,6 +645,25 @@ func main() {
 }
 ```
 
+Encrypted documents (Standard security handler: RC4, AES-128, AES-256 R6 and
+R5) open with the empty user password, which covers files that only restrict
+permissions. A password is given through `OpenOptions`:
+
+```go
+doc, err := core.OpenDocumentWithOptions("contract.pdf", core.OpenOptions{Password: pw})
+var ee *core.EncryptionError
+if errors.As(err, &ee) && ee.Reason == core.EncryptionPasswordRequired {
+	// prompt for a password (EncryptionWrongPassword: prompt again)
+}
+```
+
+`OpenBytesWithOptions(data, opts)` is the in-memory form. The password is tried
+as the user and then the owner password (permissions are not enforced), is used
+only to derive the file key, and is never logged, put in an error, or kept. An
+`*EncryptionError{Reason, Detail}` matches `ErrEncryptedDocument`; its reasons are
+`password_required`, `wrong_password`, `unsupported_handler`, `tampered`,
+`encryption_lost`, `save_would_decrypt` and `sign_unsupported`.
+
 ### 7.2 Document Operations
 
 ```go
@@ -667,9 +686,16 @@ doc.Close() error
 `Save` / `SaveTo` always write a full rewrite of the current pages (fresh object
 numbers, one xref, no earlier revisions), never an incremental update. The output
 is never encrypted: a document opened from an encrypted source (`Encrypted` is
-true) is written decrypted and without `/Encrypt`. Only sources the empty user
-password opens can be opened today, so no password protection is lost, but the
-file's encryption is. `RepairReport` reports whether the open had to rebuild
+true) is written decrypted and without `/Encrypt`. For a source the empty user
+password opens, that drops no password protection, only the file's encryption.
+A source whose content needs its password (opened with a non-empty
+`OpenOptions.Password` that the empty password cannot replace) is refused by every
+write path — `Save`, `SaveTo`, `Merge`, `Split`, `RedactAndFlatten`,
+`FlattenAnnotations`, `FlattenForm`, `Watermark`, `ConvertToPDFA` — with an
+`*EncryptionError` (reason `save_would_decrypt`) unless it was opened with
+`OpenOptions.AllowDecryptedSave`. `SignDocument` refuses every encrypted source
+(reason `sign_unsupported`). Re-encryption is a later increment
+(`docs/design/aes256-decryption.md` §10 S2). `RepairReport` reports whether the open had to rebuild
 damaged cross-reference data (§13.1); a server that rejects damaged uploads
 checks it after the open.
 
@@ -763,6 +789,11 @@ doc.OCRPage(pageIndex int) (string, error)                          // Pro, need
 doc.ExtractStructured(schema any) (map[string]any, error)            // Cloud, calls an LLM
 doc.AskDocument(question string) (string, error)                     // Cloud, document Q&A
 ```
+
+`ExtractStructured` and `AskDocument` send the decrypted document text to the
+installed `AIClient` even when the document was opened with its password
+(`OpenOptions.Password`); the `save_would_decrypt` refusal of the write paths
+(§7.2) does not apply to them.
 
 ### 7.7 Events (via callbacks, since Go has no native event loop)
 
