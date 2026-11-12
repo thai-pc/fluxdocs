@@ -789,6 +789,8 @@ func charged(rs *raster, paint func()) func() int64 {
 //     each;
 //   - font-load: font dictionaries sharing one Type 1 program, each loaded
 //     once; sets fontLoadCost;
+//   - font-load-substitute: non-embedded font dictionaries (standard 14 and
+//     flag-chosen substitutes), each loaded once, also charged fontLoadCost;
 //   - cid-widths-lists, cid-widths-ranges: a composite font's metrics over a
 //     64 Ki-item CIDFont /W; the costlier (ranges) sets cidWidthItemCost;
 //   - step-*: one interpreter step with no painting (a q/Q operator, a glyph
@@ -913,6 +915,22 @@ func BenchmarkCalibration(b *testing.B) {
 			rs := newRaster(1, 1)
 			sc := newFontLoader(fontsR, rs.b).scope(fontsPage.Resources)
 			for _, n := range fontNames {
+				sc.font(n)
+			}
+			return rs.b.paint
+		})
+	})
+
+	// Non-embedded font dictionaries (standard 14 and flag-chosen faces),
+	// each selected once: metrics, AFM widths, the code → name → Unicode →
+	// face glyph map and the fit table, charged as fontLoadCost like any
+	// font dictionary.
+	subR, subPage, subNames := manySubstituteFontsPage(b, maxFontLoads)
+	b.Run("font-load-substitute", func(b *testing.B) {
+		calibrate(b, func() int64 {
+			rs := newRaster(1, 1)
+			sc := newFontLoader(subR, rs.b).scope(subPage.Resources)
+			for _, n := range subNames {
 				sc.font(n)
 			}
 			return rs.b.paint

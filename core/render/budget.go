@@ -130,6 +130,17 @@ const (
 	// itself is charged separately, to decoded bytes.
 	fontLoadCost = 1280
 
+	// substituteLoadCost is the raster-work charge, on top of fontLoadCost,
+	// per non-embedded simple font dictionary a render loads
+	// (loadSubstitute): its metrics, the AFM widths, the code → glyph map
+	// (from a process-wide table per face and base encoding, plus a lookup
+	// per /Differences entry) and the fit table. Calibrated by
+	// BenchmarkCalibration/font-load-substitute (dictionaries with a
+	// 224-entry /Widths and a short /Differences): ≈ 1.6–2.0 px/unit at
+	// fontLoadCost alone, ≈ 0.9–1.0 with both (≈ 30 µs native per
+	// dictionary).
+	substituteLoadCost = 1280
+
 	// cidWidthItemCost is the raster-work charge per CIDFont /W or /W2 item
 	// a composite font's metrics read (fontmodel.Options.Charge), once per
 	// descendant CIDFont and /Encoding per render (cidMetrics), so a font of

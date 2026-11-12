@@ -19,13 +19,15 @@ var glyphPPEM = fixed.I(1000)
 // glyphFont is a loaded font resource: the embedded program it draws glyphs
 // from (glyphProgram: TrueType /FontFile2 or OpenType /FontFile3 through
 // x/image/font/sfnt; Type 1 /FontFile and bare CFF /FontFile3 /Type1C or
-// /CIDFontType0C through psfont) plus how its character codes map to glyphs
-// and how far each advances. Non-embedded fonts (the standard 14 included)
-// are not loaded yet: their text does not render
-// (docs/design/type1-std14-fonts.md, Phase 3).
+// /CIDFontType0C through psfont; for a non-embedded simple font, the
+// standard 14 included, a bundled substitute face, substitute.go) plus how
+// its character codes map to glyphs and how far each advances.
+// Non-embedded composite and Type 3 fonts are not drawn
+// (docs/design/type1-std14-fonts.md §1.1).
 //
 // A simple font's advances come from its /Widths (ISO 32000-1 §9.4.4,
-// §9.6.2.1), read through fontmodel; see advance.
+// §9.6.2.1), read through fontmodel, then for a non-embedded standard font
+// the Adobe AFM widths; see advance.
 //
 // A glyphFont is not safe for concurrent use (sfnt.Buffer is scratch state); one
 // is built per page render, and a single page is interpreted sequentially.
@@ -42,6 +44,12 @@ type glyphFont struct {
 	// /W and /DW (§9.7.4.3) through model. Composite TrueType fonts still
 	// advance by the program (hmtx).
 	cidWidths bool
+	// std14 marks a non-embedded font whose /BaseFont names or aliases one
+	// of the standard 14 (std14.Normalize): a width its /Widths does not
+	// give comes from afm, then /MissingWidth, else 0.5 em, never from the
+	// substitute face (design §2.4).
+	std14 bool
+	afm   *afmWidths // std14 only: AFM widths by code, glyph units
 }
 
 // glyphProgram is the font program a glyphFont draws from.
@@ -136,14 +144,38 @@ func (fl *fontLoader) cidKey(fd parse.Dict) (cidMetricsKey, bool) {
 	return cidMetricsKey{}, false
 }
 
-// loadOneFont resolves a font dictionary to an embedded program. For a Type0
-// composite font it follows /DescendantFonts to the CIDFont's descriptor and
-// treats codes as 2-byte glyph IDs (the Identity-H common case). It returns
-// nil when the font has no program it can draw from.
+// loadOneFont resolves a font dictionary to the program it is drawn from.
+// For a Type0 composite font it follows /DescendantFonts to the CIDFont's
+// descriptor and treats codes as 2-byte glyph IDs (the Identity-H common
+// case). A simple font (not Type 3) that fontmodel classifies as substituted
+// (Font.Substituted: its descriptor holds no program, or it has no
+// descriptor) is drawn from a bundled substitute (loadSubstitute), for
+// substituteLoadCost raster work on top of the load's fontLoadCost. It
+// returns nil when the budget refuses that charge, or when the font cannot
+// be drawn from: a Type 3 font, a composite font without an embedded
+// program, or an embedded program that cannot be decoded or parsed.
+//
+// The /Subtype is resolved, as fontmodel resolves it for the redaction
+// model's Kind, so a font the model reads as composite (2-byte codes, em
+// ink bounds) is never drawn here one byte per glyph from a substitute.
 func (fl *fontLoader) loadOneFont(fd parse.Dict) *glyphFont {
 	r := fl.r
-	subtype, _ := fd.GetName("Subtype")
+	subtype := resolvedName(r, fd["Subtype"])
 	twoByte := subtype == "Type0"
+
+	var model *fontmodel.Font
+	if !twoByte {
+		model = loadMetrics(r, fd, fl.b)
+	}
+	if model.Substituted() { // never for a Type 3 font
+		if !fl.b.chargePaint(substituteLoadCost) {
+			return nil
+		}
+		fdesc, _, _ := r.ResolveDict(fd["FontDescriptor"])
+		gf := &glyphFont{model: model}
+		loadSubstitute(r, fd, fdesc, gf)
+		return gf
+	}
 
 	descriptorHolder := fd
 	if twoByte {
@@ -158,10 +190,7 @@ func (fl *fontLoader) loadOneFont(fd parse.Dict) *glyphFont {
 	if err != nil || !ok {
 		return nil
 	}
-	gf := &glyphFont{twoByte: twoByte}
-	if !twoByte {
-		gf.model = loadMetrics(r, fd, fl.b)
-	}
+	gf := &glyphFont{twoByte: twoByte, model: model}
 	if gf.prog = fl.program(fdesc, gf); gf.prog == nil {
 		return nil
 	}
@@ -315,13 +344,14 @@ func resolveStream(r *parse.Resolver, obj parse.Object) (*parse.Stream, bool) {
 func (gf *glyphFont) gid(code uint32) (uint32, bool) { return gf.prog.glyph(code) }
 
 // advance returns the horizontal displacement w0 of code in text space at font
-// size 1 (§9.4.4): for a simple font with a /Widths array, the code's entry,
-// else (a code outside /FirstChar–/LastChar or a non-numeric entry) the
-// descriptor's /MissingWidth; for a composite font over a Type 1 or CFF
-// program (cidWidths) with an Identity encoding, the CID's /W entry, else /DW (default 1000, §9.7.4.3);
-// otherwise (another composite font, a simple font with no /Widths at all, or
-// neither entry) the program's advance of the code's glyph, or 0.5 em when
-// the code has no glyph. ok and gid are gf.gid(code)'s results.
+// size 1 (§9.4.4, design §2.1 step 3): for a composite font over a Type 1 or
+// CFF program (cidWidths) with an Identity encoding, the CID's /W entry, else
+// /DW (default 1000, §9.7.4.3); for a simple font, the code's /Widths entry;
+// else, for a non-embedded standard font (std14), the AFM width of the
+// code's glyph name; else, when the font has a /Widths array or is std14,
+// the descriptor's /MissingWidth; else a std14 font advances 0.5 em, and
+// any other font by its program's advance of the code's glyph, or 0.5 em
+// when the code has no glyph. ok and gid are gf.gid(code)'s results.
 func (gf *glyphFont) advance(code, gid uint32, ok bool) float64 {
 	if gf.cidWidths {
 		// fontmodel's advance is exact (lo == hi) for an Identity encoding;
@@ -330,18 +360,21 @@ func (gf *glyphFont) advance(code, gid uint32, ok bool) float64 {
 			return lo
 		}
 	}
-	if gf.model.HasWidths() {
-		if w, has := gf.model.Width(code); has {
-			return w
-		}
+	if w, has := gf.model.Width(code); has {
+		return w
+	}
+	if gf.afm != nil && code < 256 && gf.afm[code] != noAFMWidth {
+		return float64(gf.afm[code]) / 1000
+	}
+	if gf.model.HasWidths() || gf.std14 {
 		if w, has := gf.model.MissingWidth(); has {
 			return w
 		}
 		// Deliberately lenient: Table 122 makes an absent /MissingWidth 0,
-		// but the program's advance is a better guess for a code /Widths
-		// does not cover.
+		// but the program's advance (or, for a standard font, 0.5 em) is a
+		// better guess for a code /Widths does not cover.
 	}
-	if !ok {
+	if !ok || gf.std14 {
 		return 0.5
 	}
 	return gf.prog.advanceEm(gid)

@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"testing"
 
+	"github.com/thai-pc/fluxdocs/core/internal/std14/faces"
 	"github.com/thai-pc/fluxdocs/core/parse"
 	"golang.org/x/image/font/gofont/goregular"
 )
@@ -109,8 +110,10 @@ func TestGlyph_ColorAppliesToText(t *testing.T) {
 }
 
 func TestGlyph_MissingFontDoesNotCrash(t *testing.T) {
-	// A font resource with no embedded program: text is skipped, page still
-	// renders (white), no panic.
+	// A font resource with no embedded program (non-embedded Helvetica, no
+	// /Widths, no descriptor): no panic, and since Phase 3 of
+	// docs/design/type1-std14-fonts.md the text is drawn from the bundled
+	// substitute face; with -tags nostd14 it is not drawn.
 	pdf := buildRenderPDF(map[int]string{
 		1: "<< /Type /Catalog /Pages 2 0 R >>",
 		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 50 50] >>",
@@ -125,11 +128,15 @@ func TestGlyph_MissingFontDoesNotCrash(t *testing.T) {
 	pages, _ := r.Pages()
 	data, err := Page(r, pages[0], Options{DPI: 72, Format: "png"})
 	if err != nil {
-		t.Fatalf("render with unsupported font: %v", err)
+		t.Fatalf("render with a non-embedded font: %v", err)
 	}
 	img, _ := png.Decode(bytes.NewReader(data))
-	if got := darkPixels(img); got != 0 {
-		t.Errorf("dark pixels = %d, want 0 (unsupported font renders no text)", got)
+	got := darkPixels(img)
+	if faces.Enabled && got == 0 {
+		t.Error("dark pixels = 0, want the substitute's ink")
+	}
+	if !faces.Enabled && got != 0 {
+		t.Errorf("nostd14: dark pixels = %d, want 0", got)
 	}
 }
 

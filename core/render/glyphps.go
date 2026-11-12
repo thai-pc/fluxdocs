@@ -107,8 +107,10 @@ func glyphNames(model *fontmodel.Font, builtin *[256]string, hasBuiltin bool) [2
 			names = enc
 		}
 	}
-	for c, n := range model.Differences() {
-		names[c] = string(n)
+	for c := range names {
+		if n, ok := model.Difference(byte(c)); ok {
+			names[c] = string(n)
+		}
 	}
 	return names
 }
