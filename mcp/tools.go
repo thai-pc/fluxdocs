@@ -25,21 +25,55 @@ type tool struct {
 	handler     func(s *Server, args json.RawMessage) ([]contentItem, bool)
 }
 
-// tools is the registry, keyed by tool name.
+// tools is the registry of local tools, keyed by tool name. Every server
+// exposes them; none sends document content off the machine.
 var tools = map[string]tool{}
+
+// aiTools is the registry of tools that send document text to an external LLM
+// service. A server exposes them only after Server.EnableAITools.
+var aiTools = map[string]tool{}
 
 func register(t tool) { tools[t.name] = t }
 
-// toolList returns the advertised tools (for tools/list) in a stable order.
-func toolList() []map[string]any {
-	names := make([]string, 0, len(tools))
-	for n := range tools {
+func registerAI(t tool) { aiTools[t.name] = t }
+
+// lookupTool returns the named tool if this server exposes it. AI tools resolve
+// only when the server has opted in, so a default server rejects them as
+// unknown rather than failing at call time.
+func (s *Server) lookupTool(name string) (tool, bool) {
+	if t, ok := tools[name]; ok {
+		return t, true
+	}
+	if c, _ := s.aiBackend(); c == nil {
+		return tool{}, false
+	}
+	t, ok := aiTools[name]
+	return t, ok
+}
+
+// toolList returns the tools this server advertises (for tools/list) in a
+// stable order. AI tools appear only when enabled, and their descriptions are
+// prefixed with the provider the document text is sent to.
+func (s *Server) toolList() []map[string]any {
+	c, provider := s.aiBackend()
+	all := make(map[string]tool, len(tools)+len(aiTools))
+	for n, t := range tools {
+		all[n] = t
+	}
+	if c != nil {
+		for n, t := range aiTools {
+			t.description = aiDisclosure(provider) + t.description
+			all[n] = t
+		}
+	}
+	names := make([]string, 0, len(all))
+	for n := range all {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	out := make([]map[string]any, 0, len(names))
 	for _, n := range names {
-		t := tools[n]
+		t := all[n]
 		out = append(out, map[string]any{
 			"name":        t.name,
 			"description": t.description,

@@ -64,6 +64,27 @@ jobs:
             echo "No redaction tests yet — gate is a placeholder."
           fi
 
+  # The root module must build on its own, exactly as `go install
+  # github.com/thai-pc/fluxdocs/cmd/...@latest` sees it. The jobs above run
+  # inside go.work, which also provides the cloud module, so a root package
+  # importing cloud/... would pass there and break for every user. GOWORK=off
+  # drops the workspace and catches that.
+  root-module:
+    name: Root module standalone (GOWORK=off)
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+
   # Redaction leak corpus with its differential oracle, Ghostscript txtwrite,
   # made mandatory inside this job: FLUXDOCS_REQUIRE_GS=1 turns a missing gs
   # into a failure instead of a skip (decision D10,
@@ -119,6 +140,8 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go build ./...
+      - name: go vet
+        run: go vet ./...
       # go test exits 1 when a module has no packages, so only run it once the
       # cloud module contains real Go packages.
       - name: Test (race)
@@ -128,6 +151,14 @@ jobs:
           else
             echo "Cloud module has no Go packages yet — skipping tests."
           fi
+
+      # The AI demo is its own module (it imports cloud/ai); its replace
+      # directives point at this checkout, so it builds with and without go.work.
+      - name: Build ai-extraction-demo (workspace and standalone)
+        working-directory: examples/ai-extraction-demo
+        run: |
+          go build -o /dev/null ./...
+          GOWORK=off go build -o /dev/null ./...
 
   wasm:
     name: Build WASM (client-side core)

@@ -92,9 +92,13 @@ docs/        spec.md — the full technical specification (reference document)
   validator (font embedding and certification are follow-ups).
 - **Agent-native MCP server** (`fluxdocs-mcp`) — a self-hostable Model Context
   Protocol server exposing open/extract/extract_tables/render/redact/auto_redact_pii/watermark/
-  compare/pdfa/forms/sign — plus the Cloud AI tools extract_structured and
-  ask_document — as tools an AI agent can call; documents stay on the user's own
-  machine (the AI tools call out only to the configured LLM backend).
+  compare/pdfa/forms/sign as tools an AI agent can call; documents stay on the
+  user's own machine and `fluxdocs-mcp` makes no network call. The Cloud AI tools
+  extract_structured and ask_document, which send the document text to the
+  Anthropic Claude API, are not in that binary: they ship in
+  `fluxdocs-mcp-cloud` (cloud module) and are off by default even with
+  `ANTHROPIC_API_KEY` set. Enable them with `--enable-cloud-ai` or
+  `FLUXDOCS_MCP_ENABLE_AI=1`; their tool descriptions then name the provider.
 
 Wave 2 is feature-complete.
 

@@ -3,33 +3,36 @@ package mcp
 import (
 	"encoding/json"
 
-	"github.com/thai-pc/fluxdocs/cloud/ai"
 	"github.com/thai-pc/fluxdocs/core"
 )
 
-// tools_cloud.go registers the Cloud-tier AI tools: extract_structured and
-// ask_document. Both run the document text through an LLM backend. By default
-// that is a Claude client reading ANTHROPIC_API_KEY (constructed on demand, so
-// the tools stay declared even with no key — they simply error until one is
-// set); a test or embedder can override it via Server.SetAIClient. The document
-// bytes leave the machine only through this explicitly-configured backend — the
-// pure-Go core never makes the call itself.
+// tools_cloud.go defines the AI tools: extract_structured and ask_document.
+// Both send the document's extracted text to an external LLM service, so they
+// live in a separate registry (aiTools) that a server exposes only after
+// Server.EnableAITools — off by default, even when ANTHROPIC_API_KEY is set.
+// This package ships no backend: the concrete Claude client lives in the cloud
+// module (cloud/ai) and is wired in by the cloud binary fluxdocs-mcp-cloud, so
+// the root module never imports Cloud code and the default build makes no
+// network call.
 
-// aiOrDefault returns the configured AI backend, or a default Claude client.
-func (s *Server) aiOrDefault() core.AIClient {
-	s.mu.Lock()
-	c := s.aiClient
-	s.mu.Unlock()
-	if c != nil {
-		return c
-	}
-	return ai.New("")
+// aiDisclosure is prepended to every AI tool description, so the agent (and the
+// user reviewing its tool calls) can see that the call sends document text to
+// the named provider.
+func aiDisclosure(provider string) string {
+	return "Sends the document's extracted text to " + provider + " (external service): the document content leaves this machine. "
+}
+
+// aiCall resolves the opted-in backend for one AI tool call. It reports false
+// if the AI tools were disabled since the tool was listed.
+func (s *Server) aiCall() (core.AIClient, bool) {
+	c, _ := s.aiBackend()
+	return c, c != nil
 }
 
 func init() {
-	register(tool{
+	registerAI(tool{
 		name:        "extract_structured",
-		description: "Extract structured fields from the document via an LLM (Cloud). Provide the fields to pull out; returns a JSON object with the requested keys. Requires ANTHROPIC_API_KEY unless a backend is configured.",
+		description: "Extract structured fields from the document via an LLM (Cloud). Provide the fields to pull out; returns a JSON object with the requested keys.",
 		schema: obj(map[string]any{
 			"handle": prop("integer", "Document handle"),
 			"fields": map[string]any{
@@ -68,7 +71,11 @@ func init() {
 			for i, f := range a.Fields {
 				schema.Fields[i] = core.SchemaField{Name: f.Name, Description: f.Description, Type: f.Type, Required: f.Required}
 			}
-			doc.SetAIClient(s.aiOrDefault())
+			backend, ok := s.aiCall()
+			if !ok {
+				return errText("AI tools are disabled on this server")
+			}
+			doc.SetAIClient(backend)
 			result, err := doc.ExtractStructured(schema)
 			if err != nil {
 				return errText("extract_structured failed: %v", err)
@@ -77,9 +84,9 @@ func init() {
 		},
 	})
 
-	register(tool{
+	registerAI(tool{
 		name:        "ask_document",
-		description: "Answer a natural-language question grounded in the document via an LLM (Cloud). Requires ANTHROPIC_API_KEY unless a backend is configured.",
+		description: "Answer a natural-language question grounded in the document via an LLM (Cloud).",
 		schema: obj(map[string]any{
 			"handle":   prop("integer", "Document handle"),
 			"question": prop("string", "The question to answer from the document"),
@@ -96,7 +103,11 @@ func init() {
 			if !ok {
 				return errText("unknown document handle %d", a.Handle)
 			}
-			doc.SetAIClient(s.aiOrDefault())
+			backend, ok := s.aiCall()
+			if !ok {
+				return errText("AI tools are disabled on this server")
+			}
+			doc.SetAIClient(backend)
 			answer, err := doc.AskDocument(a.Question)
 			if err != nil {
 				return errText("ask_document failed: %v", err)

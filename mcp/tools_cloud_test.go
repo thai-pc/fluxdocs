@@ -30,7 +30,7 @@ func (s *stubAI) Ask(_ context.Context, text, _ string) (string, error) {
 func TestExtractStructuredTool(t *testing.T) {
 	s := NewServer()
 	stub := &stubAI{extract: map[string]any{"vendor": "Acme", "total": "42"}}
-	s.SetAIClient(stub)
+	s.EnableAITools(stub, "TestLLM")
 	// writeSecretPDF embeds "SECRET-42" and "public" text — enough to ground on.
 	h := openHandle(t, s, writeSecretPDF(t))
 
@@ -56,7 +56,7 @@ func TestExtractStructuredTool(t *testing.T) {
 
 func TestAskDocumentTool(t *testing.T) {
 	s := NewServer()
-	s.SetAIClient(&stubAI{answer: "The document mentions a public notice."})
+	s.EnableAITools(&stubAI{answer: "The document mentions a public notice."}, "TestLLM")
 	h := openHandle(t, s, writeSecretPDF(t))
 
 	item, isErr := callTool(t, s, "ask_document", map[string]any{
@@ -72,7 +72,7 @@ func TestAskDocumentTool(t *testing.T) {
 
 func TestCloudToolsBadArgs(t *testing.T) {
 	s := NewServer()
-	s.SetAIClient(&stubAI{})
+	s.EnableAITools(&stubAI{}, "TestLLM")
 	h := openHandle(t, s, writeSecretPDF(t))
 
 	// extract_structured requires a non-empty fields array.
@@ -86,5 +86,84 @@ func TestCloudToolsBadArgs(t *testing.T) {
 	// Unknown handle.
 	if _, isErr := callTool(t, s, "ask_document", map[string]any{"handle": 999, "question": "x"}); !isErr {
 		t.Error("ask_document with unknown handle should error")
+	}
+}
+
+// toolNames returns the tools a server advertises, keyed by name, with their
+// descriptions.
+func toolNames(t *testing.T, s *Server) map[string]string {
+	t.Helper()
+	m := rpc(t, s, 1, "tools/list", nil)
+	out := map[string]string{}
+	for _, tt := range m["result"].(map[string]any)["tools"].([]any) {
+		e := tt.(map[string]any)
+		out[e["name"].(string)] = e["description"].(string)
+	}
+	return out
+}
+
+// TestAIToolsOffByDefault pins the privacy promise: a default server never
+// lists or accepts a tool that sends document content to an external service,
+// even when an API key is present in the environment.
+func TestAIToolsOffByDefault(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-a-real-key")
+	t.Setenv("FLUXDOCS_MCP_ENABLE_AI", "1") // the library ignores env; only the cloud binary reads it
+	s := NewServer()
+
+	names := toolNames(t, s)
+	for n := range aiTools {
+		if _, ok := names[n]; ok {
+			t.Errorf("default server lists network-sending tool %q", n)
+		}
+	}
+	for n, desc := range names {
+		if strings.Contains(desc, "leaves this machine") {
+			t.Errorf("default server lists %q, described as sending content out", n)
+		}
+	}
+	if len(aiTools) == 0 {
+		t.Fatal("aiTools registry is empty; the test would pass vacuously")
+	}
+
+	h := openHandle(t, s, writeSecretPDF(t))
+	for _, name := range []string{"ask_document", "extract_structured"} {
+		m := rpc(t, s, 1, "tools/call", map[string]any{
+			"name":      name,
+			"arguments": map[string]any{"handle": h, "question": "x", "fields": []map[string]any{{"name": "a"}}},
+		})
+		if m["error"] == nil {
+			t.Errorf("default server accepted %s: %v", name, m["result"])
+		}
+	}
+}
+
+// TestAIToolsOptIn checks EnableAITools registers the AI tools with the provider
+// named in their descriptions, and that a nil backend turns them off again.
+func TestAIToolsOptIn(t *testing.T) {
+	s := NewServer()
+	s.EnableAITools(&stubAI{answer: "ok"}, "Anthropic (Claude API)")
+
+	names := toolNames(t, s)
+	for n := range aiTools {
+		desc, ok := names[n]
+		if !ok {
+			t.Errorf("opted-in server does not list %q", n)
+			continue
+		}
+		if !strings.Contains(desc, "Anthropic (Claude API)") || !strings.Contains(desc, "leaves this machine") {
+			t.Errorf("%s description does not disclose the provider: %q", n, desc)
+		}
+	}
+	// Core tools stay listed.
+	if _, ok := names["open_document"]; !ok {
+		t.Error("opted-in server lost open_document")
+	}
+
+	s.EnableAITools(nil, "")
+	names = toolNames(t, s)
+	for n := range aiTools {
+		if _, ok := names[n]; ok {
+			t.Errorf("tool %q still listed after disabling", n)
+		}
 	}
 }

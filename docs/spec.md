@@ -834,8 +834,12 @@ what must be compiled in for the tool to register):
   agent literally cannot call Pro behavior that isn't licensed/compiled in.
 - **No silent network egress.** The MCP server makes no outbound call with
   document bytes; the only AI traffic is the host agent ↔ FluxDocs tool channel,
-  which the user runs and observes. (Cloud-tier `ask` / `extract_structured`
-  remain opt-in tools that *do* call an LLM, clearly labeled as such.)
+  which the user runs and observes. (Cloud-tier `ask_document` /
+  `extract_structured` *do* call an LLM. They are not in `cmd/fluxdocs-mcp`;
+  they ship in the cloud module's `fluxdocs-mcp-cloud`, are off by default even
+  with `ANTHROPIC_API_KEY` set, register only with `--enable-cloud-ai` /
+  `FLUXDOCS_MCP_ENABLE_AI=1`, and their descriptions name the provider the text
+  goes to.)
 - **Mutations are explicit.** Tools that change the document return a new handle /
   require an explicit `save`; the agent never overwrites the source by side
   effect.

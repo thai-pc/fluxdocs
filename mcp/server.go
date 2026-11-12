@@ -7,6 +7,11 @@
 // written to the user's own filesystem and processed in-process — no byte is
 // sent to a third party. That is the defensible angle versus sales-gated,
 // cloud-leaning agent assistants (spec §2, revision 0.2.0).
+//
+// The only tools that send document content off the machine are the AI tools
+// (extract_structured, ask_document). They are not registered by NewServer;
+// an embedder must opt in with Server.EnableAITools and supply the backend.
+// This package ships no backend and imports no network code.
 package mcp
 
 import (
@@ -32,11 +37,12 @@ type Server struct {
 	docs map[int]*core.Document
 	next int
 
-	// aiClient is the Cloud-tier LLM backend for the extract_structured and
-	// ask_document tools. When nil, those tools construct a default Claude client
-	// (reading ANTHROPIC_API_KEY) on demand. Tests inject a stub here. Guarded by
-	// mu.
-	aiClient core.AIClient
+	// aiClient is the LLM backend for the AI tools and aiProvider the
+	// human-readable name of the service it sends document text to. A nil
+	// aiClient (the default) means the AI tools are neither listed nor callable.
+	// Guarded by mu.
+	aiClient   core.AIClient
+	aiProvider string
 }
 
 // NewServer returns a ready MCP server.
@@ -44,13 +50,34 @@ func NewServer() *Server {
 	return &Server{docs: map[int]*core.Document{}, next: 1}
 }
 
-// SetAIClient installs the LLM backend used by the Cloud AI tools, overriding
-// the default Claude client. Passing a client makes the AI tools usable without
-// ANTHROPIC_API_KEY (e.g. in tests).
-func (s *Server) SetAIClient(c core.AIClient) {
+// EnableAITools registers the AI tools (extract_structured, ask_document) on
+// this server, backed by backend. These tools send the document's extracted
+// text to an external service, so they are strictly opt-in: a server returned
+// by NewServer does not list or accept them, whatever the environment
+// (ANTHROPIC_API_KEY included). provider names the service the text goes to
+// (e.g. "Anthropic (Claude API)"); it is shown in each tool description so the
+// agent and the user can see where the document goes. An empty provider is
+// shown as "an external LLM provider". Passing a nil backend disables the AI
+// tools again; it does not cancel calls already in flight.
+func (s *Server) EnableAITools(backend core.AIClient, provider string) {
+	if provider == "" {
+		provider = "an external LLM provider"
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.aiClient = c
+	s.aiClient = backend
+	s.aiProvider = provider
+	if backend == nil {
+		s.aiProvider = ""
+	}
+}
+
+// aiBackend returns the opted-in AI backend and its provider name, or a nil
+// client when the AI tools are disabled.
+func (s *Server) aiBackend() (core.AIClient, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.aiClient, s.aiProvider
 }
 
 // --- JSON-RPC 2.0 wire types ---
@@ -119,7 +146,7 @@ func (s *Server) Handle(msg []byte) (response, bool) {
 	case "notifications/initialized", "initialized":
 		return response{}, false
 	case "tools/list":
-		return okResponse(req.ID, map[string]any{"tools": toolList()}), true
+		return okResponse(req.ID, map[string]any{"tools": s.toolList()}), true
 	case "tools/call":
 		res, rerr := s.callTool(req.Params)
 		if rerr != nil {
@@ -151,7 +178,7 @@ func (s *Server) callTool(params json.RawMessage) (map[string]any, *rpcError) {
 	if err := json.Unmarshal(params, &call); err != nil {
 		return nil, &rpcError{codeInvalidParams, "invalid tools/call params"}
 	}
-	t, ok := tools[call.Name]
+	t, ok := s.lookupTool(call.Name)
 	if !ok {
 		return nil, &rpcError{codeMethodNotFound, "unknown tool: " + call.Name}
 	}
