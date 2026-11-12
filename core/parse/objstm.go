@@ -136,10 +136,11 @@ func (r *Resolver) decodeObjStm(streamNum int) (*objStm, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: object %d is not an ObjStm", errLex, streamNum)
 	}
-	// An ObjStm stream is encrypted like any other; decrypt its raw bytes before
+	// An ObjStm stream is encrypted like any other stream (/StmF, or the
+	// crypt filter its /Crypt stage names); decrypt its raw bytes before
 	// decoding. The objects it contains are then plaintext (not re-decrypted).
 	if r.decrypt != nil {
-		st.Raw = r.decrypt.decryptBytes(streamNum, gen, st.Raw)
+		st.Raw = r.decrypt.decryptStream(streamNum, gen, st)
 	}
 
 	n, ok := st.Dict.GetInt("N")

@@ -420,6 +420,37 @@ func TestRepair_EncryptFailsClosed(t *testing.T) {
 			t.Fatal("EnableDecryption succeeded without /ID; want the password check to refuse the wrong key")
 		}
 	})
+	t.Run("V5 trailer lost: found by shape, decrypts without /ID", func(t *testing.T) {
+		sec := AES256Security{R: 6, Owner: []byte("owner"), P: -4, EncryptMetadata: true, Seed: "repair"}
+		v5 := V5Doc{Sec: sec, Objects: V5OnePage("V5-REPAIR", false, ""), Root: 1, Info: 6}.Bytes()
+		r, err := NewRepairedResolver(v5[:bytes.LastIndex(v5, []byte("trailer"))])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Trailer()["Encrypt"] != (Reference{Number: 7}) {
+			t.Fatalf("/Encrypt = %v, want 7 0 R by shape", r.Trailer()["Encrypt"])
+		}
+		if err := r.EnableDecryption(nil); err != nil {
+			t.Fatalf("EnableDecryption: %v (R6 does not use /ID)", err)
+		}
+		pages, err := r.Pages()
+		if err != nil || len(pages) != 1 || !strings.Contains(contentText(t, r, pages[0]), "V5-REPAIR") {
+			t.Fatalf("pages %d, %v", len(pages), err)
+		}
+	})
+	t.Run("V5 dictionary without /P: found by shape", func(t *testing.T) {
+		data, _ := body(append(append([]repairObj{}, onePage...), repairObj{5, 0, "<< /Filter /Standard /V 5 /R 6 /O <00> /U <00> /OE <00> /UE <00> /Perms <00> >>"})...)
+		r, err := NewRepairedResolver(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Trailer()["Encrypt"] != (Reference{Number: 5}) {
+			t.Fatalf("/Encrypt = %v, want 5 0 R", r.Trailer()["Encrypt"])
+		}
+		if err := r.EnableDecryption(nil); err == nil {
+			t.Fatal("EnableDecryption accepted a V5 dictionary with short strings")
+		}
+	})
 	t.Run("public-key shape", func(t *testing.T) {
 		data, _ := body(append(append([]repairObj{}, onePage...), repairObj{5, 0, "<< /Filter /Adobe.PubSec /SubFilter /adbe.pkcs7.s4 /Recipients [<00>] >>"})...)
 		r, err := NewRepairedResolver(data)
@@ -472,6 +503,14 @@ func TestRepair_EncryptFailsClosed(t *testing.T) {
 		// An unterminated string does not hide the names after it.
 		{"stray '(' before the keys", append(append([]byte{}, plainDoc...), "5 0 obj<<(\x00/Filter/Standard/V 2/R 3/O<00>/U<00>/P -4>>endobj\n"...)},
 		{"stray '<' before the keys", append(append([]byte{}, plainDoc...), "5 0 obj<</Length 40 <\x01 /Filter/Standard/V 2/O(a)/U(b)/P -4 ]]"...)},
+		// AES-256 (V5) keys (ISO 32000-2): /OE and /UE are signs alone.
+		{"V5 dictionary cut inside /OE, before /Filter", append(append([]byte{}, plainDoc...), "5 0 obj\n<< /V 5 /R 6 /Length 256 /OE <0011"...)},
+		{"V5 dictionary cut after /UE", append(append([]byte{}, plainDoc...), "5 0 obj<</R 6/UE"...)},
+		{"V5 dictionary cut inside /Perms", append(append([]byte{}, plainDoc...), "5 0 obj\n<< /Filter /Standard /V 5 /R 6 /O <00> /U <00> /OE <00> /UE <00> /Perms <0A"...)},
+		{"V5 dictionary without /P shadowed", func() []byte {
+			d, _ := body(append(append([]repairObj{}, onePage...), repairObj{5, 0, "<< /Filter /Standard /V 5 /R 6 /O <00> /U <00> /OE <00> /UE <00> /Perms <00> >>"}, repairObj{5, 0, "<< /Type /Other >>"})...)
+			return d
+		}()},
 		// A third-party handler whose span swallowed an image dictionary.
 		{"third-party handler cut, running into an image", append(append([]byte{}, plainDoc...),
 			"5 0 obj<</Filter/FOPN_foweb/V 1/Length 40 ]]\n<</Type/XObject/Subtype/Image/Width 1>>endobj\n"...)},

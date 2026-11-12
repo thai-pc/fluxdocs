@@ -752,8 +752,9 @@ func (s *repairScan) catalogByScan() (Reference, bool) {
 
 // encryptByShape finds an encryption dictionary no trailer names (§3.6, fail
 // closed): the last winner whose dictionary has a /Filter name and either
-// /O, /U and /P (the standard handler, ISO 32000-1 Table 21) or /Recipients
-// (a public-key handler), and is not a stream's (§7.6.1: it is a
+// /O, /U and /P (the standard handler, ISO 32000-1 Table 21), /OE or /UE (its
+// AES-256 form, ISO 32000-2) or /Recipients (a public-key handler), and is
+// not a stream's (§7.6.1: it is a
 // dictionary). An encryption dictionary cannot be in an object stream
 // (§7.5.7), so plain objects suffice. Dictionary bytes (dictBytes) are
 // pre-filtered by name search (encryptShaped); the parse is the bounded
@@ -795,7 +796,7 @@ func (s *repairScan) encryptLost() bool {
 
 // isEncryptDict parses header k (bounded, dictionary only) and returns 1 when
 // its value is a dictionary, not a stream's, with a /Filter name and either
-// /O, /U and /P or /Recipients; -1 when it does not parse, or has those keys
+// /O, /U and /P, /OE or /UE, or /Recipients; -1 when it does not parse, or has those keys
 // but cannot be read as one — /Filter is not a name (an indirect handler
 // name), or the dictionary is a stream's and its /Filter is not a stream
 // filter (an encryption dictionary followed by a stray stream keyword); 0
@@ -813,7 +814,9 @@ func (s *repairScan) isEncryptDict(k int) int {
 	_, u := d["U"]
 	_, p := d["P"]
 	_, rc := d["Recipients"]
-	if !(o && u && p) && !rc {
+	_, oe := d["OE"]
+	_, ue := d["UE"]
+	if !(o && u && p) && !rc && !oe && !ue {
 		return 0
 	}
 	f, has := d["Filter"]
@@ -847,19 +850,22 @@ func (s *repairScan) dictBytes(k int) []byte {
 }
 
 // encryptShaped is the pre-filter for an encryption dictionary: the names
-// /Filter and either /Recipients or all of /O, /U and /P.
+// /Filter and either /Recipients, all of /O, /U and /P, or one of /OE and /UE
+// (keys only the AES-256 standard handler's dictionary has, ISO 32000-2
+// Table 21; a V5 dictionary missing /P is still one).
 func encryptShaped(n dictNames) bool {
-	return n.has(nFilter) && (n.has(nRecipients) || (n.has(nO) && n.has(nU) && n.has(nP)))
+	return n.has(nFilter) && (n.has(nRecipients) || (n.has(nO) && n.has(nU) && n.has(nP)) || n.has(nOE) || n.has(nUE))
 }
 
 // lostShaped is the pre-filter for the dictionary bytes of a header whose
 // value does not parse: a cut can end them anywhere, so any one sign of an
 // encryption dictionary counts. In order:
 //
-//  1. /Recipients, /Filter /Standard (the standard handler, ISO 32000-1
-//     §7.6.3), /Filter /Adobe.PubSec or a public-key /SubFilter
-//     adbe.pkcs7.s3, .s4, .s5 (§7.6.5): always a sign, whatever else the
-//     bytes hold;
+//  1. /Recipients, /OE, /UE (AES-256 standard handler keys, ISO 32000-2
+//     Table 21: no other dictionary has them), /Filter /Standard (the
+//     standard handler, ISO 32000-1 §7.6.3), /Filter /Adobe.PubSec or a
+//     public-key /SubFilter adbe.pkcs7.s3, .s4, .s5 (§7.6.5): always a sign,
+//     whatever else the bytes hold;
 //  2. /Filter with one of /O, /U, /CF, /StmF, /StrF (Table 20, Table 21);
 //  3. otherwise, a signature dictionary (§12.8.1; its /Filter names its
 //     handler too) is not one: /ByteRange, /Type /Sig or /Type
@@ -873,7 +879,7 @@ func encryptShaped(n dictNames) bool {
 //     nothing yet).
 func lostShaped(n dictNames) bool {
 	fv := string(n.filter) // compared and looked up below without allocating
-	if n.has(nRecipients) || fv == "Standard" || fv == "Adobe.PubSec" || publicKeySubFilter(n.subFilter) {
+	if n.has(nRecipients) || n.has(nOE) || n.has(nUE) || fv == "Standard" || fv == "Adobe.PubSec" || publicKeySubFilter(n.subFilter) {
 		return true
 	}
 	if !n.has(nFilter) {
@@ -934,6 +940,8 @@ const (
 	nByteRange
 	nSubtype
 	nEncrypt
+	nOE
+	nUE
 )
 
 // dictNames is what one scanNames pass over dictionary bytes finds: which of
@@ -993,6 +1001,10 @@ func namesOf(b []byte) dictNames {
 			n.bits |= nSubtype
 		case "Encrypt":
 			n.bits |= nEncrypt
+		case "OE":
+			n.bits |= nOE
+		case "UE":
+			n.bits |= nUE
 		}
 		return false
 	})

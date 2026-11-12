@@ -2,6 +2,7 @@ package parse
 
 import (
 	"container/list"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 )
@@ -298,12 +299,113 @@ func (r *Resolver) readDirectLength(ref Reference) int {
 }
 
 // EnableDecryption sets up the Standard Security Handler for an encrypted
-// document using password (nil/empty for the common case). It is a no-op when
-// the trailer has no /Encrypt. It must be called right after NewResolver, before
-// any content object is resolved, so the cache holds decrypted objects.
+// document using password as bytes (nil/empty for the common case): for R2–R4
+// the bytes Algorithm 2 pads, for R5/R6 the bytes as they are, truncated to
+// 127 and not SASLprep'd (EnableDecryptionPassword prepares a typed
+// password). The password is tried as the user password, then as the owner
+// password. It is a no-op when the trailer has no /Encrypt. It must be called
+// right after NewResolver, before any content object is resolved, so the
+// cache holds decrypted objects. On failure the resolver is unchanged and it
+// may be called again with another password.
 //
-// Returns an error if the handler is unsupported or the password is wrong.
+// Returns a wrapped ErrWrongPassword if the password is neither the user nor
+// the owner password, a wrapped ErrEncryptionTampered if an AES-256 file key
+// does not authenticate (/Perms), or another wrapped errLex if the handler or
+// its dictionary is unsupported or malformed. No message holds the password
+// or document bytes.
 func (r *Resolver) EnableDecryption(password []byte) error {
+	// A copy: the candidates are cleared after use, the caller's bytes not.
+	return r.enableDecryption(func(Dict) [][]byte { return [][]byte{append([]byte(nil), password...)} }, nil)
+}
+
+// EnableDecryptionPassword is EnableDecryption for a password typed as text.
+// It encodes it as each revision expects (aes256-decryption.md §4): for
+// R5/R6, the SASLprep form (RFC 4013) as UTF-8 truncated to 127 bytes, then,
+// if that fails both tests and differs, the raw UTF-8 bytes (some writers
+// skip SASLprep; a password SASLprep refuses is tried raw only); for R2–R4,
+// the PDFDocEncoding bytes, then the raw UTF-8 bytes when they differ (or
+// only those, when PDFDocEncoding cannot represent the text). The empty
+// password is tried as it is. The encoded bytes are cleared after use (best
+// effort: Go cannot clear the caller's string).
+//
+// Returns EnableDecryption's errors.
+func (r *Resolver) EnableDecryptionPassword(password string) error {
+	return r.EnableDecryptionPasswordShared(password, nil)
+}
+
+// DecryptionCache carries the key derivation of one open across the
+// resolvers of its repair ladder (core.OpenBytes builds up to three, one per
+// rung, for the same file and password). The zero value is ready to use. It
+// holds the derived decryptor — the file key — for the encryption dictionary
+// last seen, and one AES-256 hash budget (v5MaxHashes) for all its uses: a
+// rung that meets the same dictionary and file identifier reuses the result,
+// key or error, with no hash at all; a rung that meets a different one
+// derives again within what is left of the budget, and fails closed when it
+// is spent. So one open costs at most v5MaxHashes hashes, whatever the
+// ladder does. Not safe for concurrent use; it lives for one open only.
+//
+// The cache is keyed by the encryption dictionary and file identifier, not
+// by the password: use one cache per password. Reusing it with a different
+// password returns the first password's result without checking the second.
+type DecryptionCache struct {
+	hasher v5Hasher
+	have   bool
+	fp     [sha256.Size]byte
+	d      *decryptor
+	err    error
+}
+
+// EnableDecryptionPasswordShared is EnableDecryptionPassword that shares the
+// key derivation and the hash budget of one open through c (nil: none).
+//
+// Returns EnableDecryption's errors; a wrapped errLex when the shared hash
+// budget is spent.
+func (r *Resolver) EnableDecryptionPasswordShared(password string, c *DecryptionCache) error {
+	return r.enableDecryption(func(enc Dict) [][]byte { return passwordCandidates(enc, password) }, c)
+}
+
+// passwordCandidates returns the byte encodings of password to try, in
+// order, for the handler of enc (EnableDecryptionPassword).
+func passwordCandidates(enc Dict, password string) [][]byte {
+	if password == "" {
+		return [][]byte{nil}
+	}
+	raw := []byte(password)
+	if v, _ := enc.GetInt("V"); v == 5 {
+		raw = raw[:min(len(raw), v5MaxPassword)]
+		prep, err := saslprep(password)
+		if err != nil {
+			return [][]byte{raw}
+		}
+		p := []byte(prep)
+		p = p[:min(len(p), v5MaxPassword)]
+		if string(p) == string(raw) {
+			return [][]byte{p}
+		}
+		return [][]byte{p, raw}
+	}
+	if pd, ok := pdfDocPassword(password); ok && string(pd) != string(raw) {
+		return [][]byte{pd, raw}
+	}
+	return [][]byte{raw}
+}
+
+// Decryption returns how EnableDecryption opened the document, and true; it
+// returns false when decryption is not enabled (the document is not
+// encrypted, or EnableDecryption was not called or failed).
+func (r *Resolver) Decryption() (DecryptionInfo, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.decrypt == nil {
+		return DecryptionInfo{}, false
+	}
+	return r.decrypt.info, true
+}
+
+// enableDecryption is EnableDecryption with the candidate password bytes
+// chosen once the encryption dictionary is read; they are cleared on return.
+// With a cache, an identical dictionary and file identifier reuse its result.
+func (r *Resolver) enableDecryption(candidates func(enc Dict) [][]byte, cache *DecryptionCache) error {
 	encRef, ok := r.xref.Trailer["Encrypt"]
 	if !ok {
 		return nil // not encrypted
@@ -325,10 +427,43 @@ func (r *Resolver) EnableDecryption(password []byte) error {
 	if idArr, ok := r.xref.Trailer["ID"].(Array); ok && len(idArr) > 0 {
 		id = stringValue(idArr[0])
 	}
-	d, err := newDecryptor(encDict, id, password)
+	var fp [sha256.Size]byte
+	hasher := &v5Hasher{}
+	if cache != nil {
+		// The result depends only on the dictionary, the identifier and the
+		// password, which is the same for every use of one cache.
+		h := sha256.New()
+		h.Write(SerializeObject(encDict))
+		h.Write([]byte{0})
+		h.Write(id)
+		h.Sum(fp[:0])
+		if cache.have && cache.fp == fp {
+			if cache.err != nil {
+				return cache.err
+			}
+			return r.installDecryptor(cache.d)
+		}
+		hasher = &cache.hasher
+	}
+	cands := candidates(encDict)
+	defer func() {
+		for _, c := range cands {
+			clear(c)
+		}
+	}()
+	d, err := newDecryptorFor(encDict, id, cands, hasher)
+	if cache != nil {
+		cache.have, cache.fp, cache.d, cache.err = true, fp, d, err
+	}
 	if err != nil {
 		return err
 	}
+	return r.installDecryptor(d)
+}
+
+// installDecryptor makes d the resolver's decryptor. d is read-only once
+// built, so resolvers of one open may share it.
+func (r *Resolver) installDecryptor(d *decryptor) error {
 	r.mu.Lock()
 	r.decrypt = d
 	// An ObjStm decodes differently once decrypted, so a failure cached while

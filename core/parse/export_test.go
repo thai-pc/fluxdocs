@@ -91,10 +91,12 @@ func (s StdSecurity) ownerHash() []byte {
 	sum := md5.Sum(isoPad(owner))
 	n := 5
 	if s.R >= 3 {
-		for i := 0; i < 50; i++ {
-			sum = md5.Sum(sum[:])
-		}
 		n = s.KeyLen
+		// Step (c), each re-hash of the first n bytes: the reading
+		// Ghostscript writes and qpdf reads (crypt.go, ownerToUserPassword).
+		for i := 0; i < 50; i++ {
+			sum = md5.Sum(sum[:n])
+		}
 	}
 	rk := sum[:n]
 	o := isoRC4(rk, isoPad(s.User))

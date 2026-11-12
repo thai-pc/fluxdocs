@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/rc4"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -111,9 +112,11 @@ func TestDecryptObjectRecurses(t *testing.T) {
 }
 
 func TestNewDecryptorRejectsUnsupported(t *testing.T) {
-	// AES-256 (V5/R6) is not yet supported.
-	if _, err := newDecryptor(encDict(5, 6, 256, "AESV3", nil), nil, nil); err == nil {
-		t.Error("expected an error for R6/AES-256")
+	// R6 is supported (crypt_v5.go), but an R6 dictionary whose /O is too
+	// short (32 bytes: the R2–R4 size) is rejected before any hash, with
+	// that reason.
+	if _, err := newDecryptor(encDict(5, 6, 256, "AESV3", nil), nil, nil); err == nil || !strings.Contains(err.Error(), "/O too short") {
+		t.Errorf("err = %v, want R6 with a short /O rejected", err)
 	}
 	// Non-standard handler.
 	if _, err := newDecryptor(Dict{"Filter": Name("Custom"), "R": Integer(3), "O": String{Value: bytes.Repeat([]byte{0}, 32)}}, nil, nil); err == nil {
