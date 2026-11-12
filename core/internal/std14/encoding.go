@@ -1,12 +1,24 @@
 // Package std14 holds the font data PDF defines by name rather than by
-// program: the simple-font base encodings of ISO 32000-1:2008 Annex D
-// (StandardEncoding, WinAnsiEncoding, MacRomanEncoding). Later phases of
-// docs/design/type1-std14-fonts.md add the standard 14 fonts' names, metrics
-// and glyph-name tables here.
+// program (docs/design/type1-std14-fonts.md §2.4, §4.1): the simple-font
+// base encodings of ISO 32000-1:2008 Annex D (StandardEncoding,
+// WinAnsiEncoding, MacRomanEncoding), the standard 14 fonts' names and
+// aliases (Normalize), their Adobe AFM widths, bounding boxes and the Symbol
+// and ZapfDingbats built-in encodings (afm_gen.go), and the glyph-name to
+// Unicode table substitute faces are drawn through (agl_gen.go). The
+// substitute faces themselves are in the faces subpackage.
 //
-// Clean-room: transcribed from ISO 32000-1:2008 Annex D (Table D.2 and its
-// notes) only. Pure Go; Core (MIT).
+// Clean-room: the Latin encodings are transcribed from ISO 32000-1:2008
+// Annex D (Table D.2 and its notes) only; the generated tables come from the
+// Adobe Core 14 AFM files and the Adobe Glyph List through
+// testing/tools/std14fonts, under the licenses in LICENSES/. Pure Go; Core
+// (MIT code, third-party data as listed in THIRD_PARTY_NOTICES.md).
 package std14
+
+// The generated tables, the faces and the license files are rebuilt from the
+// pinned upstream files by an offline, maintainer-run tool; see
+// testing/tools/std14fonts/README.md for the downloads it expects.
+//
+//go:generate go run ../../../testing/tools/std14fonts -liberation ${STD14_LIBERATION} -dejavu ${STD14_DEJAVU} -afm ${STD14_AFM} -agl ${STD14_AGL} -out ../../..
 
 // Encoding is a simple-font encoding: the glyph name of each one-byte code,
 // "" for a code the encoding leaves unassigned. The functions below return

@@ -1,0 +1,25 @@
+This file covers core/internal/std14/afm_gen.go: the character widths,
+FontBBox values and built-in encodings of the Adobe Core 14 AFM files
+(Core14_AFMs.zip), extracted to Go tables. That extraction is the only
+modification; the AFM files themselves are not distributed.
+
+Copyright notices of the AFM files, retained as the license requires:
+
+Courier.afm, Courier-Oblique.afm:
+  Copyright (c) 1989, 1990, 1991, 1992, 1993, 1997 Adobe Systems Incorporated.  All Rights Reserved.
+Courier-Bold.afm, Courier-BoldOblique.afm:
+  Copyright (c) 1989, 1990, 1991, 1993, 1997 Adobe Systems Incorporated.  All Rights Reserved.
+Helvetica.afm, Helvetica-Bold.afm, Helvetica-Oblique.afm, Helvetica-BoldOblique.afm:
+  Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated.  All Rights Reserved.Helvetica is a trademark of Linotype-Hell AG and/or its subsidiaries.
+Times-Roman.afm, Times-Bold.afm, Times-Italic.afm, Times-BoldItalic.afm:
+  Copyright (c) 1985, 1987, 1989, 1990, 1993, 1997 Adobe Systems Incorporated.  All Rights Reserved.Times is a trademark of Linotype-Hell AG and/or its subsidiaries.
+Symbol.afm:
+  Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated. All rights reserved.
+ZapfDingbats.afm:
+  Copyright (c) 1985, 1987, 1988, 1989, 1997 Adobe Systems Incorporated. All Rights Reserved.ITC Zapf Dingbats is a registered trademark of International Typeface Corporation.
+
+The license paragraph of the accompanying MustRead.html, verbatim:
+
+------------------------------------------------------------------------
+
+This file and the 14 PostScript(R) AFM files it accompanies may be used, copied, and distributed for any purpose and without charge, with or without modification, provided that all copyright notices are retained; that the AFM files are not distributed without this file; that all modifications to this file or any of the AFM files are prominently noted in the modified file(s); and that this paragraph is not modified. Adobe Systems has no responsibility or obligation to support the use of the AFM files.
