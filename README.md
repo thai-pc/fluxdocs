@@ -12,8 +12,8 @@ and scattered, feature-thin open-source libraries (pdf.js, pdf-lib).
 ![Go core](https://img.shields.io/badge/core-100%25%20Go-00ADD8)
 ![Status](https://img.shields.io/badge/status-alpha-yellow)
 
-> **Status:** Alpha (v0.1.0) — the Wave-1 Core is functional end to end (parse →
-> render → annotate → merge/split → save → WASM → CLI), and Wave-2 Pro features
+> **Status:** Alpha (v0.4.x) — the Wave-1 Core is functional end to end (parse →
+> render → annotate → merge/split → save → WASM → CLI), and Wave-2 features
 > have started (safe redaction, watermark, form read/fill). See
 > [Progress](#progress).
 
@@ -36,6 +36,11 @@ and scattered, feature-thin open-source libraries (pdf.js, pdf-lib).
 | **Core** | MIT, free | rendering, basic annotation, text extraction, merge/split, WASM build |
 | **Pro** | One-time | form fill, e-signature, safe redaction, OCR, document compare, watermark |
 | **Cloud** | Subscription | AI document Q&A, structured extraction, automatic PII redaction, collaboration, hosted API |
+
+Everything in this repository is MIT-licensed, including the Wave-2 redaction,
+forms, signature, compare, watermark and PDF/A code listed under
+[Progress](#progress). Paid tiers cover new modules, support and hosted
+services; code already released here will not be relicensed.
 
 ## Repository layout
 
@@ -76,9 +81,12 @@ docs/        spec.md — the full technical specification (reference document)
 - **Hardening** — fuzz targets (millions of executions, no crashes) and a
   synthetic clean/malformed PDF corpus round-trip.
 
-**Wave 2 — Pro, in progress:**
+**Wave 2 — in progress (MIT in this repository):**
 - **Safe redaction** — text-showing operators are removed from the content
-  stream (not painted over); the leak gate passes 100%.
+  stream (not painted over). The leak corpus passes except for four known
+  leaks, all one case: a secret split across several text operators on one
+  line. They are tracked in `testing/security/redaction/` and skipped, not
+  counted as passing.
 - **Watermark** — translucent, rotated text stamp.
 - **Forms** — AcroForm read, fill, and flatten.
 - **Document compare** — page-by-page word diff of two documents' text.
