@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rc4"
+	"crypto/subtle"
 	"fmt"
 	"math"
 )
@@ -13,8 +14,9 @@ import (
 // decryption: RC4 (V1/V2, R2/R3) and AES-128 (V4/R4, /AESV2), with the common
 // empty user password (documents that restrict permissions but open without a
 // password). All primitives are from the standard library — no dependency. Key
-// derivation is Algorithm 2; per-object keys and cipher application follow
-// Algorithms 1 and 1.A. AES-256 (V5/R6) is a documented follow-up.
+// derivation is Algorithm 2 and the user password is checked against /U with
+// Algorithm 6 (via Algorithms 4 and 5); per-object keys and cipher application
+// follow Algorithms 1 and 1.A. AES-256 (V5/R6) is a documented follow-up.
 
 type cryptMethod int
 
@@ -37,9 +39,15 @@ var passwordPad = []byte{
 
 // newDecryptor builds a decryptor from the /Encrypt dictionary, the first
 // element of the file /ID, and a user password (nil/empty for the common case).
+//
+// Returns a wrapped errLex if the handler, revision or key length is
+// unsupported, if /O or /U is too short, or if password is not the user
+// password (Algorithm 6) — a wrong key would only decrypt to garbage.
 func newDecryptor(enc Dict, id, password []byte) (*decryptor, error) {
 	if name, _ := enc["Filter"].(Name); name != "Standard" {
-		return nil, fmt.Errorf("%w: unsupported security handler %q", errLex, name)
+		// The name is document bytes: keep it out of the message, which
+		// core.OpenBytes passes on.
+		return nil, fmt.Errorf("%w: unsupported security handler", errLex)
 	}
 	v, _ := enc.GetInt("V")
 	r, _ := enc.GetInt("R")
@@ -84,7 +92,78 @@ func newDecryptor(enc Dict, id, password []byte) (*decryptor, error) {
 	}
 
 	key := deriveKey(password, o[:32], int32(p), id, int(r), keyLen, encMeta)
+	if err := checkUserPassword(key, stringValue(enc["U"]), id, int(r)); err != nil {
+		return nil, err
+	}
 	return &decryptor{key: key, method: method}, nil
+}
+
+// checkUserPassword implements Algorithm 6 (ISO 32000-1 §7.6.3.4): it
+// recomputes /U from the file key derived for the candidate password and
+// compares it with the stored value — all 32 bytes for R2, the first 16 for
+// R3–R4 (the rest of /U is arbitrary padding). The comparison is
+// constant-time.
+//
+// Returns a wrapped errLex if /U is shorter than the bytes compared or does
+// not match.
+func checkUserPassword(key, u, id []byte, r int) error {
+	want, err := userPasswordHash(key, id, r)
+	if err != nil {
+		return err
+	}
+	if len(u) < len(want) {
+		return fmt.Errorf("%w: /U too short (%d bytes)", errLex, len(u))
+	}
+	if subtle.ConstantTimeCompare(want, u[:len(want)]) != 1 {
+		return fmt.Errorf("%w: password does not match /U", errLex)
+	}
+	return nil
+}
+
+// userPasswordHash computes the checked part of /U for file key key:
+// Algorithm 4 for R2 (the padding string RC4-encrypted with the key, 32
+// bytes), Algorithm 5 for R3–R4 (MD5 of the padding and the first /ID
+// element, RC4-encrypted with the key and then 19 more times with the key's
+// bytes XORed with 1..19, 16 bytes).
+//
+// Returns rc4XOR's error if the key is not a valid RC4 key.
+func userPasswordHash(key, id []byte, r int) ([]byte, error) {
+	if r == 2 {
+		return rc4XOR(key, passwordPad)
+	}
+	h := md5.New()
+	h.Write(passwordPad)
+	h.Write(id)
+	out, err := rc4XOR(key, h.Sum(nil))
+	if err != nil {
+		return nil, err
+	}
+	k := make([]byte, len(key))
+	for i := 1; i <= 19; i++ {
+		for j := range key {
+			k[j] = key[j] ^ byte(i)
+		}
+		if out, err = rc4XOR(k, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// rc4XOR returns data RC4-encrypted (equivalently, decrypted) with key. The
+// key is 5–16 bytes here, always valid for crypto/rc4, but it fails closed
+// all the same: an invalid key is an error, never a fixed output that a
+// crafted /U could match and so pass Algorithm 6.
+//
+// Returns a wrapped errLex if crypto/rc4 rejects the key.
+func rc4XOR(key, data []byte) ([]byte, error) {
+	c, err := rc4.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid RC4 key length %d", errLex, len(key))
+	}
+	out := make([]byte, len(data))
+	c.XORKeyStream(out, data)
+	return out, nil
 }
 
 // readCryptFilter reads the /StdCF crypt filter (V4) to choose RC4 vs AES-128
@@ -103,7 +182,7 @@ func readCryptFilter(enc Dict) (cryptMethod, int, error) {
 	case "AESV2":
 		return methodAESV2, 128, nil
 	default:
-		return 0, 0, fmt.Errorf("%w: unsupported crypt filter method %q", errLex, cfm)
+		return 0, 0, fmt.Errorf("%w: unsupported crypt filter method", errLex) // no document bytes
 	}
 }
 

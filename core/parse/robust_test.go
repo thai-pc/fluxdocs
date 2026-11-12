@@ -179,14 +179,14 @@ func TestNewDecryptor_HostileKeyLength(t *testing.T) {
 		enc    Dict
 		wantOK bool
 	}{
-		{"RC4 40-bit control", encDict(1, 2, 40, ""), true},
-		{"RC4 128-bit control", encDict(2, 3, 128, ""), true},
-		{"R2 /Length 256 (ignored: 5-byte key)", encDict(1, 2, 256, ""), true},
-		{"V2 /Length 256", encDict(2, 3, 256, ""), false},
-		{"V2 /Length 2^62", encDict(2, 3, 1<<62, ""), false},
-		{"V2 /Length 8", encDict(2, 3, 8, ""), false},
-		{"V4 StdCF /Length 32 bytes", encDict(4, 4, 256, "V2"), false},
-		{"V4 StdCF /Length 2^62", encDict(4, 4, 1<<62, "V2"), false},
+		{"RC4 40-bit control", encDict(1, 2, 40, "", []byte("id")), true},
+		{"RC4 128-bit control", encDict(2, 3, 128, "", []byte("id")), true},
+		{"R2 /Length 256 (ignored: 5-byte key)", encDict(1, 2, 256, "", []byte("id")), true},
+		{"V2 /Length 256", encDict(2, 3, 256, "", []byte("id")), false},
+		{"V2 /Length 2^62", encDict(2, 3, 1<<62, "", []byte("id")), false},
+		{"V2 /Length 8", encDict(2, 3, 8, "", []byte("id")), false},
+		{"V4 StdCF /Length 32 bytes", encDict(4, 4, 256, "V2", []byte("id")), false},
+		{"V4 StdCF /Length 2^62", encDict(4, 4, 1<<62, "V2", []byte("id")), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,7 +209,7 @@ func TestNewDecryptor_R2KeyIsFiveBytes(t *testing.T) {
 	plain := "BT /F1 12 Tf (R2-OK) Tj ET"
 	for _, length := range []int64{40, 128, 256} {
 		t.Run(fmt.Sprint(length), func(t *testing.T) {
-			enc := encDict(1, 2, length, "")
+			enc := encDict(1, 2, length, "", id)
 			o := stringValue(enc["O"])
 			fileKey := deriveKey(nil, o, -44, id, 2, 5, true)
 			ct := rc4Enc((&decryptor{key: fileKey}).objectKey(4, 0), []byte(plain))
@@ -668,7 +668,7 @@ func TestResolver_ObjStmCacheIsBounded(t *testing.T) {
 // not outlive the change of decryption state: after EnableDecryption the same
 // object resolves. It is the one way a failure is not permanent.
 func TestResolver_DecryptionClearsFailureCaches(t *testing.T) {
-	enc := encDict(2, 3, 128, "")
+	enc := encDict(2, 3, 128, "", []byte("id"))
 	d, err := newDecryptor(enc, []byte("id"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -697,7 +697,7 @@ func TestResolver_DecryptionClearsFailureCaches(t *testing.T) {
 		{1, int64(xoff), 0},
 	}, [3]int{1, 4, 2})
 	encStr := fmt.Sprintf("<< /Filter /Standard /V 2 /R 3 /Length 128 /O <%x> /U <%x> /P -44 >>",
-		bytes.Repeat([]byte{0xAB}, 32), bytes.Repeat([]byte{0xCD}, 32))
+		stringValue(enc["O"]), stringValue(enc["U"]))
 	writeStreamObj(&b, 5, fmt.Sprintf("<< /Type /XRef /Size 6 /Root 1 0 R /Encrypt %s /ID [<6964> <6964>] /W [1 4 2] /Length %d >>", encStr, len(raw)), raw)
 	b.WriteString(fmt.Sprintf("startxref\n%d\n%%%%EOF\n", xoff))
 

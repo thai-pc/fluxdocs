@@ -19,8 +19,8 @@ const headerScanLimit = 1024
 //
 // Returns the opened *Document, or: the underlying os error if the file cannot
 // be read; ErrInvalidPDF if the structure cannot be parsed; or
-// ErrEncryptedDocument if the file is encrypted (decryption is not yet
-// supported).
+// ErrEncryptedDocument if the file is encrypted and cannot be opened with the
+// empty user password (see OpenBytes).
 func OpenDocument(path string) (*Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -38,7 +38,10 @@ func OpenDocument(path string) (*Document, error) {
 // (no filesystem access), and OpenDocument delegates to it.
 //
 // Returns the opened *Document, ErrInvalidPDF on a structural parse failure,
-// ErrEncryptedDocument if the file is encrypted, or ErrInternal (an
+// ErrEncryptedDocument (wrapping the reason, which holds no document bytes) if
+// the file is encrypted and the empty user password does not open it — an
+// unsupported security handler or a document that needs a user password — or
+// ErrInternal (an
 // *InternalError) if parsing panicked — a FluxDocs bug, reported instead of
 // crashing the process.
 func OpenBytes(data []byte) (_ *Document, err error) {
@@ -61,7 +64,9 @@ func OpenBytes(data []byte) (_ *Document, err error) {
 	trailer := resolver.Trailer()
 	if _, ok := trailer["Encrypt"]; ok {
 		if err := resolver.EnableDecryption(nil); err != nil {
-			return nil, ErrEncryptedDocument
+			// The parse error names the reason (unsupported handler, password
+			// mismatch) and never quotes document bytes.
+			return nil, fmt.Errorf("%w: %v", ErrEncryptedDocument, err)
 		}
 	}
 

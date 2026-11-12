@@ -254,7 +254,9 @@ func (r *Resolver) EnableDecryption(password []byte) error {
 	}
 	enc, err := r.Resolve(encRef) // resolved (and cached) before r.decrypt is set
 	if err != nil {
-		return err
+		// The cause can quote document bytes (a keyword, a character), and
+		// core.OpenBytes passes this message on: report the failure only.
+		return fmt.Errorf("%w: /Encrypt does not resolve", errLex)
 	}
 	encDict, ok := enc.(Dict)
 	if !ok {
