@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"runtime"
 	"strings"
@@ -217,7 +218,7 @@ func TestDoS_ZigzagFillIsBounded(t *testing.T) {
 				t.Fatalf("err = %v, want ErrRenderBudgetExceeded", err)
 			}
 			if elapsed > limit {
-				t.Errorf("render took %v CPU, want ≤ %v (2× the flood gate + 1 s)", elapsed, limit)
+				t.Errorf("render took %v CPU, want ≤ %v (2× the flood and inflate references + 1 s)", elapsed, limit)
 			}
 			if alloc > tc.maxAlloc {
 				t.Errorf("render allocated %d MB, want ≤ %d MB", alloc>>20, tc.maxAlloc>>20)
@@ -318,6 +319,29 @@ func imageDoc(t *testing.T, kind string, bomb int, content string) *core.Documen
 	return doc
 }
 
+// inflateReference returns the CPU time to inflate a zlib body of size zero
+// bytes n times, the work a decoded-bytes budget of n×size permits. It is the
+// machine- and toolchain-relative baseline for the image bomb gates.
+func inflateReference(t *testing.T, size, n int) time.Duration {
+	t.Helper()
+	var z bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&z, zlib.BestCompression)
+	zw.Write(make([]byte, size))
+	zw.Close()
+	runtime.GC()
+	start := cpuTime()
+	for i := 0; i < n; i++ {
+		zr, err := zlib.NewReader(bytes.NewReader(z.Bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(io.Discard, zr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cpuTime() - start
+}
+
 // TestDoS_ImageDecodeIsBounded: an image costs its decode on every Do (there is
 // no decode cache). A 1×1 image whose Flate body inflates to 64 MiB (a 64 KB
 // object) was charged one sample per Do, so 1000 Do inflated 64 GiB; its mask
@@ -331,8 +355,13 @@ func TestDoS_ImageDecodeIsBounded(t *testing.T) {
 	if !errors.Is(err, core.ErrRenderBudgetExceeded) {
 		t.Fatalf("flood: err = %v, want ErrRenderBudgetExceeded", err)
 	}
-	limit := 2*flood + time.Second
-	t.Logf("flood reference %v CPU; limit %v", flood, limit)
+	// The bombs spend most of their time inflating up to the decoded-bytes
+	// budget, which the paint flood does not model: inflate speed differs by
+	// toolchain and runner (CI's Go 1.23 is slower), so it is measured here
+	// too, on the same 64 MiB body, for the 512 MiB the budget allows.
+	inflate := inflateReference(t, 64<<20, 8)
+	limit := 2*flood + 2*inflate + time.Second
+	t.Logf("flood reference %v CPU, inflate reference %v CPU; limit %v", flood, inflate, limit)
 
 	bombDos := strings.Repeat("/Im Do\n", 1000)
 	tests := []struct {
@@ -354,7 +383,7 @@ func TestDoS_ImageDecodeIsBounded(t *testing.T) {
 				t.Fatalf("err = %v, want ErrRenderBudgetExceeded naming %q", err, tc.resource)
 			}
 			if elapsed > limit {
-				t.Errorf("render took %v CPU, want ≤ %v (2× the flood gate + 1 s)", elapsed, limit)
+				t.Errorf("render took %v CPU, want ≤ %v (2× the flood and inflate references + 1 s)", elapsed, limit)
 			}
 			t.Logf("%v CPU", elapsed)
 		})
