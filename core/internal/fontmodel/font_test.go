@@ -426,6 +426,44 @@ func TestInkOfSubstitutedFonts(t *testing.T) {
 	}
 }
 
+// TestSubstituted pins Font.Substituted, which the renderer branches on to
+// draw a font from a bundled substitute, over the descriptor shapes: the
+// key's presence decides (a /FontFile entry that is not a stream still
+// counts as embedded), the descriptor may be indirect, and a Type 3 font or
+// a font loaded without metrics is never substituted.
+func TestSubstituted(t *testing.T) {
+	ff := stream("", "x")
+	for _, tc := range []struct {
+		name string
+		objs map[int]string
+		opts Options
+		want bool
+	}{
+		{"no descriptor", map[int]string{2: "<< /Subtype /Type1 /BaseFont /Helvetica >>"}, Options{Metrics: true}, true},
+		{"direct, no program", map[int]string{2: "<< /Subtype /Type1 /FontDescriptor << /Flags 32 >> >>"}, Options{Metrics: true}, true},
+		{"indirect, no program", map[int]string{2: "<< /Subtype /Type1 /FontDescriptor 3 0 R >>", 3: "<< /Flags 32 >>"}, Options{Metrics: true}, true},
+		{"descriptor not a dict", map[int]string{2: "<< /Subtype /Type1 /FontDescriptor 3 0 R >>", 3: "42"}, Options{Metrics: true}, true},
+		{"direct FontFile", map[int]string{2: "<< /Subtype /Type1 /FontDescriptor << /FontFile 4 0 R >> >>", 4: ff}, Options{Metrics: true}, false},
+		{"indirect FontFile", map[int]string{2: "<< /Subtype /Type1 /FontDescriptor 3 0 R >>", 3: "<< /FontFile 4 0 R >>", 4: ff}, Options{Metrics: true}, false},
+		{"FontFile2", map[int]string{2: "<< /Subtype /TrueType /FontDescriptor 3 0 R >>", 3: "<< /FontFile2 4 0 R >>", 4: ff}, Options{Metrics: true}, false},
+		{"FontFile3", map[int]string{2: "<< /Subtype /Type1 /FontDescriptor 3 0 R >>", 3: "<< /FontFile3 4 0 R >>", 4: ff}, Options{Metrics: true}, false},
+		{"FontFile not a stream", map[int]string{2: "<< /Subtype /Type1 /FontDescriptor 3 0 R >>", 3: "<< /FontFile 7 >>"}, Options{Metrics: true}, false},
+		{"indirect /Subtype Type1", map[int]string{2: "<< /Subtype 3 0 R /BaseFont /Helvetica >>", 3: "/Type1"}, Options{Metrics: true}, true},
+		{"Type 3", map[int]string{2: "<< /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << >> >>"}, Options{Metrics: true}, false},
+		{"indirect /Subtype Type0, no descendant", map[int]string{2: "<< /Subtype 3 0 R /BaseFont /Helvetica /Encoding /Identity-H >>", 3: "/Type0"}, Options{Metrics: true}, false},
+		{"Type 0, descendant without program", map[int]string{2: "<< /Subtype /Type0 /Encoding /Identity-H /DescendantFonts [3 0 R] >>", 3: "<< /Subtype /CIDFontType2 >>"}, Options{Metrics: true}, true},
+		{"without metrics", map[int]string{2: "<< /Subtype /Type1 /BaseFont /Helvetica >>"}, Options{}, false},
+	} {
+		f := Load(resolverWith(t, tc.objs), parse.Reference{Number: 2}, tc.opts)
+		if got := f.Substituted(); got != tc.want {
+			t.Errorf("%s: Substituted = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if (*Font)(nil).Substituted() {
+		t.Error("nil font: Substituted = true")
+	}
+}
+
 // TestVerticalMetrics: /DW2 and /W2 (both forms) as hulls in text space; an
 // unreadable entry is not ok.
 func TestVerticalMetrics(t *testing.T) {

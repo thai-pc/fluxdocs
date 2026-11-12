@@ -395,6 +395,15 @@ func matchSpace(space []spaceRange, b []byte) int {
 // encoding has WMode 1, §9.7.4.3).
 func (f *Font) Vertical() bool { return f != nil && f.vertical }
 
+// Substituted reports whether the font is one a reader paints with a font of
+// its own, so that Ink covers substitutedBBox: a simple font whose
+// /FontDescriptor (resolved) is missing or holds no /FontFile, /FontFile2 or
+// /FontFile3 entry, or a Type 0 font whose descendant CIDFont's descriptor
+// holds none. Never for a Type 3 font, nor without Options.Metrics.
+func (f *Font) Substituted() bool {
+	return f != nil && f.metrics && f.substituted && f.kind != Type3
+}
+
 // Unbounded reports whether the font's glyphs cannot be bounded at all: a
 // Type 3 font without a usable /FontMatrix or /FontBBox (§9.6.5), whose glyph
 // procedures may paint anywhere; a simple font with an embedded font program
@@ -498,6 +507,18 @@ func (f *Font) Differences() map[byte]parse.Name {
 		out[c] = n
 	}
 	return out
+}
+
+// Difference returns the /Encoding /Differences glyph name of code c of a
+// simple or Type 3 font, and false when /Differences does not list c: a
+// lookup in the table Differences copies, for a caller that reads every code
+// once per font and need not allocate. Needs Options.Metrics.
+func (f *Font) Difference(c byte) (parse.Name, bool) {
+	if f == nil || len(f.diffs) == 0 {
+		return "", false
+	}
+	n, ok := f.diffs[c]
+	return n, ok
 }
 
 // BaseEncoding returns the predefined encoding a simple font names: its

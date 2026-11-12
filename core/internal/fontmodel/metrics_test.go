@@ -196,3 +196,25 @@ func TestHasWidths(t *testing.T) {
 		t.Error("nil Font has /Widths")
 	}
 }
+
+// TestDifferenceMatchesDifferences: the zero-copy lookup agrees with the
+// copied table for every code.
+func TestDifferenceMatchesDifferences(t *testing.T) {
+	r := resolverWith(t, map[int]string{2: "<< /Type /Font /Subtype /Type1 /BaseFont /X /Encoding << /Differences [65 /a /b 200 /c 255 /d 256 /e] >> >>"})
+	f := Load(r, parse.Reference{Number: 2}, Options{Metrics: true})
+	diffs := f.Differences()
+	if len(diffs) != 4 {
+		t.Fatalf("Differences = %v, want 4 entries", diffs)
+	}
+	for c := 0; c < 256; c++ {
+		n, ok := f.Difference(byte(c))
+		want, wantOK := diffs[byte(c)]
+		if n != want || ok != wantOK {
+			t.Errorf("Difference(%d) = %q, %v; Differences has %q, %v", c, n, ok, want, wantOK)
+		}
+	}
+	var nilFont *Font
+	if _, ok := nilFont.Difference(65); ok {
+		t.Error("nil font has a difference")
+	}
+}
