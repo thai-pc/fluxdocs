@@ -124,6 +124,28 @@ jobs:
           FLUXDOCS_REQUIRE_GS: "1"
         run: go test -count=1 ./testing/security/redaction/...
 
+  # `-tags nostd14` leaves the bundled standard-14 font faces out (licence
+  # notices, binary size). The tag must keep building and its fallback paths
+  # (AFM widths, no substitute faces) must keep passing.
+  nostd14:
+    name: Build & Test (-tags nostd14)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Build (native)
+        run: go build -tags nostd14 ./...
+      - name: Build (js/wasm)
+        env:
+          GOOS: js
+          GOARCH: wasm
+        run: go build -tags nostd14 -o /dev/null ./wasm
+      - name: Test (core)
+        run: go test -tags nostd14 ./core/...
+
   cloud:
     name: Build & Test (cloud module)
     runs-on: ubuntu-latest
