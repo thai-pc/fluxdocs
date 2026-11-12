@@ -31,9 +31,14 @@ Core technical differentiators — **always keep these true when coding**:
 
 | Tier | License | Features | Code location |
 |---|---|---|---|
-| **Core** | MIT, free | render, basic annotation, text extraction, merge/split, WASM | `core/` (except `ocr/`, `sign/`) |
-| **Pro** | One-time | form fill, e-signature, redaction, OCR, compare, watermark, PDF/A | `core/form`, `core/sign`, `core/internal/redact`, `core/ocr` |
+| **Core** | MIT, free | render, annotation, text extraction, merge/split, WASM, and the already-released Wave-2 features: form fill, e-signature, redaction, OCR (`ocr` tag), compare, watermark, PDF/A | `core/` (this repository) |
+| **Pro** | One-time | new Pro-only modules, support | a separate private module (not in this repository) |
 | **Cloud** | Subscription | AI Q&A, structured extraction, auto-redact PII, collaboration, hosted API | `cloud/` |
+
+**Licensing decision:** everything in this repository is MIT, including
+`core/form`, `core/sign`, `core/internal/redact` and `core/ocr`. Code already
+released here is never relicensed. New paid features live in a separate private
+module that imports the public core; the public core must never import it.
 
 **License-tier separation rule:** pure-MIT code must not `import` a
 CGO-dependent package (Tesseract OCR, MuPDF). CGO parts MUST sit behind a **build
@@ -48,7 +53,7 @@ MIT. This is a legal constraint, not an option.
 - **Rendering:** raster PNG/JPEG (server thumbnails) + SVG (vector-accurate
   client) + Canvas API (WASM).
 - **Concurrency:** a goroutine worker pool, bounded by `runtime.NumCPU()`.
-- **OCR:** Tesseract via CGO, build tag `ocr` (Pro).
+- **OCR:** Tesseract via CGO, build tag `ocr`.
 - **AI:** call an LLM API (Claude) over a standard Go HTTP client — no other
   language SDKs.
 - **Cloud backend:** Go + Chi/Echo + PostgreSQL 16 + sqlc + Cloudflare R2 + River
@@ -162,7 +167,7 @@ Full detail in `.claude/SECURITY.md`. Hard constraints in brief:
 
 - **Wave 1 (Weeks 1–8, Core MIT):** parser, raster+WASM rendering, 4 annotation
   types, React/Vue wrappers, merge/split, text extraction, docs + launch.
-- **Wave 2 (Weeks 11–18, Pro):** forms, PKCS#7 e-signature, **safe redaction**,
+- **Wave 2 (Weeks 11–18, MIT in this repo):** forms, PKCS#7 e-signature, **safe redaction**,
   OCR, compare, watermark, PDF/A.
 - **Wave 3 (Month 6+, Cloud):** backend API, AI extraction/Q&A, auto-redact PII,
   CRDT-lite collaboration, webhook/Zapier.

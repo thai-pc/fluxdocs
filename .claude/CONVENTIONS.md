@@ -212,8 +212,8 @@ retries or scans doesn't skip bytes.
 
 ## 7. Tiers & build tags (license boundary — non-negotiable)
 
-- Default build is **pure Go, CGO-disabled, MIT-clean**. `core/` (except `ocr/`,
-  `sign/`) must not import CGO or Pro/Cloud packages.
+- Default build is **pure Go, CGO-disabled, MIT-clean**. `core/` must not import
+  CGO (outside build tags), the private Pro module, or Cloud packages.
 - CGO/AGPL/optional deps go **behind build tags** (`//go:build ocr`,
   `//go:build mupdf`) with the license consequence documented.
 - Core code must not import Pro or Cloud code. Check direction of imports.

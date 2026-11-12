@@ -169,7 +169,7 @@ or leak memory.
 - **Rate limiting** on upload/extract/ask endpoints to prevent abuse and protect
   LLM costs.
 
-## 5. Digital signatures & crypto (Pro)
+## 5. Digital signatures & crypto
 
 - PKCS#7 per spec; verify the chain and check cert expiry when verifying an
   existing signature.
@@ -186,7 +186,7 @@ or leak memory.
   (pure Go) stays MIT. Consult IP counsel before shipping this feature.
 - **Tesseract OCR:** via the `ocr` build tag, with its dependent license stated
   clearly.
-- **Redaction disclaimer:** the Pro docs must include a disclaimer + a public
+- **Redaction disclaimer:** the redaction docs must include a disclaimer + a public
   test suite proving safety (reducing legal risk for customers).
 
 ## 7. Test data
