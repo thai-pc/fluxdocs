@@ -42,12 +42,18 @@ const byteRangeField = 10
 // r must be the resolver the original bytes were parsed from, and must not be
 // a repaired one (parse.Resolver.Repair): appending to a file whose
 // cross-reference data had to be rebuilt keeps its damaged revisions
-// (docs/design/xref-reconstruction.md §5 rule R). Returns an error if r was
-// repaired, the key/cert cannot be parsed or the document lacks an indirect
-// /Root.
+// (docs/design/xref-reconstruction.md §5 rule R). Nor may it be an encrypted
+// one: the update would be written unencrypted, its trailer without /Encrypt
+// or /ID, so a reader would treat the whole file as unencrypted
+// (docs/design/aes256-decryption.md §12 F1). Returns an error if r was
+// repaired or is encrypted, the key/cert cannot be parsed or the document
+// lacks an indirect /Root.
 func Sign(r *parse.Resolver, opts Options) ([]byte, error) {
 	if _, repaired := r.Repair(); repaired {
 		return nil, errors.New("sign: document was repaired; save and re-open it before signing")
+	}
+	if _, encrypted := r.Trailer()["Encrypt"]; encrypted {
+		return nil, errors.New("sign: document is encrypted; an encrypted incremental update is not supported")
 	}
 	cert, key, err := parseKeyPair(opts.CertPEM, opts.KeyPEM)
 	if err != nil {

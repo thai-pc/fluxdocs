@@ -302,13 +302,24 @@ func parentError(ctx context.Context) error {
 // Original page /Annots are carried through; the FluxDocs annotation JSON layer
 // (a separate mechanism) is not baked in.
 //
+// The output is never encrypted (see SaveTo): merging a document whose
+// content needs its password returns an *EncryptionError with reason
+// EncryptionSaveWouldDecrypt unless it was opened with
+// OpenOptions.AllowDecryptedSave.
+//
 // Returns ErrInvalidPDF if either document was not opened from bytes/a file
 // (a resolver-less, test-constructed Document cannot be serialized), or if the
-// serialize/re-open round-trip fails.
+// serialize/re-open round-trip fails; or the *EncryptionError above.
 func (d *Document) Merge(other *Document) (_ *Document, err error) {
 	defer guard("Merge", -1, &err)
 	if other == nil || d.resolver == nil || other.resolver == nil {
 		return nil, ErrInvalidPDF
+	}
+	if err := d.decryptedWriteErr("Merge"); err != nil {
+		return nil, err
+	}
+	if err := other.decryptedWriteErr("Merge"); err != nil {
+		return nil, err
 	}
 
 	sources := make([]parse.PageSource, 0, len(d.pageInfos)+len(other.pageInfos))
@@ -334,11 +345,17 @@ func (d *Document) Merge(other *Document) (_ *Document, err error) {
 // An empty pageRanges returns an empty slice and no error. Any range with
 // start < 0, end < start, or end >= PageCount returns ErrPageNotFound (a range
 // referencing a non-existent page). Returns ErrInvalidPDF if d was not opened
-// from bytes/a file, or if a build fails.
+// from bytes/a file, or if a build fails. The outputs are never encrypted
+// (see SaveTo); for a document whose content needs its password, Split
+// returns an *EncryptionError with reason EncryptionSaveWouldDecrypt unless
+// it was opened with OpenOptions.AllowDecryptedSave.
 func (d *Document) Split(pageRanges [][2]int) (_ []*Document, err error) {
 	defer guard("Split", -1, &err)
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
+	}
+	if err := d.decryptedWriteErr("Split"); err != nil {
+		return nil, err
 	}
 
 	// Validate every range up front, before building anything.
@@ -377,11 +394,16 @@ func (d *Document) Split(pageRanges [][2]int) (_ []*Document, err error) {
 // preserved. Save is native-only (filesystem); use SaveTo on the WASM path.
 //
 // The output is never encrypted: a document opened from an encrypted source
-// is saved decrypted, without its /Encrypt dictionary (see SaveTo).
+// is saved decrypted, without its /Encrypt dictionary (see SaveTo), and one
+// whose content needs its password is refused before path is created.
 //
-// Returns the underlying os error if the file cannot be created/written, or
-// ErrInvalidPDF if the document was not opened from bytes/a file.
+// Returns the underlying os error if the file cannot be created/written,
+// ErrInvalidPDF if the document was not opened from bytes/a file, or SaveTo's
+// *EncryptionError.
 func (d *Document) Save(path string) error {
+	if err := d.decryptedWriteErr("Save"); err != nil {
+		return err
+	}
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -403,17 +425,25 @@ func (d *Document) Save(path string) error {
 // repaired (RepairReport) writes a well-formed file that re-opens without
 // repair, holding only what the current pages use. The output is never
 // encrypted: a document opened from an encrypted source (Encrypted) is
-// written decrypted and without /Encrypt, so its encryption is not kept.
-// Only sources the empty user password opens can be opened today, so this
-// drops no password protection, but it does drop the file's encryption.
+// written decrypted and without /Encrypt, so its encryption is not kept
+// (re-encryption is a later increment, docs/design/aes256-decryption.md §10
+// S2). For a source the empty user password opens, that drops no password
+// protection, only the file's encryption. A source whose content needs its
+// password (opened with a non-empty OpenOptions.Password that the empty
+// password cannot replace) is refused with an *EncryptionError, reason
+// EncryptionSaveWouldDecrypt, unless it was opened with
+// OpenOptions.AllowDecryptedSave; nothing is written to w then.
 //
 // Returns ErrInvalidPDF if the document was not opened from bytes/a file (a
-// resolver-less, test-constructed Document cannot be serialized), or the writer
-// error from w.
+// resolver-less, test-constructed Document cannot be serialized), the
+// *EncryptionError above, or the writer error from w.
 func (d *Document) SaveTo(w io.Writer) (err error) {
 	defer guard("SaveTo", -1, &err)
 	if d.resolver == nil {
 		return ErrInvalidPDF
+	}
+	if err := d.decryptedWriteErr("SaveTo"); err != nil {
+		return err
 	}
 
 	sources := make([]parse.PageSource, 0, len(d.pageInfos))
@@ -461,6 +491,22 @@ func (d *Document) RepairReport() (RepairReport, bool) {
 		return RepairReport{}, false
 	}
 	return *d.repair, true
+}
+
+// decryptedWriteErr is the save policy of a password-protected source
+// (OpenOptions.AllowDecryptedSave): an *EncryptionError with reason
+// EncryptionSaveWouldDecrypt naming op when the document's content needs its
+// password and the caller did not allow writing it decrypted; nil
+// otherwise. Every write path that rebuilds the document calls it before
+// building anything.
+func (d *Document) decryptedWriteErr(op string) error {
+	if !d.confidential || d.allowDecryptedSave {
+		return nil
+	}
+	return &EncryptionError{
+		Reason: EncryptionSaveWouldDecrypt,
+		Detail: op + " would write the password-protected content unencrypted; open with OpenOptions.AllowDecryptedSave to allow it",
+	}
 }
 
 // buildInfoDict synthesizes a minimal /Info dictionary from a document's
@@ -541,13 +587,21 @@ func (d *Document) Close() error {
 // differently from FluxDocs (docs/design/xref-reconstruction.md §5 rule R).
 // Save it with SaveTo, re-open the output, and sign that.
 //
+// An encrypted document (Encrypted) is refused with an *EncryptionError,
+// reason EncryptionSignUnsupported: the update would be written unencrypted
+// beside the encrypted revisions, and readers would treat the whole file as
+// unencrypted (docs/design/aes256-decryption.md §10 rule 3, §12 F1).
+//
 // Returns ErrInvalidPDF if the document was not opened from bytes or was
-// repaired at open, or an error if the certificate/key cannot be parsed or
-// signing fails.
+// repaired at open, the *EncryptionError above, or an error if the
+// certificate/key cannot be parsed or signing fails.
 func (d *Document) SignDocument(opts SignatureOptions) (_ *Document, err error) {
 	defer guard("SignDocument", -1, &err)
 	if d.resolver == nil {
 		return nil, ErrInvalidPDF
+	}
+	if d.Encrypted {
+		return nil, &EncryptionError{Reason: EncryptionSignUnsupported, Detail: "an encrypted document cannot be signed by an incremental update"}
 	}
 	if d.repair != nil {
 		return nil, fmt.Errorf("%w: document was repaired; save and re-open it before signing", ErrInvalidPDF)
@@ -660,6 +714,11 @@ func (d *Document) OCRPage(pageIndex int) (string, error) {
 // description). It returns ErrFeatureRequiresCloud if no AIClient is configured
 // (SetAIClient) and ErrInvalidArgument if schema is malformed. The document text
 // never leaves the process unless a Cloud backend is explicitly installed.
+//
+// It is not a write path: for an encrypted source it sends the decrypted text
+// to the installed AIClient even when the document was opened with its
+// password (OpenOptions.Password), and the EncryptionSaveWouldDecrypt refusal
+// does not apply to it. Installing the client is the caller's consent.
 func (d *Document) ExtractStructured(schema any) (map[string]any, error) {
 	s, ok := toSchema(schema)
 	if !ok || len(s.Fields) == 0 {
@@ -681,6 +740,11 @@ func (d *Document) ExtractStructured(schema any) (map[string]any, error) {
 // AskDocument (Cloud) answers a natural-language question grounded in the
 // document text via the configured LLM backend. It returns
 // ErrFeatureRequiresCloud if no AIClient is configured (SetAIClient).
+//
+// Like ExtractStructured, it sends the decrypted text to the installed
+// AIClient even when the document was opened with its password
+// (OpenOptions.Password); the EncryptionSaveWouldDecrypt refusal does not
+// apply to it.
 func (d *Document) AskDocument(question string) (string, error) {
 	if strings.TrimSpace(question) == "" {
 		return "", ErrInvalidArgument

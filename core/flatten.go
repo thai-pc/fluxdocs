@@ -34,12 +34,20 @@ const maxFlattenPoints = 100000
 // bytes, so its own annotation layer is empty (the annotations now live in the
 // content). The source document is unchanged.
 //
+// The output is never encrypted (see SaveTo).
+//
 // Returns ErrInvalidPDF if the document was not opened from bytes/a file (a
-// resolver-less document cannot be serialized), or a build/re-open error.
+// resolver-less document cannot be serialized), an *EncryptionError with
+// reason EncryptionSaveWouldDecrypt for a document whose content needs its
+// password (unless opened with OpenOptions.AllowDecryptedSave), or a
+// build/re-open error.
 func (d *Document) FlattenAnnotations() (_ *Document, err error) {
 	defer guard("FlattenAnnotations", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
+	}
+	if err := d.decryptedWriteErr("FlattenAnnotations"); err != nil {
+		return nil, err
 	}
 
 	sources := make([]parse.PageSource, len(d.pageInfos))

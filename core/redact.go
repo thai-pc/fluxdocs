@@ -212,7 +212,15 @@ func (d *Document) RedactArea(pageIndex int, rect Rect) error {
 // bytes). This is IRREVERSIBLE: the removed content does not exist in the
 // output.
 //
-// Returns ErrInvalidPDF if the document was not opened from bytes, a
+// The output is never encrypted, like SaveTo's: an encrypted source is
+// redacted into a decrypted rebuild (RedactionReport.SourceEncrypted says
+// so), which the verifier byte-searches. A source whose content needs its
+// password is refused, before any work, with an *EncryptionError (reason
+// EncryptionSaveWouldDecrypt) unless it was opened with
+// OpenOptions.AllowDecryptedSave.
+//
+// Returns ErrInvalidPDF if the document was not opened from bytes, the
+// *EncryptionError above, a
 // "redaction plan incomplete" error wrapping the first failure if any earlier
 // RedactText/AutoRedactPII call failed after accepting its arguments (the plan
 // may be missing regions; re-open the source and redact again), a
@@ -231,6 +239,9 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 	defer guard("RedactAndFlatten", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
+	}
+	if err := d.decryptedWriteErr("RedactAndFlatten"); err != nil {
+		return nil, err
 	}
 
 	d.mu.Lock()
@@ -338,6 +349,7 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 		if res.empty() {
 			report := d.finishReport(plan)
 			report.SourceRepaired = d.repair != nil
+			report.SourceEncrypted = d.Encrypted
 			out.mu.Lock()
 			out.redactionReport = &report
 			out.mu.Unlock()

@@ -20,12 +20,18 @@ import (
 // source document is unchanged.
 //
 // This adds the structural PDF/A markers only; it does not embed fonts or
-// flatten transparency (see the docops/pdfa scope note). Returns ErrInvalidPDF
-// if the document was not opened from bytes.
+// flatten transparency (see the docops/pdfa scope note). The output is never
+// encrypted (see SaveTo). Returns ErrInvalidPDF if the document was not
+// opened from bytes, or an *EncryptionError with reason
+// EncryptionSaveWouldDecrypt for a document whose content needs its password
+// (unless opened with OpenOptions.AllowDecryptedSave).
 func (d *Document) ConvertToPDFA() (_ *Document, err error) {
 	defer guard("ConvertToPDFA", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
+	}
+	if err := d.decryptedWriteErr("ConvertToPDFA"); err != nil {
+		return nil, err
 	}
 
 	xmp := pdfa.XMPPacket(pdfa.Meta{

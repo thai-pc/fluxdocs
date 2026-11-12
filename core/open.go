@@ -24,11 +24,44 @@ const headerScanLimit = 1024
 // ErrEncryptedDocument if the file is encrypted and cannot be opened with the
 // empty user password (see OpenBytes).
 func OpenDocument(path string) (*Document, error) {
+	return OpenDocumentWithOptions(path, OpenOptions{})
+}
+
+// OpenOptions configures OpenBytesWithOptions and OpenDocumentWithOptions.
+// The zero value is what OpenBytes and OpenDocument use.
+type OpenOptions struct {
+	// Password opens an encrypted document. It is tried as the user
+	// password, then as the owner password; either gives the full content
+	// (FluxDocs does not enforce the permission flags). Empty means the
+	// empty user password, which opens documents that only restrict
+	// permissions. For AES-256 documents (R5/R6) it is prepared with
+	// SASLprep (RFC 4013) and, failing that, tried as raw UTF-8; for older
+	// revisions it is encoded as PDFDocEncoding, then raw UTF-8. It is used
+	// only to derive the file key: it is never logged, put in an error, or
+	// kept by the Document.
+	Password string
+	// AllowDecryptedSave lets a document whose content is password
+	// protected — opened with a non-empty Password that the empty password
+	// cannot replace — be written decrypted. Every write path is a full
+	// rebuild without /Encrypt (Save, SaveTo, Merge, Split,
+	// RedactAndFlatten, FlattenAnnotations, FlattenForm, Watermark,
+	// ConvertToPDFA); without this option they return an *EncryptionError
+	// with reason EncryptionSaveWouldDecrypt rather than drop the password
+	// protection. Documents the empty password opens are written decrypted
+	// whatever it says, as before.
+	AllowDecryptedSave bool
+}
+
+// OpenDocumentWithOptions is OpenDocument with options (OpenOptions).
+//
+// Returns OpenDocument's errors; with a password, the *EncryptionError
+// reasons of OpenBytesWithOptions.
+func OpenDocumentWithOptions(path string, opts OpenOptions) (*Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	doc, err := OpenBytes(data)
+	doc, err := OpenBytesWithOptions(data, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -49,19 +82,39 @@ func OpenDocument(path string) (*Document, error) {
 // document reports how (RepairReport); it saves only as a full rewrite
 // (SaveTo), and SignDocument refuses it.
 //
+// An encrypted document (Standard security handler: RC4, AES-128, and
+// AES-256 R6 and R5) is opened with the empty user password, which opens
+// every document that only restricts permissions; OpenBytesWithOptions takes
+// a password. Content is decrypted as it is read (Document.Encrypted).
+//
 // Returns the opened *Document, ErrInvalidPDF on a structural parse failure
-// that repair could not fix either, ErrEncryptedDocument (wrapping the
-// reason, which holds no document bytes) if the file is encrypted and the
-// empty user password does not open it — an unsupported security handler or
-// a document that needs a user password; a repaired file whose encryption
-// dictionary survives, or shows signs of one the repair cannot read, is never
-// opened as plaintext — or ErrInternal (an
-// *InternalError) if parsing panicked — a FluxDocs bug, reported instead of
-// crashing the process.
+// that repair could not fix either, an *EncryptionError (which matches
+// ErrEncryptedDocument; its detail holds no document bytes) if the file is
+// encrypted and the empty user password does not open it — reason
+// EncryptionPasswordRequired for a document that needs a password,
+// EncryptionUnsupportedHandler, EncryptionTampered, or EncryptionLost for a
+// repaired file that shows signs of an encryption dictionary it cannot read
+// (a repaired file is never opened as plaintext when it may be encrypted) —
+// or ErrInternal (an *InternalError) if parsing panicked — a FluxDocs bug,
+// reported instead of crashing the process.
 func OpenBytes(data []byte) (_ *Document, err error) {
 	defer guard("OpenBytes", -1, &err)
 	injectTestPanic("OpenBytes", -1)
-	return openBytes(data, true)
+	return openBytes(data, true, OpenOptions{})
+}
+
+// OpenBytesWithOptions is OpenBytes with options (OpenOptions): a password
+// for an encrypted document, and whether a password-protected document may
+// be written decrypted.
+//
+// Returns OpenBytes's errors; an *EncryptionError has reason
+// EncryptionPasswordRequired when opts.Password is empty and the document
+// needs one, and EncryptionWrongPassword when opts.Password is neither its
+// user nor its owner password.
+func OpenBytesWithOptions(data []byte, opts OpenOptions) (_ *Document, err error) {
+	defer guard("OpenBytesWithOptions", -1, &err)
+	injectTestPanic("OpenBytes", -1)
+	return openBytes(data, true, opts)
 }
 
 // openStrict is OpenBytes without repair: a file whose cross-reference data
@@ -73,22 +126,29 @@ func OpenBytes(data []byte) (_ *Document, err error) {
 // operation, not OpenBytes.
 func openStrict(data []byte) (_ *Document, err error) {
 	defer guard("openStrict", -1, &err)
-	return openBytes(data, false)
+	return openBytes(data, false, OpenOptions{})
 }
 
 // openBytes is the repair ladder (xref-reconstruction.md §2.2): the strict
 // open, then, when repair is set and the strict open failed structurally, the
 // header-offset retry and the object scan, each accepted only if it decrypts
 // and walks the page tree. ErrEncryptedDocument at any step ends the ladder.
-func openBytes(data []byte, repair bool) (*Document, error) {
+// The rungs share one parse.DecryptionCache: the file key is derived once
+// for an encryption dictionary, and one open runs at most six AES-256 hashes
+// in all.
+func openBytes(data []byte, repair bool, opts OpenOptions) (*Document, error) {
 	h := headerOffset(data)
 	if h < 0 {
 		return nil, ErrInvalidPDF
 	}
 
-	resolver, pageInfos, err := openResolver(parse.NewResolver(data))
+	// One key derivation and one AES-256 hash budget for the whole ladder:
+	// a rung that meets the same encryption dictionary reuses the key.
+	kc := &parse.DecryptionCache{}
+	r, rerr := parse.NewResolver(data)
+	resolver, pageInfos, err := openResolver(r, rerr, opts.Password, kc)
 	if err == nil {
-		return newDocument(resolver, pageInfos, nil), nil
+		return newDocument(resolver, pageInfos, nil, opts), nil
 	}
 	// No repair after a resource bound (parse.IsLimitError: the xref caps
 	// and /Prev chain length, a decode limit, the nesting depth, the page
@@ -102,20 +162,22 @@ func openBytes(data []byte, repair bool) (*Document, error) {
 	strictErr := err
 
 	if h > 0 {
-		resolver, pageInfos, err = openResolver(parse.NewResolverShifted(data, h))
+		r, rerr = parse.NewResolverShifted(data, h)
+		resolver, pageInfos, err = openResolver(r, rerr, opts.Password, kc)
 		if errors.Is(err, ErrEncryptedDocument) || errors.As(err, &le) {
 			return nil, err
 		}
 		if err == nil {
-			return newDocument(resolver, pageInfos, strictErr), nil
+			return newDocument(resolver, pageInfos, strictErr, opts), nil
 		}
 	}
-	resolver, pageInfos, err = openResolver(parse.NewRepairedResolver(data))
+	r, rerr = parse.NewRepairedResolver(data)
+	resolver, pageInfos, err = openResolver(r, rerr, opts.Password, kc)
 	if errors.Is(err, ErrEncryptedDocument) {
 		return nil, err
 	}
 	if err == nil {
-		return newDocument(resolver, pageInfos, strictErr), nil
+		return newDocument(resolver, pageInfos, strictErr, opts), nil
 	}
 	return nil, fmt.Errorf("%w; repair failed: %s", strictErr, withoutInvalid(err))
 }
@@ -128,14 +190,16 @@ type limitError struct{ err error }
 func (e limitError) Error() string { return e.err.Error() }
 func (e limitError) Unwrap() error { return e.err }
 
-// openResolver finishes one rung of the ladder on a resolver: decryption,
-// when the trailer names /Encrypt, then the page-tree walk.
+// openResolver finishes one rung of the ladder on a resolver and the error of
+// its constructor: decryption with password, when the trailer names
+// /Encrypt, then the page-tree walk.
 //
 // Returns ErrInvalidPDF wrapping a parse failure (newErr included) — inside
-// a limitError when the failure is a resource bound — or ErrEncryptedDocument
-// wrapping a decryption failure or an object scan that lost the encryption
-// dictionary (parse.ErrEncryptionLost: never opened as plaintext).
-func openResolver(resolver *parse.Resolver, newErr error) (*parse.Resolver, []parse.PageInfo, error) {
+// a limitError when the failure is a resource bound — or an *EncryptionError
+// for a decryption failure or an object scan that lost the encryption
+// dictionary (parse.ErrEncryptionLost: never opened as plaintext). kc is the
+// ladder's shared key derivation.
+func openResolver(resolver *parse.Resolver, newErr error, password string, kc *parse.DecryptionCache) (*parse.Resolver, []parse.PageInfo, error) {
 	invalid := func(cause error) error {
 		err := fmt.Errorf("%w: %v", ErrInvalidPDF, cause)
 		if parse.IsLimitError(cause) {
@@ -144,20 +208,21 @@ func openResolver(resolver *parse.Resolver, newErr error) (*parse.Resolver, []pa
 		return err
 	}
 	if errors.Is(newErr, parse.ErrEncryptionLost) {
-		return nil, nil, fmt.Errorf("%w: %v", ErrEncryptedDocument, newErr)
+		return nil, nil, &EncryptionError{Reason: EncryptionLost, Detail: newErr.Error()}
 	}
 	if newErr != nil {
 		return nil, nil, invalid(newErr)
 	}
 	// Encryption is signalled by /Encrypt in the trailer. Set up the Standard
-	// Security Handler (empty user password — the common openable case) before
-	// resolving any content; an unsupported handler or wrong password reports
-	// ErrEncryptedDocument rather than returning garbled content.
+	// Security Handler (the empty user password — the common openable case —
+	// unless one is given) before resolving any content; an unsupported
+	// handler or wrong password reports an *EncryptionError rather than
+	// returning garbled content.
 	if _, ok := resolver.Trailer()["Encrypt"]; ok {
-		if err := resolver.EnableDecryption(nil); err != nil {
+		if err := resolver.EnableDecryptionPasswordShared(password, kc); err != nil {
 			// The parse error names the reason (unsupported handler, password
-			// mismatch) and never quotes document bytes.
-			return nil, nil, fmt.Errorf("%w: %v", ErrEncryptedDocument, err)
+			// mismatch) and never quotes document bytes or the password.
+			return nil, nil, encryptionError(err, password != "")
 		}
 	}
 	pageInfos, err := resolver.Pages()
@@ -165,6 +230,24 @@ func openResolver(resolver *parse.Resolver, newErr error) (*parse.Resolver, []pa
 		return nil, nil, invalid(err)
 	}
 	return resolver, pageInfos, nil
+}
+
+// encryptionError classifies a parse decryption failure (EnableDecryption)
+// as an *EncryptionError: a password that is neither the user nor the owner
+// password is EncryptionWrongPassword when one was given and
+// EncryptionPasswordRequired when not; an AES-256 file key /Perms rejects is
+// EncryptionTampered; anything else is EncryptionUnsupportedHandler.
+func encryptionError(err error, gotPassword bool) *EncryptionError {
+	reason := EncryptionUnsupportedHandler
+	switch {
+	case errors.Is(err, parse.ErrWrongPassword) && gotPassword:
+		reason = EncryptionWrongPassword
+	case errors.Is(err, parse.ErrWrongPassword):
+		reason = EncryptionPasswordRequired
+	case errors.Is(err, parse.ErrEncryptionTampered):
+		reason = EncryptionTampered
+	}
+	return &EncryptionError{Reason: reason, Detail: err.Error()}
 }
 
 // withoutInvalid returns the message of a repair-rung error without its
@@ -176,7 +259,11 @@ func withoutInvalid(err error) string {
 // newDocument builds the Document for an opened resolver. strictErr, when
 // non-nil, is why the strict open failed: the resolver was repaired, and the
 // document carries its RepairReport.
-func newDocument(resolver *parse.Resolver, pageInfos []parse.PageInfo, strictErr error) *Document {
+//
+// opts records the save policy: a document that needs its password — opened
+// with one that the empty password cannot replace — is confidential, and its
+// write paths refuse to emit it decrypted unless opts.AllowDecryptedSave.
+func newDocument(resolver *parse.Resolver, pageInfos []parse.PageInfo, strictErr error, opts OpenOptions) *Document {
 	pages := make([]Page, len(pageInfos))
 	for i, pi := range pageInfos {
 		pages[i] = Page{
@@ -198,6 +285,11 @@ func newDocument(resolver *parse.Resolver, pageInfos []parse.PageInfo, strictErr
 		Encrypted: encrypted,
 		resolver:  resolver,
 		pageInfos: pageInfos,
+
+		allowDecryptedSave: opts.AllowDecryptedSave,
+	}
+	if di, ok := resolver.Decryption(); ok {
+		doc.confidential = !di.EmptyUserPassword
 	}
 	if info, ok := resolver.Repair(); ok && strictErr != nil {
 		rep := &RepairReport{

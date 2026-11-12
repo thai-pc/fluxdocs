@@ -105,12 +105,19 @@ func (d *Document) SetFormFieldValue(name string, value string) (err error) {
 // viewers and in ExtractText (FluxDocs's own renderer does not yet draw
 // non-embedded fonts — the same limitation as watermarks).
 //
-// Returns ErrInvalidPDF if the document was not opened from bytes, or a
-// build/re-open error.
+// The output is never encrypted (see SaveTo).
+//
+// Returns ErrInvalidPDF if the document was not opened from bytes, an
+// *EncryptionError with reason EncryptionSaveWouldDecrypt for a document
+// whose content needs its password (unless opened with
+// OpenOptions.AllowDecryptedSave), or a build/re-open error.
 func (d *Document) FlattenForm() (_ *Document, err error) {
 	defer guard("FlattenForm", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
 		return nil, ErrInvalidPDF
+	}
+	if err := d.decryptedWriteErr("FlattenForm"); err != nil {
+		return nil, err
 	}
 
 	d.mu.Lock()

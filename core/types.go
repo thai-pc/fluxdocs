@@ -28,8 +28,12 @@ type Document struct {
 	Pages     []Page
 	Metadata  DocumentMetadata
 	// Encrypted is set when the source file is encrypted (its trailer names
-	// /Encrypt) and opened with the empty user password. Content is decrypted
-	// as it is read; SaveTo writes it unencrypted.
+	// /Encrypt) and was opened — with the empty user password, or with
+	// OpenOptions.Password. Content is decrypted as it is read. Every write
+	// path is a full rebuild without /Encrypt, so SaveTo writes it
+	// unencrypted; for a document whose content needs its password that is
+	// refused unless OpenOptions.AllowDecryptedSave was set (an
+	// *EncryptionError with reason EncryptionSaveWouldDecrypt).
 	Encrypted bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -117,6 +121,15 @@ type Document struct {
 	// (RepairReport); nil for a document that opened from its own. Immutable
 	// after open.
 	repair *RepairReport
+
+	// confidential is set for an encrypted source that the empty password
+	// does not open: it was opened with OpenOptions.Password, so its content
+	// is password protected. allowDecryptedSave is
+	// OpenOptions.AllowDecryptedSave. Write paths that would emit the
+	// content decrypted check both (decryptedWriteErr). Immutable after
+	// open; the password itself is never kept.
+	confidential       bool
+	allowDecryptedSave bool
 
 	// ai is an optional Cloud-tier LLM backend, injected via SetAIClient. The
 	// pure-Go core never makes network calls itself (privacy-first, WASM-safe);

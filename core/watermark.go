@@ -27,9 +27,13 @@ const (
 
 // Watermark stamps opts.Text over the target pages and returns a new document.
 //
+// The output is never encrypted (see SaveTo).
+//
 // Returns ErrInvalidPDF if the document was not opened from bytes,
 // ErrInvalidArgument if the text is empty, ErrPageNotFound if a page index is
-// out of range, or a build/re-open error.
+// out of range, an *EncryptionError with reason EncryptionSaveWouldDecrypt
+// for a document whose content needs its password (unless opened with
+// OpenOptions.AllowDecryptedSave), or a build/re-open error.
 func (d *Document) Watermark(opts WatermarkOptions) (_ *Document, err error) {
 	defer guard("Watermark", -1, &err)
 	if d.resolver == nil || len(d.pageInfos) != len(d.Pages) {
@@ -40,6 +44,9 @@ func (d *Document) Watermark(opts WatermarkOptions) (_ *Document, err error) {
 	}
 
 	targets, err := d.watermarkTargets(opts.Pages)
+	if err == nil {
+		err = d.decryptedWriteErr("Watermark")
+	}
 	if err != nil {
 		return nil, err
 	}

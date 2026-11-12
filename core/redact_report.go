@@ -40,6 +40,12 @@ type RedactionReport struct {
 	// rebuild of exactly what was shown and verified, and opens without
 	// repair.
 	SourceRepaired bool
+	// SourceEncrypted is set when the redacted document was opened from an
+	// encrypted source (Document.Encrypted). The output is written
+	// decrypted, without /Encrypt, like every rebuild (SaveTo); a source
+	// whose content needs its password is redacted only when it was opened
+	// with OpenOptions.AllowDecryptedSave.
+	SourceEncrypted bool
 }
 
 // RedactionExtension is one page the redaction was extended to.

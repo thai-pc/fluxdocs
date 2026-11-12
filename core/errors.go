@@ -225,3 +225,65 @@ func (e *RedactionError) Unwrap() []error {
 	}
 	return []error{ErrRedactionUnsupported, e.Err}
 }
+
+// EncryptionReason is why an encrypted document cannot be opened or written
+// (*EncryptionError).
+type EncryptionReason string
+
+// The encryption reasons.
+const (
+	// EncryptionPasswordRequired: the document needs a password and none
+	// was given (the empty password is not its user password). A viewer
+	// prompts for one.
+	EncryptionPasswordRequired EncryptionReason = "password_required"
+	// EncryptionWrongPassword: the password given is neither the user nor
+	// the owner password. A viewer prompts again.
+	EncryptionWrongPassword EncryptionReason = "wrong_password"
+	// EncryptionUnsupportedHandler: the security handler, its revision or
+	// its encryption dictionary is not one FluxDocs reads (a public-key
+	// handler, an unknown crypt filter, a malformed /O or /U, …). No
+	// password helps.
+	EncryptionUnsupportedHandler EncryptionReason = "unsupported_handler"
+	// EncryptionTampered: an AES-256 password was accepted but the file key
+	// it unlocks does not authenticate (/Perms): the encryption dictionary
+	// was modified, and content would decrypt to garbage.
+	EncryptionTampered EncryptionReason = "tampered"
+	// EncryptionLost: the cross-reference data was damaged and its repair
+	// found signs of an encryption dictionary it cannot read, so the file is
+	// not opened as plaintext (docs/design/xref-reconstruction.md §3.6).
+	EncryptionLost EncryptionReason = "encryption_lost"
+	// EncryptionSaveWouldDecrypt: a write path (SaveTo, Save, Merge, Split,
+	// RedactAndFlatten, FlattenAnnotations, FlattenForm, Watermark,
+	// ConvertToPDFA) would write a password-protected document's content
+	// unencrypted. Open it with OpenOptions.AllowDecryptedSave to allow that.
+	EncryptionSaveWouldDecrypt EncryptionReason = "save_would_decrypt"
+	// EncryptionSignUnsupported: SignDocument cannot sign an encrypted
+	// document: its incremental update would be written unencrypted beside
+	// encrypted revisions (docs/design/aes256-decryption.md §10 rule 3).
+	EncryptionSignUnsupported EncryptionReason = "sign_unsupported"
+)
+
+// EncryptionError is returned (wrapped) when an encrypted document cannot be
+// opened — OpenBytes, OpenDocument and their WithOptions variants — or when
+// an operation refuses one: a write path that would emit a
+// password-protected document decrypted, or SignDocument. It matches
+// ErrEncryptedDocument with errors.Is.
+//
+// Error() names the reason and a detail that never holds the password, a key
+// or document bytes.
+type EncryptionError struct {
+	Reason EncryptionReason
+	Detail string // the parse layer's reason or the refused operation; never a password or document bytes
+}
+
+// Error returns "fluxdocs: document is encrypted (<reason>)[: <detail>]".
+func (e *EncryptionError) Error() string {
+	msg := fmt.Sprintf("%s (%s)", ErrEncryptedDocument.Error(), e.Reason)
+	if e.Detail != "" {
+		msg += ": " + e.Detail
+	}
+	return msg
+}
+
+// Unwrap returns ErrEncryptedDocument.
+func (e *EncryptionError) Unwrap() error { return ErrEncryptedDocument }
