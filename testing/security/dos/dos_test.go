@@ -320,7 +320,8 @@ func imageDoc(t *testing.T, kind string, bomb int, content string) *core.Documen
 }
 
 // inflateReference returns the CPU time to inflate a zlib body of size zero
-// bytes n times, the work a decoded-bytes budget of n×size permits. It is the
+// bytes into a new buffer n times, the work a decoded-bytes budget of n×size
+// permits. It is the
 // machine- and toolchain-relative baseline for the image bomb gates.
 func inflateReference(t *testing.T, size, n int) time.Duration {
 	t.Helper()
@@ -335,7 +336,11 @@ func inflateReference(t *testing.T, size, n int) time.Duration {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := io.Copy(io.Discard, zr); err != nil {
+		// Inflate into a fresh buffer, as a decode does: the allocation, its
+		// page faults and the GC work it causes are most of a bomb's cost on
+		// a small runner, not the inflate itself.
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(zr, buf); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -356,9 +361,10 @@ func TestDoS_ImageDecodeIsBounded(t *testing.T) {
 		t.Fatalf("flood: err = %v, want ErrRenderBudgetExceeded", err)
 	}
 	// The bombs spend most of their time inflating up to the decoded-bytes
-	// budget, which the paint flood does not model: inflate speed differs by
-	// toolchain and runner (CI's Go 1.23 is slower), so it is measured here
-	// too, on the same 64 MiB body, for the 512 MiB the budget allows.
+	// budget into fresh buffers, which the paint flood does not model: that
+	// cost differs by toolchain and runner (on CI's small runners it is about
+	// 4× the local figure), so it is measured here too, on the same 64 MiB
+	// body, for the 512 MiB the budget allows.
 	inflate := inflateReference(t, 64<<20, 8)
 	limit := 2*flood + 2*inflate + time.Second
 	t.Logf("flood reference %v CPU, inflate reference %v CPU; limit %v", flood, inflate, limit)
