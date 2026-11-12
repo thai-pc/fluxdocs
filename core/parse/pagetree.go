@@ -82,10 +82,10 @@ func (r *Resolver) Pages() ([]PageInfo, error) {
 // recorded in visited so a cyclic /Kids cannot loop forever.
 func (r *Resolver) walkPageTree(obj Object, inh inherited, depth int, visited map[int]bool, out *[]PageInfo) error {
 	if depth > maxPageTreeDepth {
-		return fmt.Errorf("%w: page tree too deep (suspected loop)", errLex)
+		return limitf("%w: page tree too deep (suspected loop)", errLex)
 	}
 	if len(*out) >= maxPages {
-		return fmt.Errorf("%w: page count exceeds limit", errLex)
+		return limitf("%w: page count exceeds limit", errLex)
 	}
 
 	// Cycle guard: a node reached through a reference is visited at most once.

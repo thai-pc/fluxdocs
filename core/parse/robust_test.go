@@ -633,8 +633,8 @@ func TestResolver_ObjStmCacheIsBounded(t *testing.T) {
 		err1 := load(t, r, 1, 1) // 1 was evicted; the budget has half a decode left
 		loads := r.loads
 		err2 := load(t, r, 1, 1)
-		if !errors.Is(err1, errLex) || err2 != err1 || !strings.Contains(err1.Error(), "re-decode budget") {
-			t.Fatalf("errors = %v, %v; want the same errLex value naming the re-decode budget", err1, err2)
+		if !errors.Is(err1, errLex) || !IsLimitError(err1) || err2 != err1 || !strings.Contains(err1.Error(), "re-decode budget") {
+			t.Fatalf("errors = %v, %v; want the same errLex limit error naming the re-decode budget", err1, err2)
 		}
 		if r.loads != loads {
 			t.Errorf("loads went %d -> %d: the failure was not cached", loads, r.loads)

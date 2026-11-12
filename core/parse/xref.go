@@ -146,6 +146,28 @@ func FindStartXref(data []byte) (int, error) {
 // longer than maxXrefChain / containing an offset loop, or a section, merged
 // table or chain over maxXrefEntries / maxXrefRows / maxXrefDecoded.
 func ParseXref(data []byte) (*Xref, error) {
+	return parseXref(data, 0)
+}
+
+// shiftOffset adds shift to a file offset read from the xref data, or returns
+// -1 (out of range, which every caller treats as absent) when the sum would
+// overflow an int.
+func shiftOffset(off, shift int) int {
+	if shift == 0 {
+		return off
+	}
+	if off < 0 || off > math.MaxInt-shift {
+		return -1
+	}
+	return off + shift
+}
+
+// parseXref is ParseXref with every offset the cross-reference data holds
+// (startxref, /Prev, /XRefStm and the in-use entries) moved shift bytes
+// later: the header-offset repair (docs/design/xref-reconstruction.md §2.2)
+// for a writer that measured its offsets from "%PDF-" while bytes precede
+// it. A zero shift is ParseXref exactly.
+func parseXref(data []byte, shift int) (*Xref, error) {
 	start, err := FindStartXref(data)
 	if err != nil {
 		return nil, err
@@ -154,11 +176,11 @@ func ParseXref(data []byte) (*Xref, error) {
 	x := &Xref{Entries: make(map[int]XrefEntry)}
 	seen := make(map[int]bool) // visited section offsets — guard against loops
 	budget := newXrefBudget()
-	off := start
+	off := shiftOffset(start, shift)
 
 	for depth := 0; depth < maxXrefChain; depth++ {
 		if off < 0 || off >= len(data) || seen[off] {
-			return x, nil
+			return x.shifted(shift), nil
 		}
 		seen[off] = true
 
@@ -168,6 +190,9 @@ func ParseXref(data []byte) (*Xref, error) {
 		}
 		if x.Trailer == nil {
 			x.Trailer = trailer
+		}
+		if xrefStm >= 0 {
+			xrefStm = shiftOffset(xrefStm, shift)
 		}
 
 		// Hybrid file: a classic table may point to a parallel xref stream that
@@ -188,11 +213,32 @@ func ParseXref(data []byte) (*Xref, error) {
 		}
 
 		if prev < 0 {
-			return x, nil
+			return x.shifted(shift), nil
 		}
-		off = prev
+		off = shiftOffset(prev, shift)
 	}
-	return nil, fmt.Errorf("%w: xref chain too long (suspected loop)", errLex)
+	return nil, limitf("%w: xref chain too long (suspected loop)", errLex)
+}
+
+// shifted moves every in-use, uncompressed entry shift bytes later (see
+// parseXref) and returns x. An offset the add would overflow becomes -1,
+// which the resolver rejects as out of range.
+func (x *Xref) shifted(shift int) *Xref {
+	if shift == 0 {
+		return x
+	}
+	for num, e := range x.Entries {
+		if e.Free || e.InObjStm {
+			continue
+		}
+		if e.Offset < 0 || e.Offset > math.MaxInt64-int64(shift) {
+			e.Offset = -1
+		} else {
+			e.Offset += int64(shift)
+		}
+		x.Entries[num] = e
+	}
+	return x
 }
 
 // add records e for object num unless num already has an entry. Sections are
@@ -310,7 +356,11 @@ func parseXrefSection(data []byte, off int, x *Xref, budget *xrefBudget, added *
 	p := &iparser{data: data, pos: pos}
 	tobj, err := p.parseValue()
 	if err != nil {
-		return nil, -1, fmt.Errorf("%w: trailer failed to parse: %v", errLex, err)
+		wrap := fmt.Errorf
+		if IsLimitError(err) { // the nesting bound: keep it a limit (%v drops the mark)
+			wrap = limitf
+		}
+		return nil, -1, wrap("%w: trailer failed to parse: %v", errLex, err)
 	}
 	trailer, ok := tobj.(Dict)
 	if !ok {

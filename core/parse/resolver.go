@@ -76,6 +76,11 @@ type Resolver struct {
 	// by EnableDecryption and never applied to the /Encrypt object itself.
 	decrypt    *decryptor
 	encryptNum int // object number of /Encrypt (never decrypted); 0 if none
+
+	// repair, when non-nil, records that the object table was rebuilt rather
+	// than read as the cross-reference data says (NewResolverShifted,
+	// NewRepairedResolver). Immutable after construction.
+	repair *RepairInfo
 }
 
 // NewResolver builds the xref table from data and returns a Resolver ready to
@@ -87,6 +92,12 @@ func NewResolver(data []byte) (*Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newResolver(data, x), nil
+}
+
+// newResolver returns a Resolver over data and the object table x, with
+// empty caches.
+func newResolver(data []byte, x *Xref) *Resolver {
 	return &Resolver{
 		data:        data,
 		xref:        x,
@@ -99,7 +110,49 @@ func NewResolver(data []byte) (*Resolver, error) {
 		objstmCap:   maxObjStmCache,
 		evicted:     make(map[int]bool),
 		redecodeCap: maxObjStmRedecode,
-	}, nil
+	}
+}
+
+// NewResolverShifted is NewResolver for a file whose cross-reference data
+// measures every offset from its "%PDF-" header instead of from the start of
+// the file: shift bytes (the header's position) precede the header, so
+// startxref, /Prev, /XRefStm and every in-use entry are read shift bytes
+// later (the header-offset repair, docs/design/xref-reconstruction.md §2.2).
+// The file's own revision structure (free entries, the /Prev chain) is kept.
+// Repair reports the shift.
+//
+// Returns a wrapped errLex if shift is not inside data or the shifted table
+// cannot be built.
+func NewResolverShifted(data []byte, shift int) (*Resolver, error) {
+	if shift <= 0 || shift >= len(data) {
+		return nil, fmt.Errorf("%w: header offset %d out of range", errLex, shift)
+	}
+	x, err := parseXref(data, shift)
+	if err != nil {
+		return nil, err
+	}
+	objects := 0
+	for _, e := range x.Entries {
+		if !e.Free {
+			objects++
+		}
+	}
+	r := newResolver(data, x)
+	r.repair = &RepairInfo{HeaderOffset: shift, Objects: objects}
+	return r, nil
+}
+
+// Repair returns how the resolver's object table was rebuilt, and true; it
+// returns false for a resolver built by NewResolver from the file's own
+// cross-reference data. A repaired resolver's Bytes must never be extended by
+// an incremental update (docs/design/xref-reconstruction.md §5, rule R): the
+// update would keep the damaged revisions another reader may rebuild
+// differently.
+func (r *Resolver) Repair() (RepairInfo, bool) {
+	if r.repair == nil {
+		return RepairInfo{}, false
+	}
+	return *r.repair, true
 }
 
 // Trailer returns the most recent trailer dictionary.
@@ -179,9 +232,15 @@ func (r *Resolver) loadObject(num int) (Object, error) {
 		return nil, fmt.Errorf("%w: object %d offset %d out of range", errLex, num, e.Offset)
 	}
 	r.loads++
-	_, gen, obj, _, err := parseIndirectObjectAt(r.data, int(e.Offset), r.directLength)
+	got, gen, obj, _, err := parseIndirectObjectAt(r.data, int(e.Offset), r.directLength)
 	if err != nil {
 		return nil, fmt.Errorf("loading object %d: %w", num, err)
+	}
+	// A repaired table (a shifted one above all) can be off by a few bytes and
+	// land on a neighbour: an object written under another number is not this
+	// one. The strict table keeps today's lenient reading.
+	if r.repair != nil && got != num {
+		return nil, fmt.Errorf("%w: object %d: its offset holds object %d", errLex, num, got)
 	}
 	// Decrypt the object's strings/streams, except the /Encrypt object, whose
 	// own strings (/O, /U) are stored unencrypted (ISO 32000 §7.6.1).

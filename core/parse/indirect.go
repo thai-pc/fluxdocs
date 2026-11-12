@@ -32,6 +32,54 @@ type iparser struct {
 	// scanning for endstream, which cannot tell a final CR or LF of the data
 	// from the end-of-line before endstream.
 	length func(Reference) (int, bool)
+
+	// dictOnly is set only by the cross-reference repair scan (repair.go). A
+	// dictionary is then never followed by stream data: when the top-level
+	// value is a dictionary followed by the `stream` keyword, streamAt is set
+	// to the offset of the data (past one EOL) and the dictionary is returned
+	// without reading or copying the data, so a scan of every object costs
+	// its dictionary, not its stream. streamAt is -1 otherwise; callers set
+	// it before parsing.
+	dictOnly bool
+	streamAt int
+
+	// pairs, when set (dictOnly parses of the repair scan), is a scratch
+	// stack shared by every parse of one scan: a dictionary's entries are
+	// collected there and the Dict is built only when it closes, so a header
+	// whose dictionary does not parse allocates no map (design §12).
+	pairs *[]dictPair
+	// names, when set (dictOnly parses of the repair scan), interns name
+	// tokens across the scan (nextTokenInterned).
+	names map[string]string
+}
+
+// dictPair is one dictionary entry on iparser.pairs.
+type dictPair struct {
+	key Name
+	val Object
+}
+
+// errScanSyntax is every syntax error a dictOnly parse reports (see errorf).
+var errScanSyntax = fmt.Errorf("%w: object does not parse", errLex)
+
+// next is nextToken over p.data, or in dictOnly mode nextTokenInterned with
+// p.names (nil: no interning) — static lexer errors, see errorf.
+func (p *iparser) next(i int) (token, int, error) {
+	if p.dictOnly {
+		return nextTokenInterned(p.data, i, p.names)
+	}
+	return nextToken(p.data, i)
+}
+
+// errorf is fmt.Errorf for iparser's syntax errors, except in dictOnly mode,
+// where it returns errScanSyntax: the repair scan only asks whether a header
+// parses, and a hostile file can make millions of them fail, so a failure
+// there must not format and allocate a message (design §4).
+func (p *iparser) errorf(format string, args ...any) error {
+	if p.dictOnly {
+		return errScanSyntax
+	}
+	return fmt.Errorf(format, args...)
 }
 
 // maxNestingDepth bounds how deeply arrays and dictionaries may nest in one
@@ -45,7 +93,10 @@ const maxNestingDepth = 256
 // maxNestingDepth. Callers defer p.leave() after a successful enter.
 func (p *iparser) enter() error {
 	if p.depth >= maxNestingDepth {
-		return fmt.Errorf("%w: arrays/dictionaries nested deeper than %d", errLex, maxNestingDepth)
+		if p.dictOnly {
+			return errScanSyntax
+		}
+		return limitf("%w: arrays/dictionaries nested deeper than %d", errLex, maxNestingDepth)
 	}
 	p.depth++
 	return nil
@@ -71,7 +122,7 @@ func (p *iparser) leave() { p.depth-- }
 func (p *iparser) skipOverDeep(open tokenKind) (Object, error) {
 	isDict := []bool{open == tokDictOpen} // explicit stack: one byte per open level
 	for len(isDict) > 0 {
-		t, ni, err := nextToken(p.data, p.pos)
+		t, ni, err := p.next(p.pos)
 		if err != nil {
 			return nil, err
 		}
@@ -103,15 +154,25 @@ func (p *iparser) skipOverDeep(open tokenKind) (Object, error) {
 //
 // Returns the Reference and true on match, or the zero Reference and false.
 func (p *iparser) tryReference() (Reference, bool) {
-	t0, n0, err := nextToken(p.data, p.pos)
+	// Only an integer starts a reference: skip lexing (and allocating) a
+	// token parseValue reads again — a name, a string — when the first byte
+	// cannot start one.
+	if p.pos < 0 {
+		return Reference{}, false
+	}
+	if i := skipBlank(p.data, p.pos); i >= len(p.data) ||
+		(p.data[i] != '+' && p.data[i] != '-' && (p.data[i] < '0' || p.data[i] > '9')) {
+		return Reference{}, false
+	}
+	t0, n0, err := p.next(p.pos)
 	if err != nil || t0.kind != tokInt {
 		return Reference{}, false
 	}
-	t1, n1, err := nextToken(p.data, n0)
+	t1, n1, err := p.next(n0)
 	if err != nil || t1.kind != tokInt {
 		return Reference{}, false
 	}
-	t2, n2, err := nextToken(p.data, n1)
+	t2, n2, err := p.next(n1)
 	if err != nil || t2.kind != tokKeyword || t2.kw != "R" {
 		return Reference{}, false
 	}
@@ -126,7 +187,7 @@ func (p *iparser) parseValue() (Object, error) {
 		return ref, nil
 	}
 
-	t, ni, err := nextToken(p.data, p.pos)
+	t, ni, err := p.next(p.pos)
 	if err != nil {
 		return nil, err
 	}
@@ -154,12 +215,12 @@ func (p *iparser) parseValue() (Object, error) {
 		case "null":
 			return Null{}, nil
 		default:
-			return nil, fmt.Errorf("%w: unexpected keyword %q", errLex, t.kw)
+			return nil, p.errorf("%w: unexpected keyword %q", errLex, t.kw)
 		}
 	case tokEOF:
-		return nil, fmt.Errorf("%w: end of input while expecting an object", errLex)
+		return nil, p.errorf("%w: end of input while expecting an object", errLex)
 	default:
-		return nil, fmt.Errorf("%w: unexpected token", errLex)
+		return nil, p.errorf("%w: unexpected token", errLex)
 	}
 }
 
@@ -177,7 +238,7 @@ func (p *iparser) parseArray() (Object, error) {
 	defer p.leave()
 	arr := Array{}
 	for {
-		t, ni, err := nextToken(p.data, p.pos)
+		t, ni, err := p.next(p.pos)
 		if err != nil {
 			return nil, err
 		}
@@ -186,7 +247,7 @@ func (p *iparser) parseArray() (Object, error) {
 			p.pos = ni
 			return arr, nil
 		case tokEOF:
-			return nil, fmt.Errorf("%w: unterminated array (missing ']')", errLex)
+			return nil, p.errorf("%w: unterminated array (missing ']')", errLex)
 		default:
 			obj, err := p.parseValue()
 			if err != nil {
@@ -209,17 +270,42 @@ func (p *iparser) parseDictOrStream() (Object, error) {
 		return nil, err
 	}
 	defer p.leave()
-	d := Dict{}
+	var d Dict
+	base := 0
+	if p.pairs != nil {
+		base = len(*p.pairs)
+		defer func() { // the entries of this dictionary leave the stack
+			clear((*p.pairs)[base:])
+			*p.pairs = (*p.pairs)[:base]
+		}()
+	} else {
+		d = Dict{}
+	}
 	for {
-		t, ni, err := nextToken(p.data, p.pos)
+		t, ni, err := p.next(p.pos)
 		if err != nil {
 			return nil, err
 		}
 		switch t.kind {
 		case tokDictClose:
 			p.pos = ni
+			if p.pairs != nil {
+				entries := (*p.pairs)[base:]
+				d = make(Dict, len(entries))
+				for _, e := range entries { // in order: a repeated key's last value wins
+					d[e.key] = e.val
+				}
+			}
 			if p.lenient {
 				return d, nil // no streams inside a content stream; see iparser.lenient
+			}
+			if p.dictOnly {
+				if p.depth == 1 { // only an indirect object's own value has a stream
+					if st, sn, err := p.next(p.pos); err == nil && st.kind == tokKeyword && st.kw == "stream" {
+						p.streamAt = skipStreamEOL(p.data, sn)
+					}
+				}
+				return d, nil
 			}
 			return p.maybeStream(d)
 		case tokName:
@@ -228,11 +314,15 @@ func (p *iparser) parseDictOrStream() (Object, error) {
 			if err != nil {
 				return nil, err
 			}
-			d[Name(t.name)] = val
+			if p.pairs != nil {
+				*p.pairs = append(*p.pairs, dictPair{Name(t.name), val})
+			} else {
+				d[Name(t.name)] = val
+			}
 		case tokEOF:
-			return nil, fmt.Errorf("%w: unterminated dictionary (missing '>>')", errLex)
+			return nil, p.errorf("%w: unterminated dictionary (missing '>>')", errLex)
 		default:
-			return nil, fmt.Errorf("%w: dictionary key must be a Name", errLex)
+			return nil, p.errorf("%w: dictionary key must be a Name", errLex)
 		}
 	}
 }
@@ -243,7 +333,7 @@ func (p *iparser) parseDictOrStream() (Object, error) {
 // scanning for `endstream` (lenient, and safe when /Length is an indirect
 // reference).
 func (p *iparser) maybeStream(d Dict) (Object, error) {
-	t, ni, err := nextToken(p.data, p.pos)
+	t, ni, err := p.next(p.pos)
 	if err != nil || t.kind != tokKeyword || t.kw != "stream" {
 		return d, nil // plain dictionary
 	}

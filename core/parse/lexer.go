@@ -67,7 +67,43 @@ func isRegular(c byte) bool { return !isWhitespace(c) && !isDelimiter(c) }
 // state), which allows peeking/lookahead by calling it with the returned offset
 // without committing. This is the key to reading binary stream data: the parser
 // stops tokenizing at the `stream` keyword and then slices raw bytes by offset.
-func nextToken(data []byte, i int) (token, int, error) {
+func nextToken(data []byte, i int) (token, int, error) { return lex(data, i, false, nil) }
+
+// nextTokenQuiet is nextToken for the repair scan's dictionary-only parses
+// (iparser.dictOnly), which only ask whether a header parses: a lexer error
+// is errTruncated for a token that runs to the end of the input and
+// errScanSyntax otherwise, both static — no message is formatted and nothing
+// is allocated per failure, which a hostile file can repeat for millions of
+// headers (design §12). Tokens are those nextToken returns.
+func nextTokenQuiet(data []byte, i int) (token, int, error) { return lex(data, i, true, nil) }
+
+// maxInterned bounds a names table (lex): enough for the names a file
+// repeats, small enough that a file of distinct names cannot grow it.
+const maxInterned = 4096
+
+// nextTokenInterned is nextTokenQuiet with name tokens taken from names, a
+// table shared by one repair scan: a name it already holds costs no
+// allocation (a hostile file repeats a few names in millions of headers).
+// New names are added until the table holds maxInterned.
+func nextTokenInterned(data []byte, i int, names map[string]string) (token, int, error) {
+	return lex(data, i, true, names)
+}
+
+// lexErr returns the lexer error for a failure: fmt.Errorf(format, args...),
+// or, when quiet, errTruncated if truncated and errScanSyntax otherwise.
+func lexErr(quiet, truncated bool, format string, args ...any) error {
+	if quiet {
+		if truncated {
+			return errTruncated
+		}
+		return errScanSyntax
+	}
+	return fmt.Errorf(format, args...)
+}
+
+// lex is nextToken, with lexer errors static when quiet (nextTokenQuiet) and
+// names interned in names when it is not nil (nextTokenInterned).
+func lex(data []byte, i int, quiet bool, names map[string]string) (token, int, error) {
 	n := len(data)
 
 	// Defensive: a negative offset (e.g. from a malformed xref entry) must not
@@ -93,7 +129,7 @@ func nextToken(data []byte, i int) (token, int, error) {
 		if i+1 < n && data[i+1] == '<' {
 			return token{kind: tokDictOpen}, i + 2, nil
 		}
-		s, ni, err := lexHexString(data, i)
+		s, ni, err := lexHexString(data, i, quiet)
 		if err != nil {
 			return token{}, i, err
 		}
@@ -103,16 +139,32 @@ func nextToken(data []byte, i int) (token, int, error) {
 		if i+1 < n && data[i+1] == '>' {
 			return token{kind: tokDictClose}, i + 2, nil
 		}
-		return token{}, i, fmt.Errorf("%w: stray '>' at offset %d", errLex, i)
+		return token{}, i, lexErr(quiet, false, "%w: stray '>' at offset %d", errLex, i)
 
 	case c == '(':
-		s, ni, err := lexLiteralString(data, i)
+		s, ni, err := lexLiteralString(data, i, quiet)
 		if err != nil {
 			return token{}, i, err
 		}
 		return token{kind: tokString, str: s}, ni, nil
 
 	case c == '/':
+		if names != nil {
+			j := i + 1
+			for j < n && isRegular(data[j]) && data[j] != '#' {
+				j++
+			}
+			if j == n || !isRegular(data[j]) { // no '#' escape: the name is its bytes
+				if v, ok := names[string(data[i+1:j])]; ok { // no allocation: a map index
+					return token{kind: tokName, name: v}, j, nil
+				}
+				v := string(data[i+1 : j])
+				if len(names) < maxInterned {
+					names[v] = v
+				}
+				return token{kind: tokName, name: v}, j, nil
+			}
+		}
 		name, ni, err := lexName(data, i)
 		if err != nil {
 			return token{}, i, err
@@ -123,7 +175,7 @@ func nextToken(data []byte, i int) (token, int, error) {
 		return token{kind: tokKeyword, kw: string(c)}, i + 1, nil
 
 	case c == '+' || c == '-' || c == '.' || (c >= '0' && c <= '9'):
-		return lexNumber(data, i)
+		return lexNumber(data, i, quiet)
 
 	default: // regular-char run = keyword (true/false/null/R/obj/...)
 		start := i
@@ -131,7 +183,7 @@ func nextToken(data []byte, i int) (token, int, error) {
 			i++
 		}
 		if i == start {
-			return token{}, i, fmt.Errorf("%w: invalid character %q at offset %d", errLex, c, i)
+			return token{}, i, lexErr(quiet, false, "%w: invalid character %q at offset %d", errLex, c, i)
 		}
 		return token{kind: tokKeyword, kw: string(data[start:i])}, i, nil
 	}
@@ -177,7 +229,7 @@ func tokenize(data []byte) ([]token, error) {
 	}
 }
 
-func lexNumber(data []byte, i int) (token, int, error) {
+func lexNumber(data []byte, i int, quiet bool) (token, int, error) {
 	start := i
 	n := len(data)
 	isReal := false
@@ -195,11 +247,16 @@ func lexNumber(data []byte, i int) (token, int, error) {
 			break
 		}
 	}
+	if !isReal {
+		if v, ok := smallInt(data[start:i]); ok {
+			return token{kind: tokInt, int: v}, i, nil
+		}
+	}
 	lit := string(data[start:i])
 	if isReal {
 		f, err := strconv.ParseFloat(lit, 64)
 		if err != nil {
-			return token{}, i, fmt.Errorf("%w: invalid real number %q", errLex, lit)
+			return token{}, i, lexErr(quiet, false, "%w: invalid real number %q", errLex, lit)
 		}
 		return token{kind: tokReal, real: f}, i, nil
 	}
@@ -211,9 +268,38 @@ func lexNumber(data []byte, i int) (token, int, error) {
 	return token{kind: tokInt, int: v}, i, nil
 }
 
+// smallInt parses an optionally signed run of at most 18 digits — never past
+// int64 — without allocating. It returns false for anything else (a lone
+// sign, a longer run), which lexNumber reads as before.
+func smallInt(b []byte) (int64, bool) {
+	neg := false
+	if len(b) > 0 && (b[0] == '+' || b[0] == '-') {
+		neg, b = b[0] == '-', b[1:]
+	}
+	if len(b) == 0 || len(b) > 18 {
+		return 0, false
+	}
+	var v int64
+	for _, c := range b {
+		v = v*10 + int64(c-'0')
+	}
+	if neg {
+		v = -v
+	}
+	return v, true
+}
+
 func lexName(data []byte, i int) (string, int, error) {
 	n := len(data)
 	i++ // drop '/'
+	// Fast path: a name with no '#' escape is its bytes, copied once.
+	j := i
+	for j < n && isRegular(data[j]) && data[j] != '#' {
+		j++
+	}
+	if j == n || !isRegular(data[j]) {
+		return string(data[i:j]), j, nil
+	}
 	var out []byte
 	for i < n && isRegular(data[i]) {
 		c := data[i]
@@ -228,7 +314,7 @@ func lexName(data []byte, i int) (string, int, error) {
 	return string(out), i, nil
 }
 
-func lexLiteralString(data []byte, i int) ([]byte, int, error) {
+func lexLiteralString(data []byte, i int, quiet bool) ([]byte, int, error) {
 	n := len(data)
 	i++ // drop '('
 	depth := 1
@@ -239,7 +325,7 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 		case '\\':
 			i++
 			if i >= n {
-				return nil, i, fmt.Errorf("%w: literal string ended abruptly", errTruncated)
+				return nil, i, lexErr(quiet, true, "%w: literal string ended abruptly", errTruncated)
 			}
 			e := data[i]
 			switch e {
@@ -290,10 +376,10 @@ func lexLiteralString(data []byte, i int) ([]byte, int, error) {
 			i++
 		}
 	}
-	return nil, i, fmt.Errorf("%w: unterminated literal string (missing ')')", errTruncated)
+	return nil, i, lexErr(quiet, true, "%w: unterminated literal string (missing ')')", errTruncated)
 }
 
-func lexHexString(data []byte, i int) ([]byte, int, error) {
+func lexHexString(data []byte, i int, quiet bool) ([]byte, int, error) {
 	n := len(data)
 	i++ // drop '<'
 	var nibbles []byte
@@ -315,12 +401,12 @@ func lexHexString(data []byte, i int) ([]byte, int, error) {
 			continue
 		}
 		if !isHex(c) {
-			return nil, i, fmt.Errorf("%w: invalid hex character %q", errLex, c)
+			return nil, i, lexErr(quiet, false, "%w: invalid hex character %q", errLex, c)
 		}
 		nibbles = append(nibbles, hexVal(c))
 		i++
 	}
-	return nil, i, fmt.Errorf("%w: unterminated hex string (missing '>')", errTruncated)
+	return nil, i, lexErr(quiet, true, "%w: unterminated hex string (missing '>')", errTruncated)
 }
 
 func isHex(c byte) bool {

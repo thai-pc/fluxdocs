@@ -60,7 +60,11 @@ func (r *Resolver) objectFromStream(streamNum, idx, wantNum int) (Object, error)
 	p := &iparser{data: os.decoded, pos: start}
 	obj, err := p.parseValue()
 	if err != nil {
-		return nil, fmt.Errorf("%w: object %d in ObjStm %d: %v", errLex, wantNum, streamNum, err)
+		wrap := fmt.Errorf
+		if IsLimitError(err) { // the nesting bound: keep it a limit (%v drops the mark)
+			wrap = limitf
+		}
+		return nil, wrap("%w: object %d in ObjStm %d: %v", errLex, wantNum, streamNum, err)
 	}
 	return obj, nil
 }
@@ -121,9 +125,12 @@ func (r *Resolver) decodeObjStm(streamNum int) (*objStm, error) {
 	if e.Offset < 0 || e.Offset >= int64(len(r.data)) {
 		return nil, fmt.Errorf("%w: ObjStm %d offset out of range", errLex, streamNum)
 	}
-	_, gen, obj, _, err := parseIndirectObjectAt(r.data, int(e.Offset), r.directLength)
+	got, gen, obj, _, err := parseIndirectObjectAt(r.data, int(e.Offset), r.directLength)
 	if err != nil {
 		return nil, fmt.Errorf("loading ObjStm %d: %w", streamNum, err)
+	}
+	if r.repair != nil && got != streamNum { // as in loadObject
+		return nil, fmt.Errorf("%w: ObjStm %d: its offset holds object %d", errLex, streamNum, got)
 	}
 	st, ok := obj.(*Stream)
 	if !ok {
@@ -155,7 +162,7 @@ func (r *Resolver) decodeObjStm(streamNum int) (*objStm, error) {
 	if redecode {
 		r.redecoded += max(produced, int64(len(decoded))) // an unfiltered ObjStm costs its length
 		if errors.Is(err, ErrDecodeLimit) || (err == nil && r.redecoded > r.redecodeCap) {
-			return nil, fmt.Errorf("%w: ObjStm %d: evicted from the object-stream cache and the re-decode budget (%d bytes) is spent", errLex, streamNum, r.redecodeCap)
+			return nil, limitf("%w: ObjStm %d: evicted from the object-stream cache and the re-decode budget (%d bytes) is spent", errLex, streamNum, r.redecodeCap)
 		}
 	}
 	if err != nil {
