@@ -6,7 +6,7 @@ require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/lib/pq v1.12.3
-	github.com/thai-pc/fluxdocs v0.2.8
+	github.com/thai-pc/fluxdocs v0.5.0
 	golang.org/x/crypto v0.31.0
 )
 
