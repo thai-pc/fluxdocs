@@ -1,8 +1,20 @@
 # Design: Type 1, CFF and standard-14 font rendering (Wave 1)
 
-Status: design (docs only). All phases ready for `go-implementer`.
-The maintainer decided D1–D4, Q5 and Q9 on 2026-11-11 (§11), which
-**unblocks Phase 3**.
+Status:
+
+- **Phase 0 done** (census and baselines, §10).
+- **Phase 1 done, landed 2026-11-12** (`4929f76`; the `/Widths` advance change
+  in its own commit `a1fb7ca`): embedded Type 1.
+- **Phase 2 done, landed 2026-11-12** (`7ef8e90`): bare CFF (Type1C and
+  CIDFontType0C).
+- **Phase 3 next** (in progress). The maintainer decided D1–D4, Q5 and Q9 on
+  2026-11-11 (§11) and approved downloading the Phase 3 font sources on
+  2026-11-12 (§11).
+- Phase 4 and later: not started.
+
+Sections marked "As shipped" record what Phases 1 and 2 actually implemented
+where it refines or differs from the original design. Everything else in this
+note is still the plan.
 Tier: **Core (MIT)**. Packages: `core/render` (glyph pipeline), new
 `core/internal/psfont` (Type 1 and CFF parsers), `core/internal/fontmodel`
 (read-only accessors and encoding tables), new `core/internal/std14` (metrics,
@@ -52,14 +64,22 @@ a nil font draws nothing (`core/render/glyphfont.go:15-18`,
   so their text renders blank today.
 - **Type 3 fonts**: no `/FontDescriptor` program, so also blank (deferred, §1.2).
 
-Two related gaps in the existing sfnt path are recorded so the new pipeline
+(This paragraph describes the state before Phase 1. Since Phase 2, Type 1
+and bare CFF programs render; see the support matrix.)
+
+Three related gaps in the existing sfnt path are recorded so the new pipeline
 does not repeat them:
 
 - The **advance** of every glyph comes from the program (`hmtx`), not from the
-  PDF's `/Widths`. §9.4.4 defines the displacement from `/Widths`.
+  PDF's `/Widths`. §9.4.4 defines the displacement from `/Widths`. **Fixed
+  for simple fonts in Phase 1** (`a1fb7ca`, §2.1 step 3).
 - Simple-font **codes are looked up as Latin-1 runes** in whatever cmap sfnt
   picked: `/Encoding`, `/Differences`, and the §9.6.6.4 symbolic-cmap rules are
-  ignored.
+  ignored. Still open (P4).
+- **TrueType/OpenType glyphs were drawn upside down.** sfnt outlines are
+  y-down and text space is y-up (§9.2.4), and the glyph-to-text matrix did not
+  negate y. Found during Phase 1 and **fixed in `41ebb56`** (the y scale is
+  now `−fontSize/1000`).
 
 ### 1.1 Support matrix
 
@@ -68,12 +88,14 @@ nothing drawn, the rest of the page renders.
 
 | Font | Program | Today | Wave 1 target | Phase |
 |---|---|---|---|---|
-| Type 1, embedded | `/FontFile` (cleartext + eexec, binary or hex, PFB segments tolerated) | blank | own parser, Type 1 charstrings incl. `seac`, flex, hint replacement | **P1** |
-| Type 1 / TrueType, all simple fonts | — | advance from program | advance from `/Widths` (§9.4.4), then AFM, then program | **P1** |
-| Type 1 via CFF | `/FontFile3 /Type1C` | blank | own CFF parser, Type 2 charstrings | **P2** |
-| Type 0 / CIDFontType0 via CFF | `/FontFile3 /CIDFontType0C` | blank | own CFF parser, CID-keyed (FDArray/FDSelect, charset CID→GID); non-CID-keyed CFF uses CID as GID (§9.7.4.2) | **P2** |
-| OpenType (CFF or TrueType outlines) | `/FontFile3 /OpenType` | renders via sfnt | unchanged | — |
-| OpenType CFF glyph using `endchar`-`seac` | `/FontFile3 /OpenType` | that glyph is dropped (sfnt returns "unsupported Type 2 Charstring") | optional: retry the glyph through `psfont` on the extracted `CFF ` table | P2 (optional) |
+| Type 1, embedded | `/FontFile` (cleartext + eexec, binary or hex, PFB segments tolerated) | blank | own parser, Type 1 charstrings incl. `seac`, flex, hint replacement | **P1, done 2026-11-12** |
+| Type 1 / TrueType, all simple fonts | — | advance from program | advance from `/Widths` (§9.4.4), then `/MissingWidth`, then program (§2.1 step 3); AFM step added by P3 | **P1, done 2026-11-12** (AFM: P3) |
+| Type 1 via CFF | `/FontFile3 /Type1C` | blank | own CFF parser, Type 2 charstrings | **P2, done 2026-11-12** |
+| Type 0 / CIDFontType0 via CFF | `/FontFile3 /CIDFontType0C` | blank | own CFF parser, CID-keyed (FDArray/FDSelect, charset CID→GID); non-CID-keyed CFF uses CID as GID (§9.7.4.2) | **P2, done 2026-11-12** |
+| Composite font over CFF or Type 1, advances | `/FontFile3`, `/FontFile` | advance from program | `/W` and `/DW` (§9.7.4.3), exact for an Identity CMap; other CMaps fall back to the program | **P2, done 2026-11-12** |
+| Composite TrueType (CIDFontType2), advances | `/FontFile2` | advance from `hmtx` | `/W` and `/DW` (§9.7.4.3) | proposed P4 follow-up |
+| OpenType (CFF or TrueType outlines) | `/FontFile3 /OpenType` | renders via sfnt (upright since `41ebb56`) | unchanged | — |
+| OpenType CFF glyph using `endchar`-`seac` | `/FontFile3 /OpenType` | that glyph is dropped (sfnt returns "unsupported Type 2 Charstring") | optional: retry the glyph through `psfont` on the extracted `CFF ` table | P2 (optional), **still open** (rare, §8) |
 | Standard 14, not embedded | none | blank | bundled substitute faces + Adobe AFM widths when `/Widths` is absent | **P3** (needs D1–D3) |
 | Other simple font, not embedded | none | blank | substitute chosen by name alias, then descriptor flags; `/Widths` advances | **P3** |
 | TrueType, nonsymbolic with `/Encoding` or `/Differences` | `/FontFile2` | codes read as Latin-1 runes | §9.6.6.4: name → Unicode → (3,1) cmap; `post` names for `/Differences` | **P4** |
@@ -133,12 +155,38 @@ For a code `c` of a simple font (one byte, §9.4.3):
    - Else the program's own advance (`hsbw`/`sbw` wx, the CFF width, `hmtx`)
      mapped through its FontMatrix.
    - Else 0.5 em (today's fallback).
+
+   **As shipped (Phase 1, `a1fb7ca`; `glyphFont.advance`).** The order is
+   `/Widths` → `/MissingWidth` → program advance → 0.5 em. The AFM step does
+   not exist yet; Phase 3 adds it as planned above.
+   - `/Widths` misses for a code outside `/FirstChar`–`/LastChar` or a
+     non-numeric entry; then `/MissingWidth` applies.
+   - **No `/Widths` array at all:** the program advance is used directly
+     (`/MissingWidth` is only consulted next to a `/Widths` array).
+   - **`/Widths` present, no `/MissingWidth`:** we fall back to the program
+     advance. Table 122 makes the default `/MissingWidth` 0, so this is a
+     **deliberate leniency**: the program's advance is a better guess for a
+     code `/Widths` does not cover than a zero displacement.
+   - The program advance of a glyph that cannot be built is 0.5 em.
+   - The base encodings available in step 1 are StandardEncoding,
+     WinAnsiEncoding and MacRomanEncoding. `MacExpertEncoding` is not
+     transcribed yet (P3); a font naming it falls back to the program's
+     built-in encoding, then StandardEncoding.
 4. **Outline**: program glyph space → FontMatrix → text space (font size, Tz,
    Ts) → Tm → CTM. Outlines are filled with the nonzero rule (Type 1 and Type 2
    outlines are designed for it), through the existing `fillPath`.
 
 Composite fonts keep their current code split. CIDFontType0C adds CID → GID
 through the CFF charset (or GID = CID for a non-CID-keyed CFF, §9.7.4.2).
+
+**As shipped (Phase 2): composite advances.** A composite font over a CFF
+program (CIDFontType0C) or a Type 1 program (a nonstandard `/FontFile` under
+a CIDFont) advances by the CIDFont's `/W` and `/DW` (§9.7.4.3; `/DW` defaults
+to 1000), read through `fontmodel`. The value is exact for an Identity CMap.
+For another CMap `fontmodel` only gives bounds, and the program's advance is
+used. **Composite TrueType (CIDFontType2) still advances by `hmtx`**;
+switching it to `/W`/`/DW` is a proposed P4 follow-up (it changes TrueType
+page hashes, so it needs its own commit).
 
 ### 2.2 Type 1 program (`/FontFile`)
 
@@ -214,11 +262,37 @@ PostScript interpreter:
   - **Any other number** (counter control 12–13 per TN #5015, MM 14–18,
     unknown): pop its n arguments and push them back so that the following
     `pop`s return them in order. MM fonts are deferred, so their blend result is
-    not computed.
+    not computed. (As shipped, 12 and 13 differ; see below.)
 - Arithmetic is float64. Every product that feeds a coordinate is wrapped in
   an explicit `float64(…)` conversion: the Go spec allows fused multiply-add,
   and arm64 builds fuse while wasm does not. Without the conversion,
   native/wasm render parity breaks. `div` by zero aborts the glyph.
+
+**As shipped (Phase 1): confirmed semantics.** Confirmed during
+implementation and review; see `core/internal/psfont/type1_test.go` (e.g.
+`TestType1SeacRules`, `TestType1_OtherSubrResults`).
+
+- **`closepath` keeps the current point** (Ch. 6), unlike PostScript
+  `closepath`. The next drawing operator after a moveto starts a new subpath,
+  and every subpath is closed for filling.
+- **`seac` accent origin:** the accent is drawn with its origin at
+  (`sbx + adx − asb`, `ady`), where `sbx` is the x sidebearing of the
+  composite's own `hsbw`/`sbw`. Its sidebearing point then lands at
+  (`sbx + adx`, `ady`). The base is drawn at the glyph origin. A component's
+  own `hsbw` sets only its start point, not the width. `seac` ends the
+  charstring.
+- **Counter control, OtherSubrs 12 and 13,** return nothing: they push no
+  results onto the PostScript stack.
+- **Unpopped OtherSubr results are dropped** at the next `callothersubr`:
+  every call starts with an empty PostScript stack (`psp` reset), so a glyph's
+  unpopped results cannot accumulate up to `maxPSStack`.
+- **OtherSubr 0 with an argument count other than 3** ends the flex (no
+  curves drawn) and its arguments become its results, like an unknown
+  OtherSubr.
+- **Flex end vs `setcurrentpoint`:** OtherSubr 0 moves the current point to
+  the last flex point and leaves (x, y) for the `pop pop` that follow. When
+  the `setcurrentpoint` after them names a different point, **we follow
+  `setcurrentpoint`**.
 
 ### 2.3 CFF program (`/FontFile3 /Type1C`, `/CIDFontType0C`)
 
@@ -263,6 +337,36 @@ Per TN #5176:
 - **`endchar` with 4 arguments** is the deprecated `seac` (Appendix C): adx ady
   bchar achar, components looked up by StandardEncoding name through the
   charset. Same one-level rule as Type 1.
+
+**As shipped (Phase 2).**
+
+- **`endchar`-seac accent origin is (`adx`, `ady`).** Type 2 has no `asb`
+  operand and no sidebearing point (TN #5177 Appendix C), so the accent's
+  origin is simply offset by (`adx`, `ady`) from the base's.
+- **`endchar` operand counts:** 1 = width; 4 = seac; **5 = width + seac**
+  (the width is the bottom operand, as for any first stack-clearing
+  operator). A seac component's own width is consumed and discarded.
+- **`random` returns 0.5,** a constant, so output is identical on every
+  target.
+- **CID-keyed FontMatrix.** TN #5176 gives a Font DICT's FontMatrix the usual
+  default, and producers disagree when only one of the two matrices is
+  written. The shipped rule (`readCIDFonts`):
+  - both the Top DICT and the selected FD have a FontMatrix: FD × Top (FD
+    applied first);
+  - Top DICT only: used **alone** when it is already glyph-scale (every
+    linear entry |x| < 0.1, e.g. the usual `[0.001 0 0 0.001 0 0]` written
+    once); otherwise default (0.001) × Top (e.g. an explicit identity meant
+    to scale the FD matrices);
+  - FD only: the FD matrix as is;
+  - neither: the default.
+
+  A product that fails the §5.1 matrix check falls back to the default. A
+  glyph uses its own FD's matrix (`Glyph.Matrix`).
+- **Predefined charsets and encodings.** The Expert and ExpertSubset
+  charsets and the Expert encoding are transcribed from TN #5176 Appendices B
+  and C (`psfont/cffstd.go`, with compile-time size checks). ISOAdobe is
+  SID = GID up to the last ISOAdobe SID. A CID-keyed font with a predefined
+  charset uses CID = GID.
 
 ### 2.4 Standard-14 and other non-embedded fonts
 
@@ -446,6 +550,55 @@ is measured, not estimated.
   `code → w0` (256 entries each) at load. `drawText` then uses `w0` instead of
   `advanceEm`.
 
+**As shipped (Phases 1–2).** The real surface differs from the sketch above:
+
+- **`core/internal/psfont`** files: `font.go` (types, `Font` accessors,
+  matrix check), `type1.go`, `t1charstring.go`, `cff.go`, `cffstd.go`
+  (standard strings, Expert charsets and encoding), `t2charstring.go`,
+  `limits.go`. There is no `outline.go`.
+  - `ParseType1(data []byte, opts Options) (*Font, error)` and
+    `ParseCFF(data []byte, opts Options) (*Font, error)`. `ParseCFF` keeps
+    references into `data` (charstrings are read through their INDEX on
+    use), so the caller must not modify it.
+  - `Options{Charge func(n int64) bool}`: called with the size of each
+    decoded copy (PFB stripped, hex decoded, eexec and charstrings
+    decrypted) or CFF lookup table (charset, names, name and CID maps, an
+    estimate per entry) **before** allocating it; `false` aborts the parse.
+    The renderer passes `budget.chargeDecoded`.
+  - `Font`: `Matrix()`, `BuiltinEncoding() ([256]string, bool)`,
+    `GlyphByName(name) (GID, bool)`, `GlyphByCID(cid uint32) (GID, bool)`
+    (charset for a CID-keyed CFF, GID = CID otherwise), `CIDKeyed() bool`,
+    `NumGlyphs() int`, and `Outline(gid) (Glyph, error)`. A `Font` is
+    immutable and safe for concurrent `Outline` calls.
+  - `Glyph{Segs []Segment, Width float64, Ops int, Matrix [6]float64}`:
+    `Segment{Op: MoveTo|LineTo|CubeTo, P [3]Point}` in glyph units; `Width`
+    in glyph units; `Matrix` is the validated glyph → text matrix (the
+    FontMatrix, or the selected FD's for a CID-keyed CFF); `Ops` is the
+    operator count, **set on error too** so the caller can charge the work.
+  - **`psfont` never sees the render budget.** It enforces only its own
+    §5.1 limits. The renderer charges `Glyph.Ops × charstringOpCost` (16)
+    raster work per build, success or not (§5.2).
+- **`core/internal/std14`** shipped in Phase 1 with **only the three Latin
+  base encodings**: StandardEncoding, WinAnsiEncoding and MacRomanEncoding
+  (`StandardEncoding()`, `StandardName(code)`, `BaseEncoding(name)`).
+  - Hand-transcribed from Annex D Table D.2 and its notes, with size checks
+    in `encoding_test.go`; no generator yet.
+  - Tables are returned **by value** (copies), so callers cannot modify them.
+  - Everything else listed above (the 14 names, aliases, `Normalize`,
+    `Width`, `BBox`, MacExpert, Symbol and ZapfDingbats encodings, the AGL
+    subset, generated tables) **moves to Phase 3**.
+- **`core/render`:** `glyphProgram` has two implementations, `sfntProgram`
+  and `psProgram` (`glyphps.go`); `substituteProgram` comes with Phase 3. A
+  `psEntry` (one parsed program plus its per-render glyph cache) is shared by
+  every `glyphFont` over the same program stream. Simple fonts precompute
+  `code → GID` (256 entries) at load; `w0` is computed per glyph by
+  `glyphFont.advance` (§2.1), not precomputed.
+- **`fontmodel`** gained `Width(code)`, `HasWidths()`, `MissingWidth()
+  (float64, bool)`, `Differences()`, `BaseEncoding()`, and
+  `Options.SkipToUnicode` and `Options.Charge` (per `/W`/`/W2` item, §5.2).
+  `Flags()` is not added yet (Phase 3 needs it). Extraction and redaction
+  outputs are unchanged (§4.6).
+
 ### 4.2 Load path
 
 `loadOneFont` dispatches on what the descriptor holds, by **content
@@ -467,6 +620,16 @@ under `/FontFile3` occur:
   same font object listed under several names, or in several Form XObjects'
   resources, is parsed once per page render. `fontCache` in `form.go` is
   replaced by this reference-keyed cache.
+
+**As shipped (Phase 1, `core/render/fontload.go`).** `fontLoader` holds two
+reference-keyed caches per render: font dictionaries (`fonts`) and decoded
+program streams (`progs`), so dictionaries sharing one program parse it once.
+`fontCache` in `form.go` stayed, but now caches only per-form *scopes* (name
+→ font) over the shared loader. Descriptor keys are tried in the order
+`/FontFile2`, `/FontFile3`, `/FontFile`; the first that decodes wins. An
+unrecognized program under `/FontFile` is parsed as Type 1, under the other
+keys as sfnt. Each dictionary load costs `fontLoadCost` and is capped at
+`maxFontLoads` per render (§5.2).
 
 ### 4.3 Reusing `fontmodel`
 
@@ -500,6 +663,22 @@ does not need.
 `segmentsToSubpaths` gains an `Outline` twin, sharing `flattenCubic` and
 `flattenQuad`. Budget charges are unchanged in kind: points × `glyphPointCost`
 via `chargePaint`, then `fillPath`.
+
+**As shipped.** The twin is `outlineToSubpaths` (`glyphps.go`); every matrix
+product and point transform is rounded explicitly (`mulExact`, `applyExact`).
+Flattening differs by program:
+
+- **CFF glyphs (Phase 2)** use size-adaptive cubic flattening
+  (`flattenCubicAdaptive`): the fewest uniform segments, at most 16, that
+  keep the polyline within 1/8 device pixel of the curve. It is FMA-free, so
+  the segment count and points match on every target. At 16 segments it
+  computes exactly `flattenCubic`'s points.
+- **Type 1 glyphs, sfnt glyphs and paths** keep the fixed 16 segments per
+  cubic, so Phase 2 did not change their hashes.
+- **Proposal:** unify on adaptive flattening in one deliberate,
+  hash-changing commit of its own, with the corpus diff reviewed like a phase
+  (§7.2). It cuts fill work on small text and makes the three paths behave
+  alike.
 
 ### 4.6 Consistency with extraction and redaction
 
@@ -569,6 +748,34 @@ produces an error.
 | CFF charset/encoding | entry totals ≤ nGlyphs; supplements ≤ 256 | |
 | Cleartext `/Encoding` | ≤ 256 `put`s; codes outside 0–255 ignored | |
 
+**As shipped (Phases 1–2).** The table above holds, with these refinements
+and additions (`psfont/limits.go`, `type1.go`, `cff.go`, `t2charstring.go`):
+
+- **Coordinates:** the ±2^20 bound applies to the current point **and to
+  every emitted point, `seac` component offsets included**, and to curve
+  control points. Widths (`hsbw`/`sbw` wx, the Type 2 width,
+  `defaultWidthX`, `nominalWidthX`) must be finite and within the same
+  bound, so a `div` chain cannot produce a ±Inf or NaN width; such a glyph or
+  font is rejected.
+- **Type 1 structure:** only the **first** `/Subrs` and the **first
+  non-empty** `/CharStrings` are honoured; repeats (nested dictionaries,
+  copies) are ignored, so they cannot multiply allocations. `/Subrs`
+  indices at or past the **declared array size** (or 65,536) are dropped,
+  so the table never grows beyond what the program declared. A duplicate
+  glyph name keeps its first entry. A charstring longer than 65,535 bytes is
+  kept as an empty, undrawable entry.
+- **CFF Private DICTs:** the distinct Private DICT bytes read are capped at
+  the program size. Private DICTs are cached by (offset, size) and local
+  Subrs INDEXes by offset, so Font DICTs that share or overlap them cannot
+  multiply the parse work.
+- **CFF DICT:** only the operators the parser reads are kept, and only their
+  **first occurrence**; a DICT allocates at most one operand list per kept
+  operator whatever its size.
+- **Type 2 charstrings:** the 65,535-byte limit applies to every charstring
+  and subroutine taken from an INDEX. Interpreter bounds: argument stack 48,
+  stems 96, transient array 32, subroutine depth 10, 16,384 executed
+  operators and 8,192 segments per glyph; `random` returns 0.5.
+
 ### 5.2 Budget charges (extends `docs/design/render-budget.md`)
 
 - **D (decoded bytes):**
@@ -595,6 +802,27 @@ produces an error.
   budget, not the clock.
 - **Steps (O):** `MaxOperators` still counts one step per glyph shown or
   advanced; unchanged.
+
+**As shipped (`core/render/budget.go`; values calibrated by
+`BenchmarkCalibration`).**
+
+| Constant | Value | Charge |
+|---|---|---|
+| `charstringOpCost` | **16** (not 1) per executed operator | W, per glyph build, success or not; `psfont` only reports `Glyph.Ops`. A glyph at the 16,384-op bound costs 256 Ki |
+| `fontLoadCost` | 1,280 per font dictionary loaded | W; a dictionary served by the reference cache is free |
+| `maxFontLoads` | 4,096 per render | past it the font is not loaded (its text is skipped); ≈ 5 KiB each, ≈ 20 MiB worst case |
+| `maxCachedSegments` | **256 Ki** (not 1 Mi) | outline segments cached per render (one extra per cached glyph); a `psfont.Segment` is 56 bytes, so ≈ 14 MiB worst case per render. Past it glyphs are rebuilt and recharged |
+| `cidWidthItemCost` | 28 per CIDFont `/W` or `/W2` item | W; an empty list still costs one item |
+
+- **Decoded bytes (D):** every copy `psfont` reports through
+  `Options.Charge` goes to `budget.chargeDecoded`, including the CFF lookup
+  tables.
+- **Composite metrics** are cached per render by {descendant CIDFont
+  reference, Type 0 `/Encoding`}, so Type 0 dictionaries sharing one CIDFont
+  read and pay for its `/W` once. `/W` ranges are indexed for binary search
+  after the read; when ranges overlap, **the first match wins** (the order
+  in which they appear).
+- The CFF and Type 1 parses poll the render context once per program.
 
 ### 5.3 No-panic discipline
 
@@ -648,6 +876,11 @@ produces an error.
   - Existing code may already differ on arm64 because of FMA fusion. Phase 0
     records whether render hashes on arm64 match amd64/wasm today, so later
     diffs are attributed correctly.
+  - **Status after Phase 2:** the glyph pipeline (`mulExact`, `applyExact`,
+    the `psfont` interpreters, `flattenCubicAdaptive`) and `flattenCubic`
+    (made FMA-free in `c1b0f59`) are FMA-free. **`raster.blend` still
+    contains fusable multiply-adds**, so arm64 pixel parity with amd64/wasm
+    is **not guaranteed**. Parity is gated on amd64 vs wasm only.
 - **Licenses in distribution:**
   - `THIRD_PARTY_NOTICES` at the repo root and in `packages/core` (the npm
     package carrying `fluxdocs.wasm`) lists OFL 1.1 (Liberation-derived
@@ -723,8 +956,24 @@ decrypter cannot be wrong symmetrically and still pass.
 scale ≤ 1, lies inside `substitutedBBox`. This is a redaction-consistency gate
 and runs in the normal CI.
 
+**As shipped: font builders.** The hand-built fonts live in two
+non-test packages so render tests, fuzz seeds and DoS gates share them:
+
+- `core/internal/psfont/t1build` (Type 1: cleartext, Private dict,
+  charstring and eexec encryption, binary/hex/PFB variants) and
+  `core/internal/psfont/cffbuild` (CFF: INDEX and DICT writers, Type 2
+  charstrings, CID-keyed with FDArray/FDSelect). Both are `core/internal`, so
+  `testing/` cannot import them.
+- `testing/internal/t1min` and `testing/internal/cffmin`: the small subsets
+  the gates in `testing/security/dos/` and the seeds in
+  `testing/security/fuzz/` need.
+- Fuzz targets: `FuzzType1`, `FuzzType1Private`, `FuzzT1Charstring`,
+  `FuzzCFF`, `FuzzT2Charstring`.
+
 **Optional real-font test:** commit one small OFL-licensed Type 1 font (e.g.
-an AMS Computer Modern `.pfb`, ≈ 30 KB, OFL) as testdata (Q5).
+an AMS Computer Modern `.pfb`, ≈ 30 KB, OFL) as testdata (Q5). *As of Phase 2
+no such file is committed* (`core/internal/psfont/testdata/` does not exist);
+Q5's decision is not yet implemented.
 
 **Ghostscript oracle** (non-blocking job, already provisioned for redaction):
 render the hand-built-font PDFs with `gs -sDEVICE=pnggray -r72` and compare
@@ -734,7 +983,13 @@ is linked or vendored.
 
 ### 7.2 Corpus
 
-**Counts.** The 772-file list referred to in the task
+**As shipped: the corpus.** The phases ran against **1,491 deduplicated
+system PDFs** (skewed towards macOS-bundled documents), not the 772-file list
+named below. Read "772-file list" in §7.2, §7.3 and §8 as this corpus. Render
+hashes are **SHA-256 of the decoded pixels**, not of the PNG bytes, so encoder
+changes cannot show up as render diffs. Census results are in §10.
+
+**Counts (original plan).** The 772-file list referred to in the task
 (`…/scratchpad/x/`) was **not present** when this note was written (the
 scratchpad was empty). This environment also has no shell, so the
 Type 1/standard-14 counts are **not yet measured**. Phase 0 measures them
@@ -769,6 +1024,39 @@ file) before each phase. After each phase:
 - No corpus page may newly trip the default render budget. Record render time
   per page; the p95 regression must be < 25%.
 
+**Waiver (approved by the maintainer, 2026-11-12).** Two Phase 2 results
+break the rules above and are accepted:
+
+- **Budget:** page 0 of `fbm_howToUse_2.pdf` (a macOS New Oxford American
+  Dictionary asset) overprints ≈ 2.5k glyphs about 40 times: 58,777
+  text-showing operators, ≈ 102k glyph fills. Before Phase 2 its CFF text was
+  not drawn; now it **exceeds the default render budget at 72 DPI** (it still
+  renders at 150 DPI, whose default budget is larger). The cost is real
+  paint work, not a parser bug, so the budget is not raised for it.
+- **Render time:** on pages whose fonts are all CFF, p95 render time rose
+  **+40%**, because those pages now draw their text. Corpus-wide p95 rose
+  **+2%**, within the 25% rule.
+
+### 7.2.1 Results
+
+| Phase | Programs | Pages changed | Ghostscript ink F1 (72 DPI) | (150 DPI) |
+|---|---|---|---|---|
+| P1 (Type 1) | the corpus's embedded Type 1 fonts (3 files, §10) | 99 pages in 3 files (argon2-specs 20, GS9_Color_Management 40, Ghostscript.pdf 39) | 0.161 → 0.939 | 0.132 → 0.964 |
+| P2 (CFF) | 1,157 CFF programs parsed, **0 failures** | 246 pages in 154 files, all with CFF fonts | 0.660 → 0.921 | 0.676 → 0.945 |
+
+F1 is over the Type 1 pages (P1) and the changed CFF pages (P2). No Phase 2
+page scored worse against Ghostscript than before.
+
+**Known differences from Ghostscript** (open, not phase blockers):
+
+- **Thin stems at 72 DPI.** Our anti-aliased rasteriser drops thin stems
+  that Ghostscript keeps, because Ghostscript applies hinting. Fixing it needs
+  dropout control in the filler, which **changes every font hash** in the
+  corpus; it would be its own deliberate commit.
+- **Black vs gray text.** Some text in the PhpStorm reference-card PDFs
+  renders black where Ghostscript renders it gray. Cause unknown; not yet
+  investigated.
+
 **Goldens:** `core/render/testdata/golden/` is empty today. No binary goldens
 are added (assertions above are pixel-geometric) unless the maintainer wants a
 small set (Q9).
@@ -792,8 +1080,8 @@ small set (Q9).
 | Phase | Content | Depends on | Exit |
 |---|---|---|---|
 | **P0** | `TestFontCensus`; baseline render, extract and redaction hashes for the 772-file list; current wasm size; arm64 vs amd64 hash parity check | — | counts table appended to this note (§10) |
-| **P1** | Pipeline refactor (`glyphProgram`, lazy load, reference cache, code → name → glyph, w0 from `/Widths`); `std14` encoding/AGL tables; Annex D base encodings; `psfont` Type 1 parser + Type 1 charstrings; budget charges; fuzz + DoS gates. The `/Widths` advance change goes in its own commit | — | §7.3; LaTeX/pdfTeX pages render |
-| **P2** | `psfont` CFF + Type 2 (Type1C, CIDFontType0C); optional `seac` retry for OpenType-CFF glyphs | P1 | §7.3; Distiller/InDesign pages render |
+| **P1** — **done 2026-11-12** (`4929f76`, `a1fb7ca`) | Pipeline refactor (`glyphProgram`, lazy load, reference cache, code → name → glyph, w0 from `/Widths`); `std14` encoding/AGL tables; Annex D base encodings; `psfont` Type 1 parser + Type 1 charstrings; budget charges; fuzz + DoS gates. The `/Widths` advance change goes in its own commit. *Shipped:* `std14` holds only Standard/WinAnsi/MacRoman; the AGL, MacExpert, Symbol and ZapfDingbats tables moved to P3 | — | §7.3; LaTeX/pdfTeX pages render (Type 1 F1 0.161 → 0.939 at 72 DPI, §7.2.1) |
+| **P2** — **done 2026-11-12** (`7ef8e90`) | `psfont` CFF + Type 2 (Type1C, CIDFontType0C); optional `seac` retry for OpenType-CFF glyphs. *Shipped:* composite CFF/Type 1 advances from `/W`/`/DW`; adaptive flattening for CFF. *Still open:* the OpenType-CFF `seac` retry (rare) | P1 | §7.3 with the §7.2 waiver; Distiller/InDesign pages render (CFF F1 0.660 → 0.921 at 72 DPI, §7.2.1) |
 | **P3** | Standard-14 and non-embedded substitution: name normalization, flag mapping, AFM widths, bundled faces per D1–D3, `nostd14` tag, substitute-box gate, notices (§11.1) | P1 (D1–D4 decided, §11) | §7.3; corpus `clean/*.pdf` text visible |
 | **P4** | TrueType gaps: §9.6.6.4 cmap selection incl. (3,0) + 0xF0xx, `/Differences` via `post` names (name → GID map built once, ≤ NumGlyphs), `/CIDToGIDMap` streams (bounded: 2 bytes × CIDs ≤ stream length) | P1 | §7.3 |
 | later | Type 3 (own note), TrueType without `cmap`, document-level font cache, host fonts (S4), MM, vertical | — | — |
@@ -838,16 +1126,59 @@ record. Still open: Q6, Q7, Q8; deferred: Q4, Q10.
   `fontmodel.Advance` for standard-14 fonts without `/Widths` (tighter
   redaction boxes).
 
+Follow-ups raised by Phases 1–2 (none blocks Phase 3; each changes render
+hashes and so needs its own commit and corpus review):
+
+- **F1:** unify cubic flattening on the adaptive rule for Type 1, sfnt and
+  paths (§4.5).
+- **F2:** composite TrueType advances from `/W`/`/DW` (§2.1), proposed for
+  P4.
+- **F3:** dropout control for thin stems at 72 DPI (§7.2.1); changes every
+  font hash.
+- **F4:** black-vs-gray text in the PhpStorm reference cards (§7.2.1); cause
+  unknown.
+- **F5:** remove the remaining FMAs in `raster.blend` if arm64 parity is
+  wanted (§6).
+- **F6:** the OpenType-CFF `seac` retry (§1.1, P2 optional; rare).
+- **F7:** Q5 is decided but not implemented: no AMS Computer Modern font is
+  committed yet (§7.1).
+
 ---
 
 ## 10. Census results
 
-To be filled in by Phase 0. Columns: font kind, files, pages, share of the
-772-file list.
+Phase 0 (`TestFontCensus`) over the 1,491-file corpus (§7.2). A file that
+uses several kinds counts under each, so shares do not sum to 100%. Page
+counts are not reproduced here.
+
+| Font kind | Files | Share of 1,491 | Phase |
+|---|---|---|---|
+| TrueType, simple (embedded) | 201 | 13.5% | P1 widths, P4 |
+| Type1C (bare CFF, simple) | 150 | 10.1% | P2 |
+| CIDFontType0C (bare CFF, composite) | 86 | 5.8% | P2 |
+| CIDFontType2 (composite TrueType) | 23 | 1.5% | P4 |
+| Type 1, embedded (`/FontFile`) | 3 | 0.2% | P1 |
+| Standard 14, not embedded | 4 | 0.3% | P3 |
+| Other simple font, not embedded | 15 | 1.0% | P3 (substitute) |
+| TrueType without `cmap` | 13 | 0.9% | P4 |
+| Type 0, not embedded | 1 | 0.1% | — |
+| OpenType (`/FontFile3 /OpenType`), Type 3, MMType1, (3,0)-only TrueType, Type 1 data under `/FontFile3` | 0 | 0% | — |
+
+The corpus is macOS-skewed. Type 1 and non-embedded standard-14 fonts are
+likely rarer here than in a LaTeX- or report-generator-heavy population, so
+these shares should not be read as Phase 1's or Phase 3's real-world reach.
+
+**WASM size** (`wasm/fluxdocs.wasm`, gzip):
+
+| Build | Bytes (gzip) | Delta |
+|---|---|---|
+| Baseline, `01d47a9` | 2,352,828 | — |
+| After Phase 1 | 2,388,146 | +35,318 |
+| After Phase 2 | ≈ 2,420,319 | ≈ +32,173 |
 
 ---
 
-## 11. Decisions (maintainer-approved, 2026-11-11)
+## 11. Decisions (maintainer-approved, 2026-11-11 and 2026-11-12)
 
 These are settled. Implement them as written and do not reopen them without
 the maintainer. **Phase 3 is unblocked.**
@@ -877,6 +1208,12 @@ the maintainer. **Phase 3 is unblocked.**
   font (`.pfb`, ≈ 30 KB) under `core/internal/psfont/testdata/`, with its
   OFL license and copyright next to it.
 - **Q9. Goldens:** geometric pixel assertions only, no binary PNG goldens.
+- **Phase 3 sources (approved 2026-11-12):** the implementer may download
+  Liberation 2.x, DejaVu and the Adobe Core 14 AFM files from their official
+  upstream distributions, as inputs to the offline subsetting and generation
+  steps (§3.3, §11.1).
+- **§7.2 budget waiver (approved 2026-11-12):** `fbm_howToUse_2.pdf` page 0
+  may exceed the default budget at 72 DPI (§7.2).
 - **Deferred, not decided:**
   - Q10: an opt-in AGPL `urwfonts` tag;
   - Q4: `fontmodel.Advance` using the standard-14 metrics. This needs a
