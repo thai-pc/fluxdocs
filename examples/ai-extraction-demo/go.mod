@@ -7,7 +7,7 @@ module github.com/thai-pc/fluxdocs/examples/ai-extraction-demo
 go 1.23
 
 require (
-	github.com/thai-pc/fluxdocs v0.2.8
+	github.com/thai-pc/fluxdocs v0.5.0
 	github.com/thai-pc/fluxdocs/cloud v0.0.0-00010101000000-000000000000
 )
 
