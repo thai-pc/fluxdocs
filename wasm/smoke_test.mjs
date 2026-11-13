@@ -326,6 +326,16 @@ assert(clipPng.error === "", `render clip fixture: ${clipPng.error}`);
 assert(pixelHash(clipPng.image) === clipHash, `clip fixture pixel hash ${pixelHash(clipPng.image)}, native ${clipHash}`);
 fluxdocs.close(clipDoc.handle);
 
+// Text clipping (Tr 4–7, clipping-paths.md §5) likewise: textclip.pdf's
+// pixel hash is textClipParityHash in core/render/textclip_test.go.
+const textClipHash = "767c3b16600855f1268938040b739f023ac367b4ee59cb06c95828b4c3e71ad2";
+const textClipDoc = fluxdocs.open(new Uint8Array(readFileSync(join(here, "testdata", "textclip.pdf"))));
+assert(textClipDoc.error === "", `open text-clip fixture: ${textClipDoc.error}`);
+const textClipPng = fluxdocs.renderPage(textClipDoc.handle, 0, { dpi: 72, format: "png" });
+assert(textClipPng.error === "", `render text-clip fixture: ${textClipPng.error}`);
+assert(pixelHash(textClipPng.image) === textClipHash, `text-clip fixture pixel hash ${pixelHash(textClipPng.image)}, native ${textClipHash}`);
+fluxdocs.close(textClipDoc.handle);
+
 console.log(`OK — ${passed} assertions passed`);
 
 // pixelHash decodes a non-interlaced 8-bit RGB or RGBA PNG (what Go's encoder
