@@ -1,8 +1,8 @@
 # Design: clipping paths (`W`, `W*`, text clipping) in the raster renderer
 
-Status: P0 and Phase A implemented (results in §14 and §15). Maintainer
-decisions on §12: Q1 (a), Q2 (a), Q3 (a), Q5 deferred; Q4 and Phase B (text
-clipping) open. Tier: **Core (MIT)**.
+Status: P0, Phase A and Phase B (text clipping) implemented (results in
+§14, §15 and §16). Maintainer decisions on §12: Q1 (a), Q2 (a), Q3 (a), Q4
+the union rule (Ghostscript agrees), Q5 deferred. Tier: **Core (MIT)**.
 Package: `core/render` only. Pure Go, no CGO, no build tag. Both targets
 (native, `GOOS=js GOARCH=wasm`). No public API change: no new `RenderOptions`
 field, no new sentinel.
@@ -223,7 +223,7 @@ construction. The refactor must leave every existing render byte-identical
 
 ---
 
-## 5. Text clipping (§9.3.6, modes 4–7): deferred to Phase B
+## 5. Text clipping (§9.3.6, modes 4–7): Phase B (implemented, §16)
 
 ISO: in modes 4–7 each glyph's outline is added to a clip accumulated for the
 text object; at `ET` the accumulated region (the union of the glyph shapes) is
@@ -266,7 +266,31 @@ only clips.
   charged like any mask build and counts toward live clip-mask bytes.
 - Open: a clip-mode text object that showed glyphs that are all empty
   (spaces). By the union rule the region is empty and everything is clipped.
-  Confirm against the oracle (Q4).
+  Confirm against the oracle (Q4). *Resolved:* Ghostscript clips everything
+  too; the union rule stands.
+
+### 5.1 Lenient cases of text clipping (as implemented)
+
+ISO forbids or does not settle these. Every decision is fail-visible: when in
+doubt the text object narrows nothing, which shows too much rather than
+hiding content. `textclip.go` holds the same list; `TestTextClip_Lenient`
+pins each, `TestTextClip_GhostscriptOracle` compares them (§16).
+
+| Input | Decision | Ghostscript |
+|---|---|---|
+| A text object in a clip mode that shows no glyph (`BT 7 Tr ET`, `() Tj`) | No narrowing: only a clip-mode glyph starts an accumulation | Clips everything (it decides at `ET` by the mode then in effect). Recorded disagreement, maintainer decision. |
+| Clip-mode glyphs that are all empty (spaces) | Clip everything (union rule, Q4) | Same |
+| A clip-mode glyph whose outline is unavailable: no font, a font that does not load, a Type 3 font, a code with no glyph, an outline that does not build | Discard the object's accumulation: `ET` narrows nothing; glyphs of modes 4–6 still paint | Clips everything for a show with no font (`BT 7 Tr (HI) Tj ET` without `Tf`). Recorded disagreement. |
+| A degenerate text rendering matrix: `0 Tf`, or a `Tm`/CTM product that overflows to ±Inf and NaN | The outline builds but covers no pixel, so the glyph adds nothing and `ET` clips everything (union rule, as for spaces); harmless for redaction, where no clip narrows what is removed (redaction-hardening.md C46) | — |
+| `Tr` not exactly an integer 0–7 (`4.5`, `7.9`, `8`) | Mode 0: paints, does not clip (C54); `7.0` is mode 7 | Same |
+| A switch from a clip mode to a painting mode inside the object | Later glyphs paint under the old clip; the clip-mode glyphs still clip at `ET` | Applies the clip at the switch, so later glyphs are clipped. Recorded disagreement. |
+| `Q` inside the object | Discards the accumulation (the restored clip may be wider than the mask's box) | Drops the glyphs shown since the matching `q`; when that `q` precedes `BT`, no narrowing (agrees) |
+| `q` inside the object | No effect; `ET` narrows at the depth then current (liveness, §3.4) | Same |
+| `W` inside the object | Narrows as outside (§2.2); `ET` intersects with the narrowed clip | Same |
+| `BT` inside an open object | Discards it | No narrowing |
+| End of the content stream, or of a form, without `ET` | Discards it | No narrowing |
+| `Do` of a form inside an open object | Discards an accumulation already started (with none started, clip-mode glyphs after the form start one as usual); the form's own text objects accumulate separately; the form's clip is undone at its end | No narrowing |
+| PDF annotation appearances (`/AP`) | Not rendered by `core/render` (§4); when they are, they go through `execForm`, so the form rules apply | — |
 
 ---
 
@@ -557,7 +581,7 @@ There is no SVG renderer yet (`"svg"` → `ErrUnsupportedFormat`). When it lands
 |---|---|---|
 | P0 | `TestClipCensus`; baseline pixel hashes; ink-F1 tool (§9) | 1.5–2 days |
 | **PA** | §3.3 scan refactor (own commit, zero hash changes); `clipState`, rect fast path, masks, liveness and live cap; `pendingClip` in the interpreter and forms; overlay reset; budget charges and calibration; §10.1 items 1–14, §10.2, §10.3; corpus review | 5–7 days |
-| PB | Exact-integer `Tr` (own commit); text-clip accumulation; §10.1 item 15; corpus review | 2–3 days, after P3 of type1-std14-fonts.md |
+| PB | Exact-integer `Tr` (own commit); text-clip accumulation; §10.1 item 15; corpus review. *Done* (§16) | 2–3 days, after P3 of type1-std14-fonts.md |
 | PC (optional) | Q1 (c): exact rotated `/BBox` | 1 day |
 | Review rounds | go-reviewer passes and recalibration, as past render notes needed | 2–4 days |
 
@@ -683,3 +707,115 @@ Pages with `W`: total +1.6%.
 **WASM.** The parity fixture's pixel hash is pinned in `core/render`
 (native and `GOOS=js GOARCH=wasm`) and checked by `wasm/smoke_test.mjs`
 inside the module. The size delta is +26 KB raw, +9.3 KB gzip.
+
+---
+
+## 16. Phase B results
+
+**Change split.** Two commits. (1) Exact-integer `Tr`
+(`textRenderMode`, `interpret.go`): a mode only when the operand is exactly
+an integer 0–7, an integer-valued real included; anything else is mode 0.
+Redaction's text model already read `Tr` this way (C54; it treats other
+operands as undefined, a superset of fill), and extraction does not read
+`Tr` at all (it returns text of every mode, as it returns clipped-away
+text, §8), so neither changed. (2) Text clipping: `textclip.go` (the
+accumulation, `ET`, the §5.1 cases), `buildClip` split into `newMask` and
+`clipMask.finish` (shared with the accumulation; `finish` can also clear
+what lies outside a rectangle, `keepColumns`), the glyph path split into
+`glyphOutline` and `drawGlyph`, and the `BT`, `ET`, `Q`, form and page-end
+hooks.
+
+**Corpus.** The Phase A hash harness (1,524 files, ≤ 8 pages each, 72 and
+150 DPI, plus extraction hashes; 7,434 lines): HEAD reproduces Phase A's
+final hashes; after (1) 0 lines differ; after (2) 0 lines differ. As the
+census predicted (§14: no text object in `Tr` 4–7, integer or not), no page
+of this corpus clips text, so there is no ink-F1 delta to report; the
+synthetic fixtures below carry the evidence.
+
+**Oracle** (`TestTextClip_GhostscriptOracle`, 17 cases × an embedded
+TrueType font, an embedded Type 1 font and a standard 14 font). A full-page
+fill under each clip must paint what its reference paints, in each renderer
+(ours exactly, Ghostscript within ±1 px of box and a few percent of ink),
+and with the embedded fonts the two renderers' ink boxes agree within
+±1 px. Agreements: modes 4–7; `7.0 Tr`; Tj, TJ, `'` and `"` in one object;
+Tc, Tz, Ts and a rotated Tm; a text clip inside a general `W` and two text
+clips intersecting; Q4 (spaces clip everything); no `ET`; `4.5 Tr` (fills,
+does not clip); `q … ET Q`; `q BT … Q ET`. Recorded disagreements (§5.1,
+fail-visible here): a clip-mode object that shows no glyph (Ghostscript
+clips everything), a show with no font (no `Tf`; Ghostscript clips
+everything, here the unavailable outline discards the accumulation),
+`q`/`Q` inside the object (Ghostscript drops the glyphs
+since `q`), and a switch from a clip mode to a painting mode (Ghostscript
+applies the clip at the switch). Strokes of modes 5 and 6 are Ghostscript's
+only (stroked text is not modelled, §1). One Ghostscript artifact is
+avoided, not recorded: text painted in mode 0 right after a clip-mode text
+object shows nothing there, even inside the clip, unless another paint
+comes between (`BT 7 Tr (HI) Tj ET BT 0 Tr (HI) Tj ET` is blank; with a
+`re f` between, the glyphs show), so no oracle reference paints text after
+a text clip.
+
+**Budget.** The accumulation is charged as a mask build when it is
+allocated, at `textClipPasses` = 2 passes per row (the zeroing and the `ET`
+pass) plus `clipRowCost`, and one `clipWords` per span ORed in; `ET` under
+an enclosing mask also pays the AND pass. One pass matched the isolated
+CPU time (`BenchmarkCalibration/text-clip-mask` ≈ 1.0 px/unit once
+`keepColumns` touched only edge words; 1.5 before), but a flood of text
+objects each allocating a page-sized mask spent as much again in the
+garbage collector: with one pass `TestDoS_TextClipObjectFloodIsBounded` ran
+at 2.6× the fill flood (the `W` clip flood at 1.7×). Two passes bring it to
+≈ 1.6–1.8× and cut its allocation by a third; isolated, the build is then
+charged ≈ 1.5× its time (0.66–0.68 px/unit). The Phase A calibrations are
+unchanged (`clip-mask` 0.95–0.98, `clip-and` 1.03–1.09, `blend-masked`
+0.94–0.98). No new resource: the accumulation counts toward `clip masks`
+from its allocation. At `ET` its bits are copied into a mask over the new
+clip's tight box (`shrinkMask`, charged as a one-pass mask build and to
+`clip masks` before the accumulation is released), so a clip-mode word
+keeps a mask of its own box rather than of the clip's: ≈ 25 KB instead of
+8 MiB for a 12 pt word at the canvas cap, and 40 `q`-nested ones hold
+≈ 1 MiB (`TestTextClip_NestedAtCanvasCap`). The copy changes no pixel (the
+parity hashes are unchanged) and leaves `textClipPasses` as calibrated:
+the flood below runs within noise of the same flood without it.
+
+**DoS** (`testing/security/dos/clip_dos_test.go`, Letter at 150 DPI, the
+default budget; process CPU time, native, an unloaded run; every gate is
+relative to a reference measured in the same test):
+
+| Gate | Result | Reference |
+|---|---|---|
+| One `Tj` of 1 Mi `W` at 300 pt in `7 Tr` | paint-work trip, 0.45 s, 28 MB | the same in mode 0: 0.47 s, 27 MB |
+| One `Tj` of 9 Mi `W` at 0.5 pt in `7 Tr` | paint-work trip, 1.01 s, 322 MB | mode 0: 1.04 s, 321 MB |
+| One `Tj` of 9 Mi spaces in `7 Tr` | operator trip, 0.98 s, 67 MB | mode 0: 0.96 s, 66 MB |
+| `q BT 7 Tr (W) Tj ET Q` × 50,000 (a page-sized mask each) | paint-work trip after ≈ 3,700 masks, 1.08–1.23 s over five runs (1.07–1.09 s without the `ET` copy), 1,031 MB allocated, one accumulation alive at a time (with its tight copy at `ET`) | fill flood 0.57–0.70 s; the `W` clip flood 0.93–1.00 s, 695 MB |
+
+Bounds: 2× the reference + 1 s in time; one mask (8 MiB) plus 25% in
+allocation for a single `Tj`, 4× the `W` clip flood's allocation for the
+object flood.
+
+**WASM.** The text-clip parity fixture (`wasm/testdata/textclip.pdf`:
+Helvetica through its substitute face, a general `W`, modes 7, 4 and 6 with
+Tj and TJ, Tc, Tz, Ts and a rotated Tm, an image under a text clip, and a
+space-only object) has the same pixel hash native amd64, under `GOOS=js
+GOARCH=wasm go test`, and inside the module in `wasm/smoke_test.mjs`
+(`textClipParityHash`, kept in step by `TestTextClip_SmokeHashInStep`). No
+new expression can fuse into a multiply-add: the accumulation reuses the
+fill scan, and the bit work is integer. Size: +14 KB raw, +5.3 KB gzip.
+
+**Design corrections.**
+
+- §5 "charged like any mask build": one pass under-charged a flood by
+  ≈ 2.6× (above); two passes.
+- §5 "a text object with no clip-mode glyph changes nothing" disagrees with
+  Ghostscript, which clips everything when `ET` comes in a clip mode; kept
+  (maintainer decision), recorded.
+- §5 "at `ET` the new clip is acc ∧ current clip": the accumulation covers
+  the whole clip box, so kept as the clip's mask it held a canvas-sized
+  mask for every clip-mode word; `ET` now keeps a copy over the tight box
+  (Budget, above).
+- The accumulation lives on the interpreter, not in the graphics state, so
+  `Q` and form entry discard it rather than restoring an earlier one; a
+  wider clip at `ET` than the mask's box can therefore not occur (a guard
+  in `endTextClip` keeps it fail-visible all the same).
+- §10.2 "one Tj of a huge string in 7 Tr: bounded by O and W" holds, but a
+  string of spaces costs ≈ 3× an invisible-mode step per glyph: the empty
+  outline is loaded and charged nothing beyond its step. That is
+  pre-existing (mode 0 costs the same) and not changed here.

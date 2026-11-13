@@ -1097,8 +1097,9 @@ and npm downloads.
 **Weeks 3–4: Advanced rendering + WASM**
 - Font decoder (TrueType, basic Type1 — enough for 90% of real PDFs)
 - Render complex vector paths (Bezier curves, clipping). *Status:* `W`/`W*`
-  path clipping is implemented (`docs/design/clipping-paths.md`, Phase A);
-  text clipping (`Tr` 4–7) is not yet
+  path clipping and text clipping (`Tr` 4–7) are implemented
+  (`docs/design/clipping-paths.md`, Phases A and B); text stroking (`Tr` 1,
+  2, 5, 6 stroke nothing) is not
 - Build the WASM target, test it running in a browser via Canvas
 - Goroutine pool for parallel multi-page rendering
 
@@ -1675,8 +1676,9 @@ above runs under a per-page budget (design: `docs/design/render-budget.md`).
     decoded for images and fonts beyond their samples (every decode is capped
     at what is left, so a Flate bomb behind a 1×1 image re-decoded on each `Do`
     is bounded), current path points, and the bytes of the clip masks alive
-    at once (128 MiB; a non-rectangular `W`/`W*` clip builds a 1-bit mask,
-    charged as raster work, while a rectangular one allocates nothing).
+    at once (128 MiB; a non-rectangular `W`/`W*` clip, and a text object
+    shown in a clipping mode `Tr` 4–7, builds a 1-bit mask, charged as
+    raster work, while a rectangular one allocates nothing).
 - **Graphics-state stack:** `q` nesting is capped at 1024 saved states. Past
   the cap a `q` is counted, not saved, and its matching `Q` is swallowed, so a
   flood of `q` cannot exhaust memory.
