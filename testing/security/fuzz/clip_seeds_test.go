@@ -14,9 +14,12 @@ import (
 // docs/design/clipping-paths.md §10.3): the lenient cases of §2.2 (no path,
 // zero area, W across Q, Do and BT, W then more path, W W*), deep q/W nests
 // past maxSaveDepth with rectangle and general clips, clips with NaN, Inf and
-// 1e300 coordinates, clip-only and unbalanced forms, W inside BT, and text in
-// Tr 4.5 and Tr 7 (text clipping is not modeled; the seeds pin that it stays
-// harmless).
+// 1e300 coordinates, clip-only and unbalanced forms, W inside BT, and text
+// clipping (Tr 4–7, §5): every clip mode with Tj, TJ, ' and ", non-integer
+// and out-of-range Tr, empty glyphs, a missing font or ET, BT, q, Q and Do
+// inside an open text object, forms that leave one open, nested text clips
+// under general W clips, huge and degenerate text matrices, and floods of
+// clip-mode text objects.
 func clipSeedBytes() [][]byte {
 	big := "1" + strings.Repeat("0", 300) + ".0"
 	tri := "0 0 m 100 0 l 0 100 l h"
@@ -58,6 +61,20 @@ func clipSeedBytes() [][]byte {
 		{"BT /F1 48 Tf 4.5 Tr 10 10 Td (CLIP) Tj ET" + fill, ""},
 		{"BT /F1 48 Tf 7 Tr 10 10 Td (" + strings.Repeat("W", 5000) + ") Tj ET" + fill, ""},
 		{"10 10 m 90 90 l 50 10 l W 3 w S" + fill, ""},
+		{"BT /F1 30 Tf 4 Tr (A) Tj 5 Tr [(B) -200 (C)] TJ 6 Tr 20 TL (D) ' 7 Tr 1 2 (E) \" ET" + fill, ""},
+		{"BT /F1 30 Tf 3.5 Tr (A) Tj 7.9 Tr (B) Tj -4 Tr (C) Tj 8 Tr (D) Tj " + big + " Tr (E) Tj 7.0 Tr (F) Tj ET" + fill, ""},
+		{"BT /F1 30 Tf 7 Tr (    ) Tj ET" + fill, ""},
+		{"BT 7 Tr ET BT 7 Tr /F1 30 Tf () Tj ET BT 7 Tr 10 10 Td (no font) Tj ET" + fill, ""},
+		{"BT /F1 30 Tf 7 Tr (A) Tj" + fill, ""},
+		{"BT /F1 30 Tf 7 Tr (A) Tj BT (B) Tj ET q BT 7 Tr (C) Tj Q ET BT 7 Tr q (D) Tj ET Q" + fill, ""},
+		{"BT /F1 30 Tf 7 Tr (A) Tj /Fm Do /Im Do ET" + fill, "BT /F1 20 Tf 7 Tr (F) Tj"},
+		{strings.Repeat("/Fm Do ", 40) + fill, "BT 7 Tr /F1 20 Tf (F) Tj ET Q BT 7 Tr (G) Tj"},
+		{"q " + tri + " W n BT /F1 60 Tf 7 Tr (AB) Tj ET 0 0 m 100 100 l 0 100 l h W* n BT 4 Tr (CD) Tj ET" + fill + " Q", ""},
+		{"BT /F1 30 Tf 7 Tr " + big + " 0 0 " + big + " 0 0 Tm (A) Tj 0 0 0 0 0 0 Tm (B) Tj ET" + fill, ""},
+		{"BT /F1 " + big + " Tf 7 Tr (W) Tj ET BT /F1 30 Tf 7 Tr " + big + " Tz " + big + " Ts " + big + " Tc (WW) Tj ET" + fill, ""},
+		{strings.Repeat("q BT /F1 12 Tf 7 Tr 10 10 Td (W) Tj ET Q ", 3000) + fill, ""},
+		{strings.Repeat("BT /F1 40 Tf 7 Tr 5 5 Td (O) Tj ET ", 200) + fill, ""},
+		{strings.Repeat("q ", 1100) + "BT /F1 40 Tf 7 Tr (W) Tj ET" + strings.Repeat(" Q", 1100) + fill, ""},
 		{"W" + strings.Repeat(" 1 1 m 99 99 l", 1000) + " n" + fill, ""},
 	} {
 		out = append(out, page(c.content, c.form))

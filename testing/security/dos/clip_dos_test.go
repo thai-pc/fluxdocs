@@ -144,3 +144,94 @@ func TestDoS_ClipAtPathCapIsBoundedLikeFill(t *testing.T) {
 	}
 	t.Logf("clip %v CPU, %d MB; fill %v CPU, %d MB", elapsed, alloc>>20, fillTime, fillAlloc>>20)
 }
+
+// fontDoc is contentDoc for one Letter page whose /F1 is Helvetica (drawn
+// with its bundled substitute face).
+func fontDoc(t *testing.T, content string) *core.Document {
+	t.Helper()
+	doc, err := core.OpenBytes(classicPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+		"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}))
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	return doc
+}
+
+// TestDoS_TextClipHugeStringIsBounded is §10.2's Phase B gate: one Tj of a
+// huge string in 7 Tr (text clipping, design §5). Every glyph is one
+// interpreter step and, unlike mode 3, builds its outline and ORs its fill
+// spans into the text object's clip mask, all charged as raster work; the
+// mask is built once. Each case stops about as fast as the same string
+// shown in mode 0, with one mask's allocation beyond it: large and tiny
+// glyphs at the paint budget, spaces (empty outlines, loaded but charged
+// nothing beyond their step, as in mode 0) at the operator budget.
+func TestDoS_TextClipHugeStringIsBounded(t *testing.T) {
+	skipUnlessTimed(t)
+	for _, tt := range []struct {
+		name, size, char, ref string
+		n                     int
+		resource              string
+	}{
+		{"large glyphs", "300", "W", "0", 1 << 20, "paint work"},
+		{"tiny glyphs", "0.5", "W", "0", 9 << 20, "paint work"},
+		{"spaces", "12", " ", "0", 9 << 20, "operators"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			text := " Tr BT /F1 " + tt.size + " Tf 10 300 Td (" + strings.Repeat(tt.char, tt.n) + ") Tj ET 0 0 612 792 re f"
+			errRef, refTime, refAlloc := timedRender(fontDoc(t, tt.ref+text), letterClipOpts)
+			err, elapsed, alloc := timedRender(fontDoc(t, "7"+text), letterClipOpts)
+			for _, e := range []error{err, errRef} {
+				if !errors.Is(e, core.ErrRenderBudgetExceeded) || !strings.Contains(e.Error(), tt.resource) {
+					t.Fatalf("err = %v (mode %s: %v), want a %s trip", err, tt.ref, errRef, tt.resource)
+				}
+			}
+			if limit := 2*refTime + time.Second; elapsed > limit {
+				t.Errorf("render took %v CPU, want ≤ %v (2× the %v mode %s reference + 1 s)", elapsed, limit, refTime, tt.ref)
+			}
+			if limit := refAlloc + refAlloc/4 + 8<<20; alloc > limit {
+				t.Errorf("render allocated %d MB, want ≤ %d MB (the reference's %d MB + 25%% + one mask)", alloc>>20, limit>>20, refAlloc>>20)
+			}
+			t.Logf("%v CPU, %d MB (mode %s reference %v, %d MB)", elapsed, alloc>>20, tt.ref, refTime, refAlloc>>20)
+		})
+	}
+}
+
+// TestDoS_TextClipObjectFloodIsBounded: q BT 7 Tr (W) Tj ET Q repeated
+// builds one full-page accumulation mask per text object (each over the
+// clip's box at its first glyph), frees it at ET for a copy over the glyph's
+// box and frees that at Q. Each build is charged as raster work (newMask:
+// its rows, the zeroing and extent pass; the copy's rows and one pass), so
+// the default budget stops the page about as fast as the plain fill flood,
+// with one accumulation alive at a time. The reference for allocation is
+// the W clip flood of TestDoS_ClipMaskFloodIsBounded: a text mask is
+// charged less per build (no path scan over every row), so the budget
+// admits ≈ 1.5× as many.
+func TestDoS_TextClipObjectFloodIsBounded(t *testing.T) {
+	skipUnlessTimed(t)
+	flood := floodReference(t)
+	const n = 50_000
+	err, elapsed, alloc := timedRender(fontDoc(t, strings.Repeat("q BT 7 Tr /F1 12 Tf 300 400 Td (W) Tj ET Q\n", n)), letterClipOpts)
+	if !errors.Is(err, core.ErrRenderBudgetExceeded) || !strings.Contains(err.Error(), "paint work") {
+		t.Fatalf("err = %v, want a paint work trip", err)
+	}
+	errRef, refTime, refAlloc := timedRender(fontDoc(t, strings.Repeat("q BT 3 Tr /F1 12 Tf 300 400 Td (W) Tj ET Q\n", n)), letterClipOpts)
+	if errRef != nil {
+		t.Fatalf("reference: %v", errRef)
+	}
+	errW, wTime, wAlloc := timedRender(contentDoc(t, "[0 0 612 792]", strings.Repeat("q 3 1 m 610 40 l 590 791 l 1 700 l h W n Q\n", n)), letterClipOpts)
+	if !errors.Is(errW, core.ErrRenderBudgetExceeded) {
+		t.Fatalf("W flood: %v", errW)
+	}
+	if limit := 2*flood + time.Second; elapsed > limit {
+		t.Errorf("render took %v CPU, want ≤ %v (2× the %v flood reference + 1 s)", elapsed, limit, flood)
+	}
+	if extra := int64(alloc) - int64(refAlloc); extra > 4*int64(wAlloc) {
+		t.Errorf("render allocated %d MB beyond the reference's %d MB, want ≤ %d MB (4× the W clip flood)", extra>>20, refAlloc>>20, 4*wAlloc>>20)
+	}
+	t.Logf("%v CPU (flood %v), %d MB allocated (mode 3 reference %v, %d MB; W flood %v, %d MB)", elapsed, flood, alloc>>20, refTime, refAlloc>>20, wTime, wAlloc>>20)
+}
