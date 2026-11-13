@@ -65,16 +65,25 @@ func (s *TextScanner) walker(unit **Refusal) *walker {
 	w := newWalker(s.r)
 	w.lenient = true
 	w.fonts = s.fonts
+	shown := func(kind unitKind, num int) {
+		*unit = refuse(kind.reason(), "automatic extension: the removed text is also shown through a %s", unitName(kind, num)).(*Refusal)
+	}
 	w.texts = func(kind unitKind, num int, texts []string) {
 		if *unit != nil {
 			return
 		}
 		for _, t := range texts {
 			if s.n.FindText(t) != 0 {
-				r := refuse(kind.reason(), "automatic extension: the removed text is also shown through a %s", unitName(kind, num)).(*Refusal)
-				*unit = r
+				shown(kind, num)
 				return
 			}
+		}
+	}
+	// A needle split across the operators of a unit (its slot streams).
+	w.needles = s.n
+	w.unitHit = func(kind unitKind, num int) {
+		if *unit == nil {
+			shown(kind, num)
 		}
 	}
 	return w
@@ -125,7 +134,10 @@ func (s *TextScanner) contentStreams(pi parse.PageInfo) {
 	add(pi.Dict["Contents"])
 }
 
-// Page returns where page pi shows a needle. Content that does not decode
+// Page returns where page pi shows a needle: in a run, in a property list,
+// or split across operators — in extraction's reading of the page or in one
+// of its slot streams (the runs' readings of one policy joined in content
+// order), and likewise in each unit it paints. Content that does not decode
 // shows nothing (as when rendering). Returns a *Refusal (budget_exceeded)
 // past a budget, or a resolve error for an object the page needs.
 func (s *TextScanner) Page(pi parse.PageInfo) (PageHits, error) {
@@ -149,8 +161,14 @@ func (s *TextScanner) Page(pi parse.PageInfo) (PageHits, error) {
 	if err != nil {
 		return PageHits{}, err
 	}
+	// A needle split across operators: in extraction's reading of the page
+	// or in a slot stream (docs/design/redaction-cross-operator.md §5.2).
+	hit = hit || page.streamHit
 	if !hit {
-		marks, _ := page.FindNeedles(s.n, nil) // the property lists (it keeps no run)
+		marks, _, err := page.FindNeedles(s.n, nil) // the property lists (it keeps no run)
+		if err != nil {
+			return PageHits{}, err
+		}
 		hit = len(marks) > 0
 	}
 	if unit == nil {

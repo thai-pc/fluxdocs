@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -91,4 +92,70 @@ func failOnInternal(t *testing.T, err error) {
 	if errors.Is(err, core.ErrRedactionVerification) {
 		t.Fatalf("redaction verification failed (a bug): %v", err)
 	}
+}
+
+// crossOperatorSeeds are the content streams of the step 2.6 leak rows
+// (docs/design/redaction-cross-operator.md §10.1) and a small per-character
+// flood: the seeds of FuzzRedactCrossOperator.
+func crossOperatorSeeds() []string {
+	return []string{
+		"BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET BT /F1 24 Tf 177.4 700 Td (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td (SECRET-) Tj (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td [(SECRET-)] TJ [(1234)] TJ ET",
+		"BT /F1 24 Tf 72 700 Td " + perChar(secret) + " ET",
+		"BT /F1 24 Tf 72 700 Td (SEC) Tj (RET-) Tj (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td (SEC) Tj ET BT /F1 24 Tf 121.3 700 Td (RET-) Tj ET BT /F1 24 Tf 177.3 700 Td (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td (SECRET-) Tj 105.3 0 Td (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td (SECRET-) Tj /F2 24 Tf <0031003200330034> Tj ET",
+		"BT /F1 24 Tf 72 700 Td [(SECRET-) -250] TJ [(1234)] TJ ET",
+		"BT /F1 24 Tf 72 700 Td (SECRET-) Tj 5 Tc 10 Tw 150 Tz (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td /Span <<>> BDC (SECRET-) Tj EMC (1234) Tj ET",
+		"BT /F1 24 Tf 0 1 -1 0 200 100 Tm (SECRET-) Tj (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td " + perCharTJ(secret) + " ET",
+		"BT /F1 24 Tf 72 700 Td (Code: SECRET-) Tj (1234 end) Tj ET",
+		"BT /F1 24 Tf 72 700 Td (SECRET-) Tj 0 -30 Td (1234) Tj ET",
+		"BT /F1 24 Tf 177.3 700 Td (1234) Tj ET BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET",
+		"BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET q 1 0 0 1 0 -300 cm BT /F1 24 Tf 177.3 1000 Td (1234) Tj ET Q",
+		"BT /F1 24 Tf " + rotatedPerTm(secret) + " ET",
+		"BT /F1 24 Tf 14 TL 72 700 Td (SEC) Tj (RET-) ' (1234) Tj ET",
+		"BT /F1 24 Tf 72 700 Td " + strings.Repeat("(S) Tj (E) Tj (C) Tj (X) Tj ", 200) + " ET",
+	}
+}
+
+// FuzzRedactCrossOperator: for fuzzed page content, whenever RedactText with
+// one of the cross-operator patterns and RedactAndFlatten succeed, the
+// output's ExtractTextByPage holds no match of the pattern (the superset
+// rule, docs/design/redaction-cross-operator.md §10.5), and redaction never
+// panics or fails its own verification.
+//
+// Run: go test ./testing/security/redaction -run=xxx -fuzz=FuzzRedactCrossOperator -fuzztime=60s
+func FuzzRedactCrossOperator(f *testing.F) {
+	for _, s := range crossOperatorSeeds() {
+		f.Add(s)
+	}
+	patterns := []*regexp.Regexp{regexp.MustCompile(`SECRET-\d+`), regexp.MustCompile(`\d{3,}`), regexp.MustCompile(`(?s)E.C`)}
+	f.Fuzz(func(t *testing.T, content string) {
+		pdf := page(content)()
+		for _, re := range patterns {
+			doc, err := core.OpenBytes(pdf)
+			if err != nil {
+				t.Skip()
+			}
+			_, err = doc.RedactText(0, re.String())
+			failOnInternal(t, err)
+			if err != nil {
+				continue
+			}
+			out, err := doc.RedactAndFlatten()
+			failOnInternal(t, err)
+			if err != nil {
+				continue
+			}
+			text, err := out.ExtractTextByPage(0, core.ExtractOptions{})
+			failOnInternal(t, err)
+			if err == nil && re.MatchString(text) {
+				t.Fatalf("LEAK: %s still matches the output's text %q", re, text)
+			}
+		}
+	})
 }

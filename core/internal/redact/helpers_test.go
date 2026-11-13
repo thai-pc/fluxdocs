@@ -2,6 +2,7 @@ package redact
 
 import (
 	"regexp"
+	"testing"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
@@ -23,7 +24,7 @@ func redactContent(content []byte, rects []Rect) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := p.Rewrite(rects, rects, nil)
+	out, err := p.Rewrite(RewritePlan{Regions: rects, Boxes: rects})
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +38,8 @@ func findTextRects(content []byte, pattern *regexp.Regexp) ([]Rect, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p.Match(pattern).Rects, nil
+	m, err := p.Match(pattern)
+	return m.Rects, err
 }
 
 // checkFormXObjects reports whether content, painted with the given
@@ -53,4 +55,14 @@ func checkFormXObjects(r *parse.Resolver, resources parse.Dict, content []byte) 
 func analyzeContent(content []byte) (*Page, error) {
 	return AnalyzePage(nil, parse.PageInfo{MediaBox: parse.Rectangle{LLX: -1e6, LLY: -1e6, URX: 1e6, URY: 1e6}},
 		parse.ContentSegments{Data: content})
+}
+
+// mustMatch is p.Match, failing the test on an error.
+func mustMatch(t testing.TB, p *Page, re *regexp.Regexp) Match {
+	t.Helper()
+	m, err := p.Match(re)
+	if err != nil {
+		t.Fatalf("Match(%v): %v", re, err)
+	}
+	return m
 }

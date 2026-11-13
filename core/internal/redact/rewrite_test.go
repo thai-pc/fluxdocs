@@ -15,7 +15,7 @@ func rewriteArea(t *testing.T, f fixture, region Rect) Output {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := p.Rewrite([]Rect{region}, nil, nil)
+	out, err := p.Rewrite(RewritePlan{Regions: []Rect{region}})
 	if err != nil {
 		t.Fatal(err)
 	}

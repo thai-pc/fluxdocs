@@ -467,14 +467,29 @@ func stringTags(o parse.Object, text *Needles, role Role, depth int) uint8 {
 }
 
 // contentStrings returns the tags of the needles in a content stream: the
-// strings each text-showing operator shows, joined (raw needles match their
-// bytes; latin1Only reads them as Latin-1 only, a reading the text model also
-// has), and everything it holds but does not show — comments, the strings of
-// other operators, inline-image dictionaries (forHidden) — read as the
+// strings each text-showing operator shows, joined, and the strings of all
+// of them joined in content order (raw needles match their bytes; latin1Only
+// reads them as Latin-1 only, a reading the text model also has), and
+// everything it holds but does not show — comments, the strings of other
+// operators, inline-image dictionaries (forHidden) — read as the
 // pre-pass reads a page's hidden content.
 func contentStrings(data []byte, text, raw *Needles, latin1Only bool) uint8 {
 	var tags uint8
 	spans := parse.ScanContentSpansWithInlineImages(data)
+	// joined are the strings of every text-showing operator in content
+	// order: a needle split across operators (docs/design/redaction-cross-
+	// operator.md §5.2). Read as Latin-1 it is the pre-pass's Latin-1 slot
+	// stream, so a stream the pre-pass read without a hit has none here
+	// either (C63).
+	var joined []byte
+	search := func(b []byte) {
+		if latin1Only {
+			tags |= text.FindLatin1(b) | raw.Find(string(b))
+			return
+		}
+		tags |= text.FindBytes(b, raw)
+	}
+	shows := 0
 	for _, op := range spans {
 		switch op.Op {
 		case "Tj", "TJ", "'", "\"":
@@ -482,12 +497,13 @@ func contentStrings(data []byte, text, raw *Needles, latin1Only bool) uint8 {
 			for _, o := range op.Operands {
 				b = appendStrings(b, o, 0)
 			}
-			if latin1Only {
-				tags |= text.FindLatin1(b) | raw.Find(string(b))
-				continue
-			}
-			tags |= text.FindBytes(b, raw)
+			search(b)
+			joined = append(joined, b...)
+			shows++
 		}
+	}
+	if shows > 1 && !testHooks.noStreams {
+		search(joined)
 	}
 	return tags | hiddenTags(data, spans, text, raw)
 }

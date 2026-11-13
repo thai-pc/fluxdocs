@@ -22,25 +22,44 @@ import (
 // credit-card number) for removal and returns the matched regions. Nothing is
 // removed until RedactAndFlatten.
 //
-// Matching runs over the Unicode text extraction reads (/ToUnicode, as
-// ExtractText decodes it), one text-showing operator at a time: the strings
-// of a TJ array, at any nesting depth, are matched as one text, so kerning
-// does not split a match. A matched operator is removed whatever its size or
+// Matching runs over the page's text as ExtractTextByPage reads it — the
+// Unicode text of /ToUnicode, in content order, with no separator between
+// the operators of one line (so a string split across Tj operators, one
+// character per operator, or two text objects on the same line is matched),
+// a newline where the text moves to a new line and a space for a wide TJ gap
+// — and over the same text read with each other decoding a reader may use (a
+// font's /Differences glyph names, its one-byte codes, the raw bytes as
+// Latin-1), and over each text-showing operator alone (the strings of a TJ
+// array, at any nesting depth, as one text, so kerning does not split a
+// match). A match removes every operator it touches, whatever its size or
 // position (a zero-size or off-page run included), and whole: removal is per
-// operator, so a match removes everything that operator shows — when a
+// operator, so a match removes everything those operators show — when a
 // producer writes a line or a paragraph with one TJ, the whole line or
-// paragraph. The /ActualText, /Alt and
-// /E entries of marked-content property lists are matched too: a match strips
-// that entry and removes the text shown inside the marked sequence, and the
-// page is redacted even if the sequence shows no text. A font whose glyphs
-// draw something other than what its /ToUnicode says is out of scope; use
-// RedactArea for a geometric guarantee.
+// paragraph. Removing operators joins their neighbours; text that removal
+// would join into a new match of the pattern is removed too.
+//
+// Matching is per page and in content order: a match never spans two pages,
+// and text a producer writes out of reading order, or places on one line by
+// a coordinate transformation, is matched in the order the content holds it
+// (use RedactArea for a geometric guarantee). Line breaks are not folded:
+// `SECRET-\d+` does not match "SECRET-" at the end of one line and "1234" at
+// the start of the next; a pattern that allows the break does, and one for a
+// hyphenated word must allow the hyphen and the break, e.g.
+// `SEC-?\s*RET-\d+`.
+//
+// The /ActualText, /Alt and /E entries of marked-content property lists are
+// matched too: a match strips that entry and removes the text shown inside
+// the marked sequence, and the page is redacted even if the sequence shows no
+// text. A font whose glyphs draw something other than what its /ToUnicode
+// says is out of scope; use RedactArea for a geometric guarantee.
 //
 // A matched string of 4 or more characters is also removed wherever else it
 // occurs in the document — on other pages, in annotations, in the document
 // information — when RedactAndFlatten runs (automatic extension; see
 // RedactAndFlatten). Matching there ignores white-space and invisible
-// characters and folds compatibility forms (NFKC), and is case-sensitive.
+// characters and folds compatibility forms (NFKC), and is case-sensitive, so
+// an occurrence split across operators or wrapped onto the next line is
+// found too.
 //
 // Returns ErrPageNotFound if pageIndex is out of range, ErrInvalidPDF if the
 // document was not opened from bytes, or a regexp compile error — argument
@@ -77,7 +96,10 @@ func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err erro
 	if err != nil {
 		return nil, err
 	}
-	m := page.Match(re)
+	m, err := page.Match(re)
+	if err != nil {
+		return nil, redactionScanError(pageIndex, err)
+	}
 	rects := make([]Rect, len(m.Rects))
 	for i, r := range m.Rects {
 		rects[i] = Rect{X: r.X, Y: r.Y, Width: r.Width, Height: r.Height}
@@ -276,30 +298,35 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 	if err != nil {
 		return nil, err
 	}
-	// The caller's pages, read and rewritten once: their removed text gives
-	// the area needles (§6.11), and an unchanged page's rewrite is reused.
+	// The caller's pages, read once: the text their regions remove gives the
+	// area needles (§6.11). The needles are fixed before the first rewrite,
+	// whose closure matches them (docs/design/redaction-cross-operator.md
+	// §5.3), and an unchanged page's rewrite is reused.
 	models := map[int]*redact.Page{}
-	cache := map[int]redact.Output{}
 	for _, i := range sortedKeys(plan.user) {
 		page, err := d.redactionPage(i)
 		if err != nil {
 			return nil, err
 		}
 		models[i] = page
-		out, err := d.rewritePage(plan, i, page)
-		if err != nil {
-			return nil, err
-		}
-		cache[i] = out
 	}
 	ns := &needleSets{prop: &redact.Needles{}}
 	for _, m := range matched {
 		ns.addProp(m, tagMatch, redact.MinMatchNeedle)
 	}
-	for _, i := range sortedKeys(cache) {
-		for _, t := range cache[i].AreaTexts {
+	for _, i := range sortedKeys(plan.user) {
+		for _, t := range models[i].AreaTexts(toRedactRects(plan.regions[i]), plan.marks[i]) {
 			ns.addProp(t, tagArea, redact.MinAreaNeedle)
 		}
+	}
+	plan.needles = ns.prop
+	cache := map[int]redact.Output{}
+	for _, i := range sortedKeys(plan.user) {
+		out, err := d.rewritePage(plan, i, models[i])
+		if err != nil {
+			return nil, err
+		}
+		cache[i] = out
 	}
 	budget := &callBudget{}
 	prepassed := false
@@ -336,6 +363,9 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 			return nil, err
 		}
 		ns.resetRemoved(outs)
+		if redactHooks.built != nil {
+			redactHooks.built(d, models, outs)
+		}
 		if redactHooks.mutate != nil {
 			built = redactHooks.mutate(built)
 		}
@@ -368,12 +398,21 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 	}
 }
 
-// rewritePage rewrites page i (its strict model page) by the plan.
-// Returns ErrInternal for a planned mark that does not fit the page (a
-// bug), or ErrInvalidPDF when its resources cannot be read.
+// rewritePage rewrites page i (its strict model page) by the plan; the
+// page's RedactText patterns and the propagating needles are matched again
+// once the planned content is removed (closure). Returns ErrInternal for a
+// planned mark that does not fit the page (a bug), a *RedactionError for a
+// refusal (closure past its budget), or ErrInvalidPDF when its resources
+// cannot be read.
 func (d *Document) rewritePage(plan *redactPlan, i int, page *redact.Page) (redact.Output, error) {
-	out, err := page.Rewrite(toRedactRects(plan.regions[i]), toRedactRects(plan.boxes[i]), plan.marks[i])
-	if errors.Is(err, redact.ErrMarkMismatch) {
+	out, err := page.Rewrite(redact.RewritePlan{
+		Regions:  toRedactRects(plan.regions[i]),
+		Boxes:    toRedactRects(plan.boxes[i]),
+		Marks:    plan.marks[i],
+		Patterns: plan.patterns[i],
+		Needles:  plan.needles,
+	})
+	if errors.Is(err, redact.ErrMarkMismatch) || errors.Is(err, redact.ErrInternal) {
 		return redact.Output{}, fmt.Errorf("%w: page %d: %v", ErrInternal, i, err)
 	}
 	var rf *redact.Refusal
@@ -560,6 +599,8 @@ func (d *Document) redactionPage(pageIndex int) (*redact.Page, error) {
 func redactionScanError(page int, err error) error {
 	var refusal *redact.Refusal
 	switch {
+	case errors.Is(err, redact.ErrInternal):
+		return fmt.Errorf("%w: page %d: redaction text matching failed", ErrInternal, page)
 	case errors.As(err, &refusal):
 		return &RedactionError{Page: page, Reason: RedactionReason(refusal.Reason), Detail: refusal.Error(), Err: refusal.Err}
 	case errors.Is(err, parse.ErrDecodeLimit):

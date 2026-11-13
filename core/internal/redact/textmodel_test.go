@@ -170,21 +170,22 @@ func TestMatch(t *testing.T) {
 		{"zero font size", "BT /F1 0 Tf 72 700 Td (SECRET-1234) Tj ET", 1},
 		{"/Differences glyph names", "BT /D 24 Tf 72 700 Td (ABCDBEFGHIJ) Tj ET", 1},
 		{"no match", "BT /F1 24 Tf 72 700 Td (public) Tj ET", 0},
-		{"split across operators (Phase 2)", "BT /F1 24 Tf 72 700 Td (SECRET-) Tj (1234) Tj ET", 0},
+		{"split across operators (step 2.6)", "BT /F1 24 Tf 72 700 Td (SECRET-) Tj (1234) Tj ET", 2},
+		{"split across a line break", "BT /F1 24 Tf 72 700 Td (SECRET-) Tj 0 -30 Td (1234) Tj ET", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _, err := analyze(t, fixture{content: tc.content, res: "<< /Font << /F1 5 0 R /H 6 0 R /D 9 0 R >> >>", extra: identity}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := p.Match(re)
+			m := mustMatch(t, p, re)
 			if len(m.Rects) != tc.matches || len(m.Marks) != tc.matches {
 				t.Fatalf("%d rects, %d marks, want %d", len(m.Rects), len(m.Marks), tc.matches)
 			}
 			if tc.matches == 0 {
 				return
 			}
-			res, err := p.Rewrite(nil, nil, m.Marks)
+			res, err := p.Rewrite(RewritePlan{Marks: m.Marks})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -228,11 +229,11 @@ func TestPropertyListMatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := p.Match(re)
+			m := mustMatch(t, p, re)
 			if len(m.Marks) != tc.marks || len(m.Rects) != tc.rects {
 				t.Fatalf("%d marks, %d rects; want %d, %d", len(m.Marks), len(m.Rects), tc.marks, tc.rects)
 			}
-			rw, err := p.Rewrite(nil, nil, m.Marks)
+			rw, err := p.Rewrite(RewritePlan{Marks: m.Marks})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -263,10 +264,10 @@ func TestRewriteRejectsForeignMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Rewrite(nil, nil, []Mark{{start: 1, end: 2}}); err == nil {
+	if _, err := p.Rewrite(RewritePlan{Marks: []Mark{{start: 1, end: 2}}}); err == nil {
 		t.Error("Rewrite accepted a mark naming no operator")
 	}
-	if _, err := p.Rewrite(nil, nil, []Mark{{start: 3, end: 10, strip: "Alt"}}); err == nil {
+	if _, err := p.Rewrite(RewritePlan{Marks: []Mark{{start: 3, end: 10, strip: "Alt"}}}); err == nil {
 		t.Error("Rewrite accepted a strip naming no property list")
 	}
 }
@@ -302,8 +303,8 @@ func TestRewriteQuoteOperatorsKeepLineMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := p.Match(regexp.MustCompile("SECRET"))
-	rw, err := p.Rewrite(nil, nil, m.Marks)
+	m := mustMatch(t, p, regexp.MustCompile("SECRET"))
+	rw, err := p.Rewrite(RewritePlan{Marks: m.Marks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +334,7 @@ func TestMatchRectsAreDisplayBoxes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := p.Match(regexp.MustCompile(`SECRET-\d`))
+	m := mustMatch(t, p, regexp.MustCompile(`SECRET-\d`))
 	if len(m.Rects) != 1 {
 		t.Fatalf("rects %v", m.Rects)
 	}
@@ -344,7 +345,7 @@ func TestMatchRectsAreDisplayBoxes(t *testing.T) {
 	if box := p.runs[1].box; box[3] < 686.2+12 {
 		t.Errorf("removal box %v ignores the /FontBBox", box)
 	}
-	rw, err := p.Rewrite(nil, m.Rects, m.Marks)
+	rw, err := p.Rewrite(RewritePlan{Boxes: m.Rects, Marks: m.Marks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,15 +377,15 @@ func TestRewriteRejectsMarksOfAnotherPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := p0.Match(regexp.MustCompile("SECRET"))
-	if _, err := p1.Rewrite(nil, nil, m.Marks); !errors.Is(err, ErrMarkMismatch) {
+	m := mustMatch(t, p0, regexp.MustCompile("SECRET"))
+	if _, err := p1.Rewrite(RewritePlan{Marks: m.Marks}); !errors.Is(err, ErrMarkMismatch) {
 		t.Errorf("page 0's marks on page 1: %v, want ErrMarkMismatch", err)
 	}
 	again, err := AnalyzePage(r, pages[0], seg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := again.Rewrite(nil, nil, m.Marks); err != nil {
+	if _, err := again.Rewrite(RewritePlan{Marks: m.Marks}); err != nil {
 		t.Errorf("marks on the same page analysed again: %v", err)
 	}
 }

@@ -225,6 +225,25 @@ func perChar(s string) string {
 	return b.String()
 }
 
+// perCharTJ shows each character of s with its own TJ.
+func perCharTJ(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		fmt.Fprintf(&b, "[(%c)] TJ ", c)
+	}
+	return b.String()
+}
+
+// rotatedPerTm shows each character of s with its own Tm, rotated 90°
+// (text running up the page from (200, 100)), one Helvetica 24 em apart.
+func rotatedPerTm(s string) string {
+	var b strings.Builder
+	for i, c := range s {
+		fmt.Fprintf(&b, "0 1 -1 0 200 %d Tm (%c) Tj ", 100+15*i, c)
+	}
+	return b.String()
+}
+
 // secretImage is an 11×1 DeviceGray image XObject whose samples are the
 // secret's bytes.
 func secretImage() string {
@@ -531,18 +550,98 @@ func leakCases() []leakCase {
 			extra: map[int]string{6: "<< /ActualText " + S + " >>", 7: "<< /MC0 6 0 R >>",
 				8: stm("/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /Properties 7 0 R >>", "0 0 1 1 re f")}}.pdf,
 			ops: []leakOp{opText}, want: clean, gsBlind: true}, // step 1.12: the stripped entry is denied
-		// A match split across two text objects (Phase 2 matches across
-		// operators on a line).
+		// A match split across two text objects (step 2.6 matches across
+		// operators on a line: docs/design/redaction-cross-operator.md).
 		{name: "split_bt", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET BT /F1 24 Tf 177.4 700 Td (1234) Tj ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+			ops: []leakOp{opText}, want: clean}, // step 2.6: matching across operators
 		// N-2 (batch B review): the same split inside one text object, as Tj,
 		// as TJ, and one character per operator.
 		{name: "split_same_bt_tj", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj (1234) Tj ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+			ops: []leakOp{opText}, want: clean}, // step 2.6: matching across operators
 		{name: "split_same_bt_TJ", pdf: page("BT /F1 24 Tf 72 700 Td [(SECRET-)] TJ [(1234)] TJ ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+			ops: []leakOp{opText}, want: clean}, // step 2.6: matching across operators
 		{name: "split_same_bt_per_char", pdf: page("BT /F1 24 Tf 72 700 Td " + perChar(secret) + " ET"),
-			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6 (matching across operators on a line) -> clean"},
+			ops: []leakOp{opText}, want: clean}, // step 2.6: matching across operators
+		// Step 2.6 (docs/design/redaction-cross-operator.md §10.1): a match
+		// across operators on one line, in content order, as ExtractText
+		// joins them. Helvetica 24: "SEC" is 49.3 wide, "SECRET-" 105.3.
+		{name: "split_three_tj", pdf: page("BT /F1 24 Tf 72 700 Td (SEC) Tj (RET-) Tj (1234) Tj ET"),
+			ops: []leakOp{opText}, want: clean},
+		{name: "split_three_bt", pdf: page("BT /F1 24 Tf 72 700 Td (SEC) Tj ET BT /F1 24 Tf 121.3 700 Td (RET-) Tj ET " +
+			"BT /F1 24 Tf 177.3 700 Td (1234) Tj ET"),
+			ops: []leakOp{opText}, want: clean},
+		{name: "split_same_line_td", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj 105.3 0 Td (1234) Tj ET"),
+			ops: []leakOp{opText}, want: clean},
+		{name: "split_mixed_fonts", pdf: onePage{content: []string{"BT /F1 24 Tf 72 700 Td (SECRET-) Tj /F2 24 Tf <0031003200330034> Tj ET"},
+			res: "<< /Font << /F1 5 0 R /F2 6 0 R >> >>", extra: identityHFont()}.pdf,
+			ops: []leakOp{opText}, want: clean},
+		// ExtractText reads "SECRET- 1234" (the gap is a space); the Text
+		// slot stream has no gap spaces and matches.
+		{name: "split_TJ_gap_space", pdf: page("BT /F1 24 Tf 72 700 Td [(SECRET-) -250] TJ [(1234)] TJ ET"),
+			ops: []leakOp{opText}, want: clean},
+		{name: "split_tc_tw_tz", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj 5 Tc 10 Tw 150 Tz (1234) Tj ET"),
+			ops: []leakOp{opText}, want: clean},
+		{name: "split_across_bdc", pdf: page("BT /F1 24 Tf 72 700 Td /Span <<>> BDC (SECRET-) Tj EMC (1234) Tj ET"),
+			ops: []leakOp{opText}, want: clean},
+		// ExtractText joins the two (no line move); Ghostscript 10.07 writes
+		// them as two lines, "1234" first, so it never shows the secret.
+		{name: "split_rotated_same_bt", pdf: page("BT /F1 24 Tf 0 1 -1 0 200 100 Tm (SECRET-) Tj (1234) Tj ET"),
+			ops: []leakOp{opText}, want: clean, gsBlind: true},
+		{name: "split_content_array", pdf: onePage{content: []string{"BT /F1 24 Tf 72 700 Td (SECRET-) Tj", "(1234) Tj ET"}}.pdf,
+			ops: []leakOp{opText}, want: clean},
+		{name: "split_per_char_TJ", pdf: page("BT /F1 24 Tf 72 700 Td " + perCharTJ(secret) + " ET"),
+			ops: []leakOp{opText}, want: clean},
+		// Whole operators go: the control text shown with the pieces goes
+		// with them (documented over-removal).
+		{name: "split_partial_line", pdf: page("BT /F1 24 Tf 72 700 Td (Code: SECRET-) Tj (1234 end) Tj ET"),
+			ops: []leakOp{opText}, want: clean},
+		// Across a line break only a pattern that matches the newline
+		// matches (the plain pattern does not: a unit test).
+		{name: "split_line_break_ws", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj 0 -30 Td (1234) Tj ET"),
+			ops: []leakOp{opText}, pattern: `SECRET-\s*\d+`, want: clean},
+		// A match that would span page content and a form: the page is
+		// refused first (X7).
+		{name: "split_page_and_form", pdf: onePage{content: []string{"BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET q /Fm Do Q"},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Fm 6 0 R >> >>",
+			extra: map[int]string{6: stm("/Type /XObject /Subtype /Form /BBox [0 0 400 800] /Resources << /Font << /F1 5 0 R >> >>",
+				"BT /F1 24 Tf 177.3 700 Td (1234) Tj ET")}}.pdf,
+			ops: []leakOp{opText}, want: refuse, reason: "form_text"},
+		// D4 across operators: page 0 shows the secret whole, page 1 split
+		// (the match needle and the area needle are found across its runs).
+		{name: "d4_split_other_page", pdf: twoPages(show(S), "", "BT /F1 24 Tf 72 700 Td (SECRET-) Tj (1234) Tj ET", "", nil, ""),
+			ops: both, want: clean},
+		{name: "d4_split_other_page_form", pdf: func() []byte {
+			return leakPDF(map[int]string{
+				1: "<< /Type /Catalog /Pages 2 0 R >>",
+				2: "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+				3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+				4: stm("", show(S)),
+				5: helvetica,
+				6: "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm1 9 0 R >> >> /Contents 8 0 R >>",
+				8: stm("", "q /Fm1 Do Q"),
+				9: stm("/Type /XObject /Subtype /Form /BBox [0 0 400 800] /Resources << /Font << /F1 5 0 R >> >>",
+					"BT /F1 24 Tf 72 500 Td (SECRET-) Tj (1234) Tj ET"),
+			}, "")
+		},
+			ops: both, want: refuse, reason: "form_text"},
+		// Step 2.6b measurement rows: content order is not reading order
+		// (§14.8.2.3), or a CTM puts two text objects on one visual line, or
+		// a rotated Tm per glyph. Step 2.6 matches in content order only;
+		// these rows record what readers show (Ghostscript 10.07 txtwrite,
+		// the note's §13). Reversed order: ExtractText reads "1234SECRET-",
+		// Ghostscript "SECRET-1234" (it orders by position).
+		{name: "split_reversed_order", pdf: page("BT /F1 24 Tf 177.3 700 Td (1234) Tj ET BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6b (geometric reading order) -> clean"},
+		// The CTM moves the second object onto the first one's baseline:
+		// ExtractText reads "SECRET-\n1234" (it ignores the CTM; the leak
+		// check strips white space), Ghostscript "SECRET-1234".
+		{name: "split_cm_same_baseline", pdf: page("BT /F1 24 Tf 72 700 Td (SECRET-) Tj ET q 1 0 0 1 0 -300 cm BT /F1 24 Tf 177.3 1000 Td (1234) Tj ET Q"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6b (geometric reading order) -> clean"},
+		// One rotated Tm per glyph up the page: ExtractText writes one glyph
+		// per line, in order; Ghostscript one per line in reverse order, so
+		// only our (white-space-stripped) check sees the secret.
+		{name: "split_rotated_per_tm", pdf: page("BT /F1 24 Tf " + rotatedPerTm(secret) + " ET"),
+			ops: []leakOp{opText}, want: knownLeak, closesIn: "2.6b (geometric reading order) -> clean"},
 		// N-2: a /Properties list shared by two pages' /Resources. Page 0's
 		// private copy loses the matched /ActualText, but page 1 is not
 		// redacted and keeps the shared list: unused there (verification finds

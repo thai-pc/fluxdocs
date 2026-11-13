@@ -87,32 +87,56 @@ func ignorable(r rune) bool {
 // Every needle has at least MinNeedle bytes, so a needle is found by its
 // first four bytes. The zero value is an empty set.
 type Needles struct {
-	list  []string
-	tags  []uint8
-	index map[uint32][]int32
-	seen  map[string]int32
+	list   []string
+	tags   []uint8
+	index  map[uint32][]int32
+	seen   map[string]int32
+	maxLen int // the longest needle, in bytes
+	// pre has a bit set for the hash (preBit) of every index key: most
+	// positions of a haystack start no needle, and the bit says so without
+	// a map lookup (no false negatives).
+	pre *[1 << 16 / 64]uint64
+}
+
+// preBit is the prefilter bit of an index key.
+func preBit(k uint32) uint32 { return (k * 2654435761) >> 16 }
+
+// mayStart reports whether an index key may start a needle.
+func (n *Needles) mayStart(k uint32) bool {
+	b := preBit(k)
+	return n.pre[b/64]&(1<<(b%64)) != 0
 }
 
 // Add adds a needle with tag bits; one shorter than MinNeedle bytes is
-// ignored. Adding a needle again adds its tag bits.
+// ignored, one longer than maxNeedleRunes runes is truncated to its first
+// maxNeedleRunes runes (every occurrence of it holds the prefix, so this only
+// adds hits, and it bounds the search's worst case). Adding a needle again
+// adds its tag bits.
 func (n *Needles) Add(needle string, tag uint8) {
+	if len(needle) > maxNeedleRunes {
+		needle = truncateRunes(needle, maxNeedleRunes)
+	}
 	if len(needle) < MinNeedle {
 		return
 	}
 	if n.seen == nil {
 		n.seen = map[string]int32{}
 		n.index = map[uint32][]int32{}
+		n.pre = new([1 << 16 / 64]uint64)
 	}
 	if i, ok := n.seen[needle]; ok {
 		n.tags[i] |= tag
 		return
 	}
 	i := int32(len(n.list))
+	n.maxLen = max(n.maxLen, len(needle))
 	n.seen[needle] = i
 	n.list = append(n.list, needle)
 	n.tags = append(n.tags, tag)
 	k := key4(needle)
 	n.index[k] = append(n.index[k], i)
+	b := preBit(k)
+	n.pre[b/64] |= 1 << (b % 64)
 }
 
 // Len is the number of needles.
@@ -138,6 +162,9 @@ func (n *Needles) Find(hay string) uint8 {
 	k := uint32(hay[0])<<16 | uint32(hay[1])<<8 | uint32(hay[2])
 	for i := 3; i < len(hay); i++ {
 		k = k<<8 | uint32(hay[i])
+		if !n.mayStart(k) {
+			continue
+		}
 		cands, ok := n.index[k]
 		if !ok {
 			continue
@@ -150,6 +177,42 @@ func (n *Needles) Find(hay string) uint8 {
 		}
 	}
 	return tags
+}
+
+// FindSpans calls f with the byte range [i, j) in hay and the tags of every
+// occurrence of every needle, in order of i.
+func (n *Needles) FindSpans(hay string, f func(i, j int, tags uint8)) {
+	if n.Len() == 0 || len(hay) < MinNeedle {
+		return
+	}
+	k := uint32(hay[0])<<16 | uint32(hay[1])<<8 | uint32(hay[2])
+	for i := 3; i < len(hay); i++ {
+		k = k<<8 | uint32(hay[i])
+		if !n.mayStart(k) {
+			continue
+		}
+		cands, ok := n.index[k]
+		if !ok {
+			continue
+		}
+		at := hay[i-3:]
+		for _, c := range cands {
+			if nd := n.list[c]; strings.HasPrefix(at, nd) {
+				f(i-3, i-3+len(nd), n.tags[c])
+			}
+		}
+	}
+}
+
+// truncateRunes returns the first max runes of s (an invalid byte counts as
+// one rune).
+func truncateRunes(s string, max int) string {
+	i := 0
+	for r := 0; r < max && i < len(s); r++ {
+		_, sz := utf8.DecodeRuneInString(s[i:])
+		i += sz
+	}
+	return s[:i]
 }
 
 // FindText returns the tags of the needles that occur in the skeleton of t.
@@ -192,6 +255,9 @@ func (n *Needles) findIn(hay []byte) uint8 {
 	k := uint32(hay[0])<<16 | uint32(hay[1])<<8 | uint32(hay[2])
 	for i := 3; i < len(hay); i++ {
 		k = k<<8 | uint32(hay[i])
+		if !n.mayStart(k) {
+			continue
+		}
 		cands, ok := n.index[k]
 		if !ok {
 			continue

@@ -121,11 +121,19 @@ func (d *Document) verifyRedaction(built []byte, plan *redactPlan, ns *needleSet
 			return nil, nil, verificationError("a glyph run of page %d meets a redaction region", i)
 		}
 		for _, re := range plan.patterns[i] {
-			if m := page.Match(re); len(m.Marks) > 0 {
+			m, err := page.Match(re)
+			if err != nil {
+				return nil, nil, redactionScanError(i, err)
+			}
+			if len(m.Marks) > 0 {
 				return nil, nil, verificationError("text of page %d still matches a RedactText pattern", i)
 			}
 		}
-		if marks, _ := page.FindNeedles(ns.prop, nil); len(marks) > 0 {
+		marks, _, err := page.FindNeedles(ns.prop, nil)
+		if err != nil {
+			return nil, nil, redactionScanError(i, err)
+		}
+		if len(marks) > 0 {
 			return nil, nil, verificationError("page %d still shows removed text", i)
 		}
 		if page.HasPropertyText() {
@@ -505,7 +513,10 @@ func (d *Document) applyResiduals(plan *redactPlan, res *residuals, ns *needleSe
 			}
 			page = p
 		}
-		marks, hits := page.FindNeedles(ns.prop, nil)
+		marks, hits, err := page.FindNeedles(ns.prop, nil)
+		if err != nil {
+			return false, extensionRefusal(redactionScanError(i, err))
+		}
 		if len(marks) == 0 {
 			return false, verificationError("page %d shows removed text the redaction cannot attribute", i)
 		}

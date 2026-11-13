@@ -68,6 +68,9 @@ var redactHooks struct {
 	// redaction without automatic extension and verification, which the
 	// benchmarks compare against.
 	noVerify bool
+	// built, when set, receives each build's page models and rewrites (the
+	// property tests check the rewrites against the models).
+	built func(d *Document, models map[int]*redact.Page, outs map[int]redact.Output)
 }
 
 // redactPlan is the plan of one RedactAndFlatten call: the caller's, copied
@@ -83,6 +86,10 @@ type redactPlan struct {
 	annots    map[int]map[int]string // page -> index in its /Annots -> why the annotation is removed
 	annotDeny map[int]bool           // the removed annotations (and popups), by object number
 	info      map[string]bool        // /Info fields not written
+
+	// needles are the propagating needles (needleSets.prop), fixed before
+	// the first rewrite: every rewrite's closure matches them.
+	needles *redact.Needles
 
 	report  RedactionReport
 	extIdx  map[extKey]int // report.Extensions index per (page, source, where)
@@ -301,7 +308,10 @@ func (d *Document) prepass(plan *redactPlan, ns *needleSets, models map[int]*red
 			if rf := page.UnitHidden(ns.prop); rf != nil {
 				return redactionScanError(i, rf)
 			}
-			marks, found := page.FindNeedles(ns.prop, done)
+			marks, found, err := page.FindNeedles(ns.prop, done)
+			if err != nil {
+				return redactionScanError(i, err)
+			}
 			if len(marks) > 0 {
 				models[i] = page
 				plan.extend(i, marks, found)
@@ -348,7 +358,10 @@ func (d *Document) prepass(plan *redactPlan, ns *needleSets, models map[int]*red
 			page = p
 			budget.used += p.Decoded()
 		}
-		marks, found := page.FindNeedles(ns.prop, done)
+		marks, found, err := page.FindNeedles(ns.prop, done)
+		if err != nil {
+			return extensionRefusal(redactionScanError(i, err))
+		}
 		if len(marks) > 0 {
 			models[i] = page
 			plan.extend(i, marks, found)

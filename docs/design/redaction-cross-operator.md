@@ -1,6 +1,8 @@
 # Design: redaction step 2.6 — matching across operators on a line
 
-Status: design (not implemented). Base: `master` at f7fc4f5.
+Status: implemented (steps a–f; step a landed as 23f9b3b). Base: `master` at
+f7fc4f5 (design), 23f9b3b (implementation). Results: §13. Maintainer
+decisions on §12: every recommendation accepted (Q1–Q9).
 Parent: `docs/design/redaction-hardening.md` (Phase 2 table, step 2.6; C34
 N-2; §5.4, §5.6, §6.5, §6.8, §6.11). This note is separate because the
 parent is organized by Phase 1 items and is already ~1,800 lines; the parent's
@@ -137,7 +139,7 @@ func (f *Flow) Apply(op string, operands []parse.Object, owner int32)
 func (f *Flow) String() string
 ```
 
-`extract.PageText` becomes `textflow.New(buildFonts…)` + `Apply` over
+`extract.PageText` becomes `textflow.New(textflow.PageFonts…)` + `Apply` over
 `parse.ScanContent` with `owner = -1` — **no behaviour change**, confirmed by
 the existing `extract` tests and by byte-identical extract hashes on the
 corpus (the same gate as step 1.3). The redaction interpreter feeds the same
@@ -149,17 +151,31 @@ spans with the strict operand rule), so the extraction stream equals
 `PageText` by construction; property P1 (§10.3) turns that expectation into
 a gate, and any difference it finds is fixed in the wiring, not tolerated.
 
+Ownership: shown text and `TJ`-gap spaces belong to the operator that wrote
+them; every line-break newline is a separator owned by no operator
+(`NoOwner`), including the newline a `'` or `"` writes for its own line move
+(as implemented; an earlier draft attributed quote newlines to the quote).
+
 The `Flow` mirrors extraction **including its non-conformances** (no `q`/`Q`
 restore of font and leading, `gs /Font` ignored, CTM ignored). That is the
 point: the superset rule is about what `ExtractText` shows. Fixing extraction
 (D13, `q`/`Q`, `gs /Font`) is a separate Core change; it then changes both
 sides at once.
 
-Fonts: `Flow` resolves fonts as `extract.buildFonts` does
-(`fontmodel.Load(r, ref, fontmodel.Options{})` on the page's `/Font`
-entries). The redaction walker reuses its own loaded font for the same object
-when the options are equal, otherwise loads it separately, charged to the
-page's decode budget.
+Fonts: `Flow` binds font names exactly as extraction does — the shared
+`textflow.FontDict`/`PageFonts` (the page's effective `/Resources` `/Font`
+entry only; a missing name or an entry that does not load decodes as
+Latin-1), which `extract.buildFonts` now also uses. The redaction model loads
+the bound object through its walker (`walker.font`, metrics on, decode
+charged): `Font.Text` depends only on `/ToUnicode` and the Type 0 test, which
+both options read identically, and the bound object is always one the text
+model also loaded (the innermost binding of the same `Tf`), so no font is
+loaded twice. One theoretical difference remains: a `/ToUnicode` stream
+larger than `parse.MaxPageContent` decodes under extraction's unlimited
+`DecodeStream` but not under the walker's cap; no corpus page has one, and P1
+would report it. The text the `Flow` writes is charged to the page's
+operator budget (it may decode with a font the run's set does not hold, after
+`Q`).
 
 Why not duplicate extraction's rules inside `redact` and rely on the property
 test alone: two copies drift, and the test only sees the corpus.
@@ -168,9 +184,12 @@ test alone: two copies drift, and the test only sees the corpus.
 
 A reader picks one decoding policy and applies it to the whole page. Each
 policy is a **slot**; a slot's stream is every run's reading in that slot, in
-content order, joined with the extraction stream's newlines (the same number
-of `\n` before each run) and **no** `TJ`-gap spaces (as the per-run readings
-of C15 have none: kerning never splits a match, 1.5).
+content order, joined at the extraction stream's line breaks and with **no**
+`TJ`-gap spaces (as the per-run readings of C15 have none: kerning never
+splits a match, 1.5). A line break writes its `\n` only once that slot's
+stream has emitted a glyph, as `Flow` does for its own (§4): a run whose
+reading is empty in a slot emits nothing there, so the slot streams and the
+extraction stream can differ in the newlines before their first glyph.
 
 | Slot | Per run | Fallback when the run has no such reading |
 |---|---|---|
@@ -287,13 +306,21 @@ type stream struct {
   iteration is involved.
 
 **Assembly is a function, not a byte copy:** `assemble(keep func(run int)
-bool) []stream`. The `Flow` records, per run, its piece bytes and whether it
-started with a pending `TJ` gap, and, per positioning operator, the newline
-decision inputs (`f`, `Tfs`). Assembly with some runs dropped recomputes the
-`emitted` state (a newline is written only after the first kept glyph) and
-the pending-gap space against the preceding kept byte, so
-`assemble(keep)` equals what extraction reads from the rewritten page
-(property P3). Closure (§5.3) and `FindNeedles(done)` use it.
+bool) []stream`. There is no "pending gap" in extraction: a gap's space is
+written at once, and only when the output is non-empty and does not end in a
+space, `\n` or `\t`. So the recording `Flow` (`Flow.Record`, `Events`) logs
+its reading as steps — a line break (decided from `f` and `Tfs`, which no
+removal changes; whether its newline is written depends only on whether a
+glyph was written before), the start of each text-showing operator, each
+shown text (as a range of the recorded output) and each `TJ` gap — and
+`textflow.Replay(keep, shown)` replays them through the same writer as the
+`Flow`: a newline only after the first kept glyph, a gap's space decided
+again against the kept output (one space, not two). With `shown` set, each
+kept operator writes its reading in a slot instead and gaps write nothing
+(the slot streams). `assemble(keep)` therefore equals what extraction reads
+from the rewritten page (P3). Closure (§5.3) and `FindNeedles(done)` use it.
+Index-map offsets are `int32`: the streams are bounded by the operator
+budget (8 Mi), and a stream past 2 GiB is refused.
 
 ## 5. Matching
 
@@ -304,7 +331,9 @@ the pending-gap space against the preceding kept byte, so
    at a run's edges).
 2. For each materialized stream: `re.FindAllStringIndex(text,
    maxStreamMatches+1)`. More than `maxStreamMatches` (4 Mi, the span cap)
-   is `budget_exceeded` (§7.1). Each non-empty match marks its owner runs;
+   is `budget_exceeded` (§7.1). The cap is a backstop: the operator budget
+   charges every reading (and the `Flow`'s text), so a stream holds at most
+   about 2.8 Mi characters and no accepted page reaches it. Each non-empty match marks its owner runs;
    the matched substring is a match needle (§6.11 rules unchanged: ≥ 4
    skeleton characters propagate).
 3. Closure (§5.3) with this pattern alone.
@@ -326,11 +355,14 @@ millions of one-character strings.
   (`norm.NFKC` `LastBoundary`), each chunk keeping its owner list, so a hit
   maps to every run of the chunks it touches (over-removal at a boundary
   that composes, never under).
-- **`TextScanner.Page`** (pre-pass, text only, no runs kept): `pageText`
-  receives `(slot, reading)` instead of distinct readings. The scanner
-  appends each slot's skeleton to a per-slot buffer and searches it in chunks
-  of `max(1 MiB, 4·L)` with an overlap of L−1 runes (L = longest needle
-  skeleton): O(n·(1 + L/chunk)) ≤ 1.25 n per slot. A hit sets
+- **`TextScanner.Page`** (pre-pass, text only, no runs kept): besides each
+  run's distinct readings, the interpreter feeds a slot searcher with each
+  run's slot readings, and extraction's reading (a non-recording `Flow`) is
+  searched at the end. The searcher keeps one buffer per class of equal
+  slots (a class that splits starts from a copy of its parent's unsearched
+  buffer) and searches it in 1 MiB chunks cut on an NFKC boundary, with an
+  overlap of L−1 skeleton bytes (L = longest needle, ≤ 4 KiB after
+  truncation): O(n·(1 + L/chunk)) per class. A hit sets
   `PageHits.Content` as today; the strict model then places the runs
   (`FindNeedles`). Units read for text (`w.texts`) get the same per-unit
   stream, so a needle split across two operators of a form on another page is
@@ -407,16 +439,21 @@ removal.
 
 | Quantity | Bound | How |
 |---|---|---|
-| Stream bytes, all slots | ≤ the reading bytes `show` already charges to `maxOpVisits` (every slot buffer, fallbacks included, is charged today) + one separator per positioning operator per stream | no new charge needed for building |
+| Stream bytes, slot streams | ≤ the reading bytes `show` already charges to `maxOpVisits` (every slot buffer, fallbacks included, is charged today) + one separator per positioning operator per stream | no new charge needed for building |
+| Extraction stream (`Flow`) bytes | ≤ `maxFlowBytes` = 8 Mi, its own allowance. Where extraction's font is the run's first candidate (always, unless a `Tf` inside `q…Q` stays selected past the `Q`, or a `gs /Font` selects another) it is the runs' extraction readings, already charged to `maxOpVisits`, plus a newline per line operator, so it never refuses a page the operator budget accepts; elsewhere it reads a font the run does not use, which nothing else bounds | charged per operator to its own budget, not `maxOpVisits` (so pages keep the operator room they had) |
+| Recorded `Flow` steps | ≤ 2 × (2 per operator + 1 per byte of shown text): a gap right after a gap of the same operator is not recorded | bounded by the two rows above |
 | Materialized streams | ≤ 3·8 + 2 = 26; typically 1–3 | aliasing (§3.3) |
 | Index map | 8 bytes per piece per materialized stream | ≤ 32 MiB per stream at the span cap |
-| Regexp work | RE2: linear in stream length per pattern per round | new per-page **match budget** `maxMatchWork` = 64 Mi bytes scanned (streams × patterns × rounds); past it `budget_exceeded` |
-| Matches | `maxStreamMatches` = 4 Mi per stream per round (≈ 170 MB of `[][]int` at the cap) | `FindAllStringIndex(…, n+1)` |
+| Regexp work | RE2: linear in stream length per pattern per round | per-call **match budgets**: `maxMatchWork` = 64 Mi bytes scanned per pattern and 64 Mi for the needles (streams × rounds), and at most `maxMatchBudgets` = 16 of them per call (1 GiB scanned, worst case, whatever the pattern count); past either `budget_exceeded` |
+| Matches | `maxStreamMatches` = 4 Mi per stream per round | up to 1,024 collected by `FindAllStringIndex`; more are visited one by one (`ReplaceAllFunc`, the same matches), never collected, stopping at the cap |
 | Closure rounds | `maxMatchRounds` = 4 | §5.3 |
 | Needle search | O(n·(1 + L/chunk)) per slot; L ≤ 1024 | §5.2 |
 
-The match budget is separate from `maxOpVisits` so that pages `RedactArea`
-accepts today are not refused because of matching they do not do. The
+The match budgets are separate from `maxOpVisits` so that pages `RedactArea`
+accepts today are not refused because of matching they do not do, and each
+pattern has its own so that a page redacted with many patterns is not
+refused for their number (20 patterns over a 1 MB page with a closure round:
+`TestRewrite_ManyPatternsBudget`). The
 existing worst case of `Needles.Find` (candidate verification on a
 repetitive haystack, O(n·L)) is not new: today a single large `TJ` run gives
 the same haystack; truncation to 1024 runes now bounds it.
@@ -459,7 +496,8 @@ in exchange. WASM: same caps; the worst case is bounded by the same budgets.
 ### 8.2 Refusal reasons
 
 No new reason. New details under `budget_exceeded`: "text matching" (match
-budget, match cap, closure rounds). Details never quote document text.
+budgets, match cap, closure rounds) and "text reading" (`maxFlowBytes`,
+§7.1). Details never quote document text.
 
 ### 8.3 `RedactArea`
 
@@ -486,8 +524,10 @@ pages (D4). Both only add removals.
 ## 9. API and documentation
 
 - No exported Go API changes. Internal: `Page.Rewrite` takes a
-  `RewritePlan{Regions, Boxes, Marks, Patterns, Needles}`;
-  `TextScanner`'s `pageText` callback gains a slot argument;
+  `RewritePlan{Regions, Boxes, Marks, Patterns, Needles}`; `Page.Match` and
+  `Page.FindNeedles` return an error (a `budget_exceeded` refusal); the
+  interpreter feeds the `TextScanner`'s per-slot searcher directly (as
+  implemented, `pageText` keeps its per-reading form for the per-run search);
   `core/internal/textflow` is new (internal).
 - `RedactText` doc comment: "one text-showing operator at a time" becomes
   "over the page's text as `ExtractTextByPage` reads it — content order, with
@@ -615,8 +655,9 @@ same seeds.
   4 rounds, time ≤ 5× one round.
 - `TestDoS_RedactSlotStreams`: 8 font candidates per `Tf` on a large page:
   materialized streams and memory within §7.1.
-- `TestDoS_PrepassStreams`: 2,000 per-character pages with propagating
-  needles: pre-pass time ≤ 1.3× the per-run reference.
+- `TestDoS_PrepassStreams`: 16,000 per-character pages with propagating
+  needles: pre-pass and verification time ≤ 1.5× the per-run reference
+  (median of 5 alternated runs, each over 1 s of CPU).
 
 ## 11. Implementation steps and effort
 
@@ -669,3 +710,174 @@ redaction 100% gate.
   fold `-\n` or U+00AD + `\n`? *Recommendation:* no; the pattern author
   controls it (`SEC-?\s*RET-\d+`). Document an example. D4 needles already
   fold soft hyphens and white space.
+
+## 13. Results (implementation)
+
+### 13.1 What landed
+
+| Package | Change |
+|---|---|
+| `core/internal/textflow` | step a (23f9b3b), then: `Flow.Record`/`Events` (line, show, text, gap steps), `Replay(keep, shown)` through the same writer as the `Flow`, `FontDict`/`PageFonts` (extraction's font binding). Zero behaviour change for `extract`: 0 of 3,973 extraction hashes changed (local and extra corpus, the step-a tooling) |
+| `core/extract` | binds fonts through `textflow.FontDict`/`PageFonts` (lazy per name; same fonts) |
+| `core/internal/redact` | `stream.go` (slots, `slotPartition`, streams and index map, `assemble`, `matchStreams`, `needleStreams` over NFKC-boundary chunks, `closureRound`, `slotSearcher` for the pre-pass and units); `Flow` and slot identity in the interpreter; `Match` (streams + closure, `Rounds`), `Rewrite(RewritePlan)` (closure with patterns and needles, settle re-run), `FindNeedles` (streams, `done` drops planned runs; now returns an error), `AreaTexts`; `TextScanner` per-slot streams for pages and units; the verifier's joined search; `Needles.FindSpans`, truncation to 1,024 runes; `Page.Size` counts the streams |
+| `core` | `RedactText` (Match errors are refusals), needles fixed before the first rewrite (`AreaTexts`), `rewritePage` passes patterns and needles, verification and extension handle the new errors; doc comment (§9) |
+| tests | leak rows §10.1 and the 2.6b rows; `core/internal/redact/stream_test.go`; `core/redact_stream_test.go` (P1–P3, closure, `text-digits` diagnostic, P1 fuzz target); `core/redact_stream_dos_test.go`; `FuzzRedactCrossOperator`; `TestLeakFixtureDump` |
+
+Matches are found in content order (L1, Q1); closure matches are not needles
+(Q2); needles match across line breaks (Q3); no `/ActualText` stream (Q4);
+no cross-page match (Q5); over the match cap the page is refused (Q7); one
+rect per run (Q8); hyphens are not folded, the `RedactText` doc comment shows
+`SEC-?\s*RET-\d+` (Q9).
+
+### 13.2 Leak corpus (`FLUXDOCS_REQUIRE_GS=1`, Ghostscript 10.07.1)
+
+The four rows tagged 2.6 (`split_bt`, `split_same_bt_tj`, `split_same_bt_TJ`,
+`split_same_bt_per_char`) were `knownLeak` (ExtractText and Ghostscript showed
+the secret); they are `clean` in our checks and in Ghostscript. The fifteen
+rows of §10.1 are added and pass; no other row changed. `split_rotated_same_bt`
+is `gsBlind`: Ghostscript writes the two operators as two lines, "1234" first,
+so its input never shows the secret (ExtractText joins them; the redaction
+removes both).
+
+2.6b measurements (rows `knownLeak`, closes in 2.6b):
+
+| Row | ExtractText of the input | Ghostscript of the input | Leak today |
+|---|---|---|---|
+| `split_reversed_order` | `1234SECRET-` | `SECRET-1234` (orders by x) | Ghostscript |
+| `split_cm_same_baseline` | `SECRET-\n1234` (CTM ignored) | `SECRET-1234` | Ghostscript; ours with white space stripped |
+| `split_rotated_per_tm` | one glyph per line, in order | one glyph per line, in **reverse** order | ours with white space stripped only |
+
+So Ghostscript's reading order is geometric for the first two; for one
+rotated `Tm` per glyph it neither joins nor keeps content order. 2.6b's L2
+stream has data for the first two; the third needs a rule for direction
+(rotated text runs bottom to top here).
+
+### 13.3 Properties
+
+- P1 identity: equal on every page the strict model reads — 1,900 pages
+  (`testing/corpus`, 1,491 extra-corpus files at 3 pages, the always-run
+  fixtures, and the 254 leak fixtures dumped by `TestLeakFixtureDump`), and
+  on 605 k fuzzed contents (`FuzzRedactStreamP1`, 90 s).
+- P2 mapping: the 7 patterns on the same pages: every match's owner runs
+  are marked; 0 budget refusals.
+- P3 output model: 3,189 rewritten output pages (`\d` plus a half-page
+  region): `ExtractTextByPage` equals the assembled source and holds no
+  digit on the caller's pages. P3 now fails on any `RedactAndFlatten` error
+  but a refusal; that exposed one leak fixture, `r2_other_form_comment`,
+  where the call failed verification (fail-closed, present on `master`):
+  `RedactText(0, \d)` removes page 0's run whole without a needle (each match
+  is one digit), redacting page 1 makes the form it paints reachable only
+  from redacted pages, and the verifier finds page 0's removed text in that
+  form's comment, which extension never searched for. Fixed (§13.6; parent
+  note C85): the call now refuses `form_text`. `TestLeakFixtureProperties`
+  (testing/security/redaction) runs P1–P3 on the leak fixtures in a plain
+  `go test`, and passes (P3: 182 documents, 178 redacted, 4 refused).
+- `FuzzRedactCrossOperator` (3 patterns, 359 k executions): no match in the
+  output, no verification failure.
+
+The leak fixtures cannot be generated in package `core` (they are built in
+`testing/security/redaction`, which imports `core`); P1–P3 read them from
+`FLUXDOCS_LEAK_FIXTURES` when set, and an always-run table in `core` covers
+the constructs of the 2.6 rows.
+
+### 13.4 Corpus no-regression
+
+`testing/corpus` plus the 1,491-file extra list, 3 pages per file: the 6,244
+outcomes are byte-identical to `master` (every `text/p*`, `text/flatten`,
+`area-full`, `area-half`); no cross-operator `text/*` change (`.` already
+marked every run with a character). Extensions (`FLUXDOCS_REGRESS_EXT`):
+128 (file, op) rows grew, none shrank — `area-full` 52 rows, pages extended
+1,449 → 1,468, rects 22,335 → 25,837; `area-half` 76 rows, 1,003 → 1,047
+pages, 17,749 → 20,796 rects; one more annotation removed (a newly extended
+page's). Sampled: the new hits are area needles (fragments of removed runs,
+8+ skeleton characters) occurring across runs or lines in `ExtractTextByPage`
+(Q3).
+
+`text-digits` (`RedactText(page, \d{4,})`, `FLUXDOCS_STREAM_DIGITS=1`): 1,900
+pages, closure rounds 0 on every page; 943 runs marked only by the streams,
+814 of them owning a match in `ExtractTextByPage`. The other 129 are on three
+pages of one file (a Thai licence) whose subset font numbers its glyphs
+sequentially, so the raw-byte Latin-1 slot reads digits across runs: the C15
+policy (each run alone already matched when it held four such bytes), now
+joined — over-removal, not a miss.
+
+### 13.5 Cost (CPU time and allocation, ratio to step 2.6 off)
+
+Gates in `core/redact_stream_dos_test.go`, median of 3 (one run past 2 s of
+CPU; the pre-pass gate: median of 5 alternated runs), ranges over six runs on
+an idle and a loaded 12-core machine:
+
+| Gate | Result | Bound |
+|---|---|---|
+| 600 k one-character `Tj`, `RedactText` + flatten, `SECRET-\d+` | 0.73–1.23× CPU, 1.26× alloc | 1.5× |
+| same, `.` (every run a match) | 1.01–1.15× CPU, 1.14× alloc | 1.5× |
+| 4 Mi+1 digits, `\d` (refused by the operator budget before matching) | 0.92–1.06× CPU, 1.04× alloc | 1.5× alloc |
+| closure chain, refused after 4 rounds | 1.06–1.25× one round | 5× |
+| 8 font candidates, 100 k strings | 8 streams; model 48 → 59 MiB; 1.00–1.21× CPU | 26 streams, 3× size, 1.5× CPU |
+| pre-pass and verification, 16,000 one-character pages | 1.11–1.33× CPU, 1.06× alloc (see below) | 1.5× |
+
+The pre-pass gate was first measured on 2,000 pages (about 0.2 s a run,
+median of 3) at 1.01–1.18× against a 1.3× bound, and flaked at 1.32× and
+1.37× on CI-like load: at that length scheduling noise dominates. It now runs
+16,000 pages (each run 1.2 s of CPU idle, up to 2.8 s loaded), 5 runs of
+each side alternated so that load falls on both alike, median of each.
+Twenty runs with a concurrent CPU job (the `core/parse` and `core/render`
+tests in a loop), ten plain and ten under `-tags nostd14`: 1.11–1.33× and
+1.14–1.26×, allocation 1.06× in all. The overhead is a steady ~1.2× (extraction's reading and the slot
+streams of every page searched); the bound is 1.5× like the other gates.
+
+`TestRedactVerifyCostGuard` (20 text pages, a region on page 0, pre-pass and
+verification against neither): the full path took 13.6 ms per call with the
+first implementation against 8.3 ms on `master` — needle search over the
+per-run readings, the slot stream and extraction's reading. Two exact
+optimizations brought it to about 7 ms, below `master`: a 64 Kib prefilter
+bitmap in front of the needle index (a position whose first four bytes
+cannot start a needle skips the map lookup; no false negatives), and the
+pre-pass searches extraction's reading only when some run's part of it may
+have another skeleton than the run's Text reading (`sameSkeleton`: both ASCII
+and equal without white space), since the Text slot stream is searched
+anyway.
+
+### 13.6 What the design got wrong or left open
+
+- §3.2/§4: quote-operator newlines are separators (`NoOwner`), and there is
+  no pending gap (see §3.2 and §4 as corrected).
+- §5.1's cap (4 Mi matches) cannot be reached under the operator budget
+  (§5.1 as corrected); kept as a backstop, tested with a raised budget.
+- §5.3 "once inside `Rewrite`": the needles are not known at the first
+  rewrite of `RedactAndFlatten`; core now takes the area needles from
+  `Page.AreaTexts` and fixes all needles before the first rewrite, so each
+  page is rewritten once.
+- Closure runs when nothing was removed would only repeat the streams just
+  matched; `Match` skips it.
+- Follow-up (open, pre-existing; parser hardening, not 2.6): a `/ToUnicode`
+  `bfchar`/`bfrange` destination has no length cap
+  (`core/internal/fontmodel/cmap.go`), so one `Tj` through a crafted CMap can
+  allocate about 700 MiB before the operator budget refuses the page; it
+  hits `ExtractTextByPage` too. The CMap parser should cap a destination's
+  length (a few hundred bytes covers any ligature or decomposition) and the
+  decoded text per string.
+- Found by the new fuzz target, and present on `master`: content that ends
+  inside a text object (a `BT` with no `ET`) got its black boxes inside the
+  text object, so the output failed the strict re-read
+  (`ErrRedactionVerification`, fail-closed). `Rewrite` now writes `ET`
+  before the boxes in that case.
+- Found by P3 once it stopped ignoring errors, present on `master`, fixed
+  (maintainer decision (a); parent note C85): the verifier searches every
+  object only redacted pages reach for the text removed on *any* page, while
+  extension searched units only for propagating needles, and only their
+  content. A run removed without a needle (a one-character `RedactText`
+  match) whose text a form on another redacted page holds in a comment, and
+  any removed text in an object a unit uses (a form's `/Metadata` or
+  resources, propagating needles included), failed verification
+  (`ErrRedactionVerification`) instead of being refused. The verifier is not
+  narrowed: it searches the same objects the same way and fails on the same
+  hits, but that failure now carries the output and every owned object
+  holding removed text (`ownedHitError`); `RedactAndFlatten` then lists the
+  units each redacted page paints and refuses with the unit's reason
+  (`form_text`, `pattern_text`, `softmask_text`, `type3_text`) when every
+  hit is such a unit or an object one uses, and keeps the verification
+  error otherwise. Attribution runs only on that failure, so the clean path
+  costs nothing more. Corpus outcomes unchanged (6,244, byte-identical to
+  `master`); rows `r2_own_form_*`, `TestRedactExtend_OwnedUnitRefused`,
+  `TestDoS_OwnedAttribution`.

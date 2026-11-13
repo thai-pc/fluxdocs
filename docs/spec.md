@@ -1780,10 +1780,19 @@ B. resource walker every route the page paints through: forms, soft-mask
                    names looked up in every candidate scope; budgeted
 C. text model      per text-showing operator: Unicode readings via the font
                    model, a box that over-approximates every glyph position
-                   (closed intervals; non-finite -> meets every region)
-D. planner         RedactText -> span marks (+ display rects);
+                   (closed intervals; non-finite -> meets every region); per
+                   page: the text as ExtractTextByPage reads it, and as each
+                   other decoding reads it, in content order with an index
+                   map back to the operators
+D. planner         RedactText -> span marks (+ display rects): a match over
+                   the page's text as ExtractTextByPage reads it (content
+                   order, no separator between operators on one line), over
+                   each other decoding, and over each operator alone marks
+                   every operator it touches, whole; removal must not join
+                   neighbours into a new match (closure);
                    RedactArea -> removal regions; automatic extension adds
-                   the other occurrences of the removed text (D4)
+                   the other occurrences of the removed text (D4), also
+                   across operators and line breaks
 E. rewriter        splice out marked runs, runs and non-text paint meeting a
                    region, the paint state only they used; strip /ActualText,
                    /Alt, /E on the page; page-private resources (GC)
@@ -1797,6 +1806,12 @@ G. verifier        re-open the output: strict re-read of redacted pages (no
                    rest for text that propagates -> extend and rebuild (at
                    most 2 more rounds) or fail
 ```
+
+`RedactText` is page-scoped and works in content order: a match never spans
+two pages, and text written out of reading order or placed on one line by the
+CTM is matched in the order the content holds it (geometric reading order is
+step 2.6b of `docs/design/redaction-cross-operator.md`). Line breaks and
+hyphens are not folded: the pattern author writes them, e.g. `SEC-?\s*RET-\d+`.
 
 Annotations are not "matched" against regions: every annotation of a redacted
 page is dropped, property-list text is stripped, and back-references from

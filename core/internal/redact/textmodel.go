@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/thai-pc/fluxdocs/core/internal/textflow"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
@@ -66,6 +67,9 @@ type textRun struct {
 	// /Differences glyph-name reading; for a simple font the one-byte-per-code
 	// reading (fontmodel ByteText); and the raw bytes as Latin-1.
 	texts []string
+	// slot is, per reading slot (stream.go), the index in texts of the
+	// reading the slot uses: the streams join the runs' readings by slot.
+	slot [numSlots]uint8
 	// box is minX, minY, maxX, maxY: everywhere the glyphs can reach, used
 	// for region intersection. nonFinite is set when any coordinate
 	// overflowed or the font cannot be bounded (the run then intersects every
@@ -297,6 +301,25 @@ type interp struct {
 	// settle, when set, interprets the page as Rewrite will write it (see
 	// settler).
 	settle *settler
+
+	// flow, when set (the page of a page model or a TextScanner), is
+	// extraction's reading of the page (textflow), fed every operator in
+	// content order; a page model records it to assemble streams.
+	flow *textflow.Flow
+	// part groups the page model's reading slots into classes of equal
+	// streams (slotPartition).
+	part slotPartition
+	// search, when set (TextScanner: its page, and each unit read for its
+	// text), searches the slot streams of the unit for needles.
+	search *slotSearcher
+	// For a TextScanner page: flowSeg is what the reading wrote for the
+	// text-showing operator being interpreted (pending until show reads its
+	// run), and flowDiffers is set once a run's part of the reading may have
+	// another skeleton than its Text reading (sameSkeleton): only then must
+	// the reading be searched besides the slot streams.
+	flowSeg     string
+	flowPending bool
+	flowDiffers bool
 }
 
 // settler makes a page interpretation follow the rewritten content (Page.
@@ -384,6 +407,11 @@ func (it *interp) run(spans []parse.ContentOpSpan) error {
 	if err := it.w.visit(int64(len(spans))); err != nil {
 		return err
 	}
+	if it.page == nil && it.w.texts != nil && it.w.needles.Len() > 0 && !testHooks.noStreams {
+		// A unit read for its text: a needle split across its operators is
+		// shown through it too.
+		it.search = newSlotSearcher(it.w.needles)
+	}
 	for i := range spans {
 		if it.page != nil {
 			it.idx = i
@@ -400,6 +428,9 @@ func (it *interp) run(spans []parse.ContentOpSpan) error {
 			}
 		}
 	}
+	if it.page == nil && it.search != nil && it.search.done() && it.w.unitHit != nil {
+		it.w.unitHit(it.kind, it.num)
+	}
 	return it.w.budgetErr
 }
 
@@ -415,6 +446,11 @@ func (it *interp) shows() error {
 // count and the types of the operands used here (parse.operandsFit).
 func (it *interp) op(s *parse.ContentOpSpan) error {
 	o := s.Operands
+	if it.flow != nil {
+		if err := it.read(s); err != nil {
+			return err
+		}
+	}
 	if it.w.lenient && s.Op == "BI" {
 		// A lenient inline image (ScanContentSpansWithInlineImages): its
 		// named colour space is a resource the page paints with.
@@ -667,6 +703,69 @@ func (it *interp) op(s *parse.ContentOpSpan) error {
 		return it.show(s, o[0].(parse.Array), nil)
 	}
 	return nil
+}
+
+// read feeds one operator to extraction's reading of the page (it.flow), the
+// text it writes charged to its own budget (maxFlowBytes). In a page model a
+// text-showing operator is owned by the run show adds for it; nothing else
+// is owned. The reading sees every operator, as extraction does: a lenient
+// span this interpretation skips included.
+func (it *interp) read(s *parse.ContentOpSpan) error {
+	owner := textflow.NoOwner
+	shows := false
+	switch s.Op {
+	case "Tj", "TJ", "'", "\"":
+		shows = true
+		if it.page != nil && it.w.pageText == nil {
+			owner = int32(len(it.page.runs))
+		}
+	}
+	it.flowSettle()
+	before := len(it.flow.String())
+	it.flow.Apply(s.Op, s.Operands, owner)
+	after := len(it.flow.String())
+	if shows && it.w.pageText != nil {
+		it.flowSeg, it.flowPending = it.flow.String()[before:after], true
+	}
+	if n := after - before; n > 0 {
+		return it.w.flowText(int64(n))
+	}
+	return nil
+}
+
+// flowSettle ends a pending reading segment that no run read (a lenient span
+// the interpretation skipped): if it wrote text, the reading differs.
+func (it *interp) flowSettle() {
+	if it.flowPending && it.flowSeg != "" {
+		it.flowDiffers = true
+	}
+	it.flowPending = false
+}
+
+// sameSkeleton reports whether a and b are ASCII and equal once white space
+// is removed: then their skeletons (and those of any texts they are joined
+// into the same way) are equal.
+func sameSkeleton(a string, b []byte) bool {
+	i, j := 0, 0
+	for {
+		for i < len(a) && isASCIISpace(a[i]) {
+			i++
+		}
+		for j < len(b) && isASCIISpace(b[j]) {
+			j++
+		}
+		if i == len(a) || j == len(b) {
+			return i == len(a) && j == len(b)
+		}
+		if a[i] >= utf8.RuneSelf || a[i] != b[j] {
+			return false
+		}
+		i, j = i+1, j+1
+	}
+}
+
+func isASCIISpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
 // noteInlineColorSpace notes the colour space names an inline image's
@@ -1102,6 +1201,16 @@ func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object
 	if err := it.w.visit(charge); err != nil {
 		return err
 	}
+	if it.search != nil {
+		v := it.rb.slots(nRead, len(fs))
+		it.search.add(&v, func(slot int) []byte { return reads[v[slot]] })
+	}
+	if it.flowPending {
+		if !sameSkeleton(it.flowSeg, reads[0]) {
+			it.flowDiffers = true
+		}
+		it.flowPending = false
+	}
 	if collect {
 		it.w.texts(it.kind, it.num, it.rb.texts(nRead))
 		return nil
@@ -1117,15 +1226,19 @@ func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object
 			}
 			return nil
 		}
+		texts, slot := it.rb.textsAndSlots(nRead, len(fs))
+		it.part.refine(&slot, nil)
 		it.page.runs = append(it.page.runs, textRun{span: it.idx, start: s.Start, end: s.End,
-			texts: it.rb.texts(nRead), epoch: it.epoch})
+			texts: texts, slot: slot, epoch: it.epoch})
 		return nil
 	}
 	if !has {
 		note(it.penX, it.penY) // no glyphs: the run is a point at the pen
 	}
 
-	run := textRun{span: it.idx, start: s.Start, end: s.End, texts: it.rb.texts(nRead), use: it.textState(),
+	texts, slot := it.rb.textsAndSlots(nRead, len(fs))
+	it.part.refine(&slot, nil)
+	run := textRun{span: it.idx, start: s.Start, end: s.End, texts: texts, slot: slot, use: it.textState(),
 		epoch: it.epoch}
 
 	// Glyph ink around each origin, in text space (§6.6): x from the

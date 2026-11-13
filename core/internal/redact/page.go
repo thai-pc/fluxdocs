@@ -7,7 +7,9 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strings"
 
+	"github.com/thai-pc/fluxdocs/core/internal/textflow"
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
 
@@ -47,6 +49,11 @@ type Page struct {
 	decoded int64 // bytes the analysis decoded
 	// unitHidden is what the units the page paints hold but do not show.
 	unitHidden []hiddenText
+	// ts are the page's text streams (stream.go); nil for a page read for
+	// its text only (TextScanner), whose streams are searched as they are
+	// read: streamHit is then whether one held a needle.
+	ts        *pageStreams
+	streamHit bool
 }
 
 // Mark is a planned change to one operator of a page's content that applies
@@ -76,6 +83,8 @@ type Match struct {
 	// Needles are the matched substrings, for automatic plan extension
 	// (§6.11, step 1.13). They are document text: never log them.
 	Needles []string
+	// Rounds is how many closure rounds removed more runs (diagnostics).
+	Rounds int
 }
 
 // AnalyzePage builds the redaction model of a page. content is the page's
@@ -121,11 +130,47 @@ func analyzePage(w *walker, pi parse.PageInfo, content parse.ContentSegments) (*
 			Width: math.Abs(mb.URX - mb.LLX), Height: math.Abs(mb.URY - mb.LLY)},
 	}
 	it := &interp{w: w, kind: unitPage, sc: sc, page: p}
+	// Extraction's reading of the page, its fonts bound as extraction binds
+	// them (the page's /Font entries; a missing or unreadable one decodes as
+	// Latin-1). A font it selects is always one the text model also loaded
+	// (the innermost binding of the same Tf), so it costs no extra load.
+	if !testHooks.noStreams {
+		it.flow = textflow.New(textflow.PageFonts(r, pi.Resources, w.font))
+		switch {
+		case w.pageText == nil:
+			it.flow.Record()
+		case w.needles.Len() > 0:
+			it.search = newSlotSearcher(w.needles)
+		}
+	}
 	if err := it.run(spans); err != nil {
 		return nil, err
 	}
 	p.decoded = w.decoded
 	p.unitHidden = w.hidden
+	if it.flow == nil {
+		return p, nil
+	}
+	if w.pageText != nil {
+		// Extraction's reading is searched only where it may differ from
+		// the Text slot stream, which the slot search covers.
+		it.flowSettle()
+		p.streamHit = it.search != nil && it.search.done() ||
+			it.flowDiffers && w.needles.FindText(it.flow.String()) != 0
+		return p, nil
+	}
+	events, ok := it.flow.Events()
+	if !ok {
+		return nil, budget("text matching")
+	}
+	p.ts = &pageStreams{flowText: it.flow.String(), events: events, part: it.part}
+	// The extraction stream of the whole page is the Flow's own reading
+	// (textflow.Replay of everything equals it).
+	base, err := p.ts.build(p.runs, nil, it.flow.Owned())
+	if err != nil {
+		return nil, err
+	}
+	p.ts.base = base
 	return p, nil
 }
 
@@ -146,12 +191,13 @@ func (p *Page) HasPropertyText() bool {
 // Size estimates the memory the model holds: its content, its operators and
 // their operands (strings, and every element of an array or dictionary), its
 // runs and their readings, its property lists, paint items and state
-// operators, and its units' hidden text.
+// operators, its units' hidden text, and its text streams (the recorded
+// extraction reading and each distinct stream with its index map).
 func (p *Page) Size() int64 {
 	n := int64(len(p.content)) + 160*int64(len(p.spans)) + 96*int64(len(p.props)) +
 		128*int64(len(p.items)) + 64*int64(len(p.states))
 	for _, r := range p.runs {
-		n += 160
+		n += 192 // the run, its slot table included
 		for _, t := range r.texts {
 			n += 16 + int64(len(t))
 		}
@@ -163,6 +209,9 @@ func (p *Page) Size() int64 {
 	}
 	for _, h := range p.unitHidden {
 		n += 48 + int64(len(h.text))
+	}
+	if p.ts != nil {
+		n += p.ts.size()
 	}
 	return n
 }
@@ -401,28 +450,58 @@ func pageID(r *parse.Resolver, pi parse.PageInfo) pageKey {
 }
 
 // Match plans the removal of every text that pattern matches on the page
-// (§6.5, D12, D14):
+// (§6.5, D12, D14; docs/design/redaction-cross-operator.md §5.1):
 //   - a run (one text-showing operator; a TJ's strings at every nesting depth
 //     concatenated) whose text, in any of its readings, matches: the run is
 //     span-marked and its box returned;
+//   - a match in one of the page's text streams — the page's text in content
+//     order as ExtractTextByPage reads it, and as each reading slot reads
+//     it, operators on one line joined with no separator (stream.go) —:
+//     every run the match touches is span-marked, and its box returned (one
+//     per run);
 //   - a BDC or DP property list whose /ActualText, /Alt or /E text matches:
 //     that key is stripped (a mark), every run inside the BDC…EMC sequence is
 //     span-marked, and the union of their boxes is returned. A matched list
 //     marks the page even when the sequence holds no runs.
 //
-// An empty text never matches.
-func (p *Page) Match(pattern *regexp.Regexp) Match {
+// Removing runs joins their neighbours: the streams are matched again
+// without the marked runs, and the runs a new match touches are marked too,
+// until no match is new (closure, §5.3). An empty text never matches. Each
+// matched substring of 4 or more skeleton characters is a needle; matches
+// found only by closure are not (the source never showed them contiguously).
+//
+// Returns a *Refusal (budget_exceeded, "text matching") when a stream holds
+// more than maxStreamMatches matches, the call scans more than maxMatchWork
+// stream bytes for the pattern, or closure has not settled after
+// maxMatchRounds rounds; the Match is then empty.
+func (p *Page) Match(pattern *regexp.Regexp) (Match, error) {
 	var m Match
-	for _, r := range p.runs {
+	seen := map[string]bool{}
+	addNeedle := func(t string) {
+		if seen[t] {
+			return
+		}
+		seen[t] = true
+		if SkeletonLen(Skeleton(t)) >= MinMatchNeedle {
+			m.Needles = append(m.Needles, strings.Clone(t))
+		}
+	}
+	marked := newBits(len(p.runs))
+	for i, r := range p.runs {
 		matched := false
 		for _, t := range r.texts {
 			if t == "" || !pattern.MatchString(t) {
 				continue
 			}
 			matched = true
-			m.Needles = appendNeedles(m.Needles, pattern, t)
+			for _, s := range pattern.FindAllString(t, -1) {
+				if s != "" {
+					addNeedle(s)
+				}
+			}
 		}
 		if matched {
+			marked.set(i)
 			m.Marks = append(m.Marks, Mark{page: p.id, start: r.start, end: r.end})
 			m.Rects = append(m.Rects, p.runRect(r))
 		}
@@ -434,7 +513,11 @@ func (p *Page) Match(pattern *regexp.Regexp) Match {
 			for _, t := range pl.texts[k] {
 				if t != "" && pattern.MatchString(t) {
 					hit = true
-					m.Needles = appendNeedles(m.Needles, pattern, t)
+					for _, s := range pattern.FindAllString(t, -1) {
+						if s != "" {
+							addNeedle(s)
+						}
+					}
 				}
 			}
 			if hit {
@@ -447,6 +530,7 @@ func (p *Page) Match(pattern *regexp.Regexp) Match {
 		}
 		var union Rect
 		for i, r := range p.runs[pl.firstRun:pl.endRun] {
+			marked.set(pl.firstRun + i)
 			m.Marks = append(m.Marks, Mark{page: p.id, start: r.start, end: r.end})
 			if rc := p.runRect(r); i == 0 {
 				union = rc
@@ -456,17 +540,45 @@ func (p *Page) Match(pattern *regexp.Regexp) Match {
 		}
 		m.Rects = append(m.Rects, union)
 	}
-	return m
-}
-
-// appendNeedles appends every non-empty substring of t that pattern matches.
-func appendNeedles(dst []string, pattern *regexp.Regexp, t string) []string {
-	for _, s := range pattern.FindAllString(t, -1) {
-		if s != "" {
-			dst = append(dst, s)
+	if !p.streamsOn() {
+		return m, nil
+	}
+	// The runs marked so far have their marks and boxes; the streams and
+	// closure add the others, in run order.
+	removed := marked.clone()
+	mt := newMatcher(1)
+	someRemoved := false
+	for i := range marked {
+		someRemoved = someRemoved || marked[i] != 0
+	}
+	if err := mt.matchStreams(0, p.ts.base, pattern, func(run int) { removed.set(run); someRemoved = true }, addNeedle); err != nil {
+		return Match{}, err
+	}
+	// Closure only when something is removed: otherwise the streams are the
+	// ones just matched.
+	for round := 0; someRemoved; round++ {
+		more, err := p.closureRound(mt, removed, []*regexp.Regexp{pattern}, nil)
+		if err != nil {
+			return Match{}, err
+		}
+		if len(more) == 0 {
+			break
+		}
+		if round == maxMatchRounds {
+			return Match{}, budget("text matching")
+		}
+		for _, i := range more {
+			removed.set(i)
+		}
+		m.Rounds++
+	}
+	for i, r := range p.runs {
+		if removed.has(i) && !marked.has(i) {
+			m.Marks = append(m.Marks, Mark{page: p.id, start: r.start, end: r.end})
+			m.Rects = append(m.Rects, p.runRect(r))
 		}
 	}
-	return dst
+	return m, nil
 }
 
 // runRect is a run's display box as a Rect, or the page's MediaBox when the
@@ -551,11 +663,62 @@ type Output struct {
 	// (FindNeedles skips them). Runs removed because removing others moved
 	// them into a region are not: more removals may move them out again.
 	planned []uint64
+	// removed are all the spans the rewrite removed (ExtractionAfter).
+	removed []uint64
+}
+
+// RewritePlan is what Rewrite removes from a page and paints on it.
+type RewritePlan struct {
+	// Regions are the removal regions (normalized by Rewrite).
+	Regions []Rect
+	// Boxes are the black rectangles painted over the page (display only).
+	Boxes []Rect
+	// Marks are the span marks (Match, FindNeedles).
+	Marks []Mark
+	// Patterns and Needles are matched again once everything else is
+	// removed (closure, docs/design/redaction-cross-operator.md §5.3): the
+	// page's RedactText patterns and the propagating needles. A run that a
+	// match or a needle occurrence touches in the page's streams without the
+	// removed runs is removed too, and its display box painted, until
+	// nothing new is found: removing runs must not join their neighbours
+	// into text the plan removes.
+	Patterns []*regexp.Regexp
+	Needles  *Needles
+}
+
+// AreaTexts returns the readings of the runs that meet any of regions
+// (normalized first) and that no span mark of marks names: the text removed
+// only because it met a region where the source places it (Output.AreaTexts,
+// which Rewrite returns for the same regions and marks). Marks not made on
+// this page are ignored.
+func (p *Page) AreaTexts(regions []Rect, marks []Mark) []string {
+	norm := make([]Rect, len(regions))
+	for i, rc := range regions {
+		norm[i] = normalize(rc)
+	}
+	marked := make([]uint64, (len(p.spans)+63)/64)
+	for _, mk := range marks {
+		if mk.page != p.id || mk.strip != "" {
+			continue
+		}
+		if i, ok := p.spanAt(mk.start, mk.end); ok {
+			marked[i/64] |= 1 << (i % 64)
+		}
+	}
+	var out []string
+	for _, r := range p.runs {
+		if r.meetsAny(norm) && marked[r.span/64]&(1<<(r.span%64)) == 0 {
+			out = append(out, r.texts...)
+		}
+	}
+	return out
 }
 
 // Rewrite returns the page with:
 //   - every run a mark names, or whose box meets any of regions (normalized
 //     first), removed;
+//   - every run closure adds (RewritePlan.Patterns and Needles) removed, its
+//     display box painted;
 //   - everything else it paints that meets a region removed (§6.10, D5): an
 //     image XObject or a text-free form (Do), an inline image (BI … EI), a
 //     painted path (its construction operators and painting operator; a path
@@ -572,8 +735,11 @@ type Output struct {
 // so later text keeps its place.
 //
 // Returns an error wrapping ErrMarkMismatch, and no output, if a mark was not
-// made on this page; or a resolve error for the resources.
-func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
+// made on this page; a *Refusal (budget_exceeded, "text matching") when
+// closure exceeds its budgets (see Match); or a resolve error for the
+// resources.
+func (p *Page) Rewrite(plan RewritePlan) (Output, error) {
+	regions, boxes, marks := plan.Regions, plan.Boxes, plan.Marks
 	// remove marks the spans to remove (a bitset: a hostile page may have
 	// millions); with holds the replacements other than removal.
 	remove := make([]uint64, (len(p.spans)+63)/64)
@@ -624,6 +790,48 @@ func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
 		}
 		for _, i := range extra {
 			del(i)
+		}
+	}
+	if p.streamsOn() && (len(plan.Patterns) > 0 || plan.Needles.Len() > 0) {
+		mt := newMatcher(len(plan.Patterns))
+		for round := 0; ; round++ {
+			removed := newBits(len(p.runs))
+			someRemoved := false
+			for i, r := range p.runs {
+				if isDel(r.span) {
+					removed.set(i)
+					someRemoved = true
+				}
+			}
+			if !someRemoved {
+				// The streams are the page's own, which Match and the
+				// pre-pass have searched: nothing joins.
+				break
+			}
+			more, err := p.closureRound(mt, removed, plan.Patterns, plan.Needles)
+			if err != nil {
+				return Output{}, err
+			}
+			if len(more) == 0 {
+				break
+			}
+			if round == maxMatchRounds {
+				return Output{}, budget("text matching")
+			}
+			for _, i := range more {
+				del(p.runs[i].span)
+				boxes = append(boxes[:len(boxes):len(boxes)], p.runRect(p.runs[i]))
+			}
+			// The runs removed move the later runs of their epochs.
+			if len(norm) > 0 && p.needsSettle(isDel) {
+				extra, err := p.settle(norm, isDel)
+				if err != nil {
+					return Output{}, err
+				}
+				for _, i := range extra {
+					del(i)
+				}
+			}
 		}
 	}
 	// keep marks the state-setting operators a surviving paint consumes.
@@ -742,6 +950,11 @@ func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
 		prev = s.End
 	}
 	writeGap(&b, p.content[prev:])
+	if len(boxes) > 0 && p.endsInText() {
+		// Content may end inside a text object; a path there is out of
+		// place, so the boxes would make the output unreadable strictly.
+		b.WriteString("\nET")
+	}
 	for _, r := range boxes {
 		writeBlackRect(&b, r)
 	}
@@ -767,6 +980,7 @@ func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
 		out.AreaTexts = append(out.AreaTexts, r.texts...)
 	}
 	out.planned = planned
+	out.removed = remove
 	for _, r := range p.runs {
 		if !isDel(r.span) {
 			continue
@@ -781,6 +995,20 @@ func (p *Page) Rewrite(regions, boxes []Rect, marks []Mark) (Output, error) {
 		}
 	}
 	return out, nil
+}
+
+// endsInText reports whether the page's content ends inside a text object
+// (a BT with no ET after it).
+func (p *Page) endsInText() bool {
+	for i := len(p.spans) - 1; i >= 0; i-- {
+		switch p.spans[i].Op {
+		case "BT":
+			return true
+		case "ET":
+			return false
+		}
+	}
+	return false
 }
 
 // appendStrings appends the bytes of every string in o, at any depth up to a
@@ -1132,34 +1360,59 @@ type NeedleHit struct {
 }
 
 // FindNeedles plans the removal of every run of the page whose text, in any
-// reading, holds a needle, and the stripping of every property-list text key
-// that holds one (automatic plan extension, §6.11): span marks, and the hits
-// with their display boxes. A matched list's runs are not removed: the
-// needle is in the key, which is stripped. When done (a rewrite of the page)
-// is set, the runs it removed by a mark or a region — removed by any
-// rewrite with more marks — and every property list (a rewritten page strips
-// them all, D7) are skipped; done may be nil.
-func (p *Page) FindNeedles(n *Needles, done *Output) ([]Mark, []NeedleHit) {
+// reading, holds a needle, or that an occurrence of a needle in one of the
+// page's text streams touches (docs/design/redaction-cross-operator.md §5.2:
+// a needle split across operators, or wrapped onto the next line, is found
+// too), and the stripping of every property-list text key that holds one
+// (automatic plan extension, §6.11): span marks, and the hits with their
+// display boxes, one per run in run order. A matched list's runs are not
+// removed: the needle is in the key, which is stripped. When done (a rewrite
+// of the page) is set, the runs it removed by a mark or a region — removed by
+// any rewrite with more marks — are skipped and left out of the streams, and
+// every property list (a rewritten page strips them all, D7) is skipped; done
+// may be nil.
+//
+// Returns a *Refusal (budget_exceeded, "text matching") when the stream
+// search exceeds its budget (see Match); the marks are then nil.
+func (p *Page) FindNeedles(n *Needles, done *Output) ([]Mark, []NeedleHit, error) {
 	var marks []Mark
 	var hits []NeedleHit
 	if n.Len() == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	for _, r := range p.runs {
-		if done != nil && done.planned[r.span/64]&(1<<(r.span%64)) != 0 {
+	planned := func(r *textRun) bool {
+		return done != nil && done.planned[r.span/64]&(1<<(r.span%64)) != 0
+	}
+	tags := make([]uint8, len(p.runs))
+	for i := range p.runs {
+		r := &p.runs[i]
+		if planned(r) {
 			continue
 		}
-		var tags uint8
 		for _, t := range r.texts {
-			tags |= n.FindText(t)
+			tags[i] |= n.FindText(t)
 		}
-		if tags != 0 {
+	}
+	if p.streamsOn() {
+		streams := p.ts.base
+		if done != nil {
+			var err error
+			if streams, err = p.assemble(func(i int) bool { return !planned(&p.runs[i]) }); err != nil {
+				return nil, nil, err
+			}
+		}
+		if err := newMatcher(0).needleStreams(streams, n, func(run int, t uint8) { tags[run] |= t }); err != nil {
+			return nil, nil, err
+		}
+	}
+	for i, r := range p.runs {
+		if tags[i] != 0 {
 			marks = append(marks, Mark{page: p.id, start: r.start, end: r.end})
-			hits = append(hits, NeedleHit{Tags: tags, Rect: p.runRect(r)})
+			hits = append(hits, NeedleHit{Tags: tags[i], Rect: p.runRect(r)})
 		}
 	}
 	if done != nil {
-		return marks, hits
+		return marks, hits, nil
 	}
 	for _, pl := range p.props {
 		for _, k := range textKeys {
@@ -1173,7 +1426,84 @@ func (p *Page) FindNeedles(n *Needles, done *Output) ([]Mark, []NeedleHit) {
 			}
 		}
 	}
-	return marks, hits
+	return marks, hits, nil
+}
+
+// StreamCount is the number of distinct text streams the model holds
+// (diagnostics; at most numSlots + 1).
+func (p *Page) StreamCount() int {
+	if p.ts == nil {
+		return 0
+	}
+	return len(p.ts.base)
+}
+
+// ExtractionText is the page's text as ExtractTextByPage reads it, read with
+// the page model (its extraction stream). It equals ExtractTextByPage for
+// every page the model accepts (property P1, docs/design/redaction-cross-
+// operator.md §10.3); "" for a page read for its text only.
+func (p *Page) ExtractionText() string {
+	if p.ts == nil {
+		return ""
+	}
+	return p.ts.flowText
+}
+
+// ExtractionRuns returns, in order, the runs (indices into the page's runs)
+// that own a byte of ExtractionText()[a:b]: what a match there marks.
+func (p *Page) ExtractionRuns(a, b int) []int {
+	if p.ts == nil || len(p.ts.base) == 0 {
+		return nil
+	}
+	var out []int
+	p.ts.base[0].owners(a, b, func(run int) {
+		if n := len(out); n == 0 || out[n-1] != run {
+			out = append(out, run)
+		}
+	})
+	return out
+}
+
+// MarkedRuns returns the runs the span marks name (marks of another page,
+// and property-list marks, name none), in run order.
+func (p *Page) MarkedRuns(marks []Mark) []int {
+	set := newBits(len(p.runs))
+	for _, mk := range marks {
+		if mk.page != p.id || mk.strip != "" {
+			continue
+		}
+		sp, ok := p.spanAt(mk.start, mk.end)
+		if !ok {
+			continue
+		}
+		if i := sort.Search(len(p.runs), func(i int) bool { return p.runs[i].span >= sp }); i < len(p.runs) && p.runs[i].span == sp {
+			set.set(i)
+		}
+	}
+	var out []int
+	for i := range p.runs {
+		if set.has(i) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// ExtractionAfter is the page's extraction stream with every run out (a
+// rewrite of this page) removed left out: what ExtractTextByPage reads from
+// the rewritten page (property P3).
+func (p *Page) ExtractionAfter(out Output) (string, error) {
+	if p.ts == nil {
+		return "", nil
+	}
+	streams, err := p.ts.assemble(p.runs, func(i int) bool {
+		sp := p.runs[i].span
+		return out.removed == nil || out.removed[sp/64]&(1<<(sp%64)) == 0
+	})
+	if err != nil || len(streams) == 0 {
+		return "", err
+	}
+	return streams[0].text, nil
 }
 
 // spanAt returns the index of the span [start, end), if the page has one.

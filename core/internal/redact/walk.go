@@ -89,7 +89,20 @@ const (
 	// memory a hostile page costs too. It matches the renderer's default
 	// operator budget; the largest page of a 3,100-page corpus needs 0.56 Mi
 	// (docs/design/redaction-hardening.md, batch C notes, C27).
-	maxOpVisits    = 8 << 20
+	maxOpVisits = 8 << 20
+	// maxFlowBytes bounds the text extraction's reading of the page
+	// (textflow) writes. It is its own allowance, not maxOpVisits', so a page
+	// has the operator room it had before step 2.6. Where extraction's font
+	// is the run's first candidate — always, unless a Tf inside q…Q stays
+	// selected for extraction past the Q, or a gs /Font (which extraction
+	// ignores) selects another — the reading is the runs' extraction
+	// readings, already charged to maxOpVisits, plus a newline per line
+	// operator: it stays under this bound on every page the operator budget
+	// accepts. Elsewhere it is a reading of a font the run does not use, which
+	// nothing else bounds. The steps it records are at most twice the
+	// operators plus these bytes (textflow.Flow.event), so they are bounded
+	// too.
+	maxFlowBytes   = maxOpVisits
 	maxUnitDepth   = 12      // nesting of units below the page (render/form.go)
 	maxInvocations = 4096    // form, soft-mask group and pattern invocations
 	maxGlyphProcs  = 1 << 20 // Type 3 glyph procedures walked
@@ -157,14 +170,14 @@ type memoKey struct {
 
 // limits are the walk budgets; tests lower them.
 type limits struct {
-	decoded, ops       int64
+	decoded, ops, flow int64
 	depth, invocations int
 	glyphProcs         int
 }
 
 // defaultLimits are the budgets of a page call.
 var defaultLimits = limits{
-	decoded: maxDecodedBytes, ops: maxOpVisits, depth: maxUnitDepth,
+	decoded: maxDecodedBytes, ops: maxOpVisits, flow: maxFlowBytes, depth: maxUnitDepth,
 	invocations: maxInvocations, glyphProcs: maxGlyphProcs,
 }
 
@@ -175,6 +188,7 @@ type walker struct {
 
 	decoded     int64 // bytes decoded (maxDecodedBytes)
 	ops         int64 // operator visits (maxOpVisits)
+	flow        int64 // bytes of extraction's reading (maxFlowBytes)
 	invocations int   // maxInvocations
 	glyphProcs  int   // maxGlyphProcs
 	budgetErr   error // a budget hit while decoding a font stream
@@ -204,6 +218,12 @@ type walker struct {
 	// run the page itself shows (the buffer is reused: it must not be
 	// kept), instead of the page model keeping the run.
 	pageText func(reading []byte)
+	// needles and unitHit, when set with texts (TextScanner), search each
+	// unit's slot streams — its runs' readings joined in content order —
+	// for needles, and receive each unit in which one occurs: a needle split
+	// across two operators of a unit is shown through it like a whole one.
+	needles *Needles
+	unitHit func(kind unitKind, num int)
 	// hidden collects what each unit walked holds but does not show
 	// (forHidden), for Page.UnitHidden; not collected by a Painter.
 	hidden []hiddenText
@@ -471,6 +491,15 @@ func (w *walker) visit(n int64) error {
 	w.ops += n
 	if w.ops > w.lim.ops {
 		return budget("operator")
+	}
+	return nil
+}
+
+// flowText counts n bytes extraction's reading wrote against maxFlowBytes.
+func (w *walker) flowText(n int64) error {
+	w.flow += n
+	if w.flow > w.lim.flow {
+		return budget("text reading")
 	}
 	return nil
 }

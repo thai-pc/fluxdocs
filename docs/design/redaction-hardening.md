@@ -5,10 +5,14 @@ f325e25), batch D (steps 1.12–1.14, the end of Phase 1) in review (review
 rounds 1 and 2 applied: C71–C84). Base:
 `master` at 446eaea (design). Batch A baselines: 71de860; batch B baselines:
 cbf7348; batch C baselines: 13121d9; batch D baselines: f325e25.
-Tier: **Pro** for the redaction engine (`core/internal/redact` since step 1.8,
-C25; `core/redact.go`, `core/pii.go`). It also touches **Core (MIT)** code in `core/parse` (strict
-scanner, copier) and a new shared font model, which Core callers (render,
-extract, merge/split) also see. No CGO. No build tags.
+Tier: **Core (MIT)** for the redaction engine (`core/internal/redact` since
+step 1.8, C25; `core/redact.go`, `core/pii.go`), like everything in this
+repository (`.claude/CLAUDE.md` §2; this note's earlier "Pro" label predates
+that decision, and later "Pro" mentions below are historical). It also
+touches Core code in `core/parse` (strict scanner, copier), a shared font
+model and, from step 2.6, `core/internal/textflow` (extraction's text
+reading), which Core callers (render, extract, merge/split) also see. No CGO.
+No build tags.
 Spec basis: ISO 32000-1:2008 only (section numbers below). Clean-room: viewer
 behaviour is treated as black-box output (Ghostscript `txtwrite` repros), never
 read from any viewer's source.
@@ -1464,7 +1468,7 @@ Exit criteria for Phase 1:
 | 2.3 | COW rewrite of forms, soft-mask groups, tiling patterns and Type 3 char procs (§5.5, §6.3); `ReplaceResources`. This makes D4 extensions into such units possible, where Phase 1 refuses them | 3, D4 |
 | 2.4 | Property-list matching *inside rewritten units* (forms, patterns, groups; the page-content part moved to Phase 1 step 1.6 by D14); metadata policy option; COW'd `/Metadata` dropped | 7 |
 | 2.5 | Glyph-level partial removal with collapsed adjustments (§6.8); area needles shrink to the glyphs inside the rect | 8, D6, D4 |
-| 2.6 | Matching across operators on a line (page-level glyph stream with index → (unit, span, glyph) map). Design: `docs/design/redaction-cross-operator.md` (extraction-order streams per reading slot, whole-operator removal, closure re-matching; no dependency on 2.2 or 2.5; geometric order proposed as 2.6b) | N1 |
+| 2.6 | Matching across operators on a line (page-level glyph stream with index → (unit, span, glyph) map). Design: `docs/design/redaction-cross-operator.md` (extraction-order streams per reading slot, whole-operator removal, closure re-matching; no dependency on 2.2 or 2.5; geometric order proposed as 2.6b). **Implemented**; results in that note's §13 | N1 |
 | 2.7 | Widen D15 with full decoding: A85, DCT (decode and check dimensions), LZW and RL consuming decoders, and Cal*/Lab/ICCBased/Separation/DeviceN colour spaces fully validated. Each widening needs gs + differential repros showing no T5 fall-back. Inline image → XObject normalization on marked pages | 1, D15 |
 | 2.8 | Pixel-level image redaction (D5 phase 2) | D5 |
 | 2.9 | `RedactAndFlattenWithOptions` (P4, P5), returning the P8 report extended with per-page counts | P4, P5 |

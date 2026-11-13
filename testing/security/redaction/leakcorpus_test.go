@@ -60,6 +60,7 @@ type leakCase struct {
 	reason   string // refuse: the expected reason, alternatives separated by '|'
 	closesIn string // knownLeak: the step that closes it -> its outcome then
 	gsBlind  bool   // clean: Ghostscript does not show the secret even in the input
+	pattern  string // opText: the RedactText pattern; "" is textPattern
 }
 
 // textPattern is the RedactText pattern of every opText row.
@@ -106,7 +107,11 @@ func apply(t *testing.T, lc leakCase, op leakOp) leakRun {
 	r.doc = doc
 	switch op {
 	case opText:
-		_, r.markErr = doc.RedactText(0, textPattern)
+		pattern := textPattern
+		if lc.pattern != "" {
+			pattern = lc.pattern
+		}
+		_, r.markErr = doc.RedactText(0, pattern)
 	case opArea:
 		area := core.Rect{X: 0, Y: 0, Width: 400, Height: 800}
 		if lc.area != nil {
