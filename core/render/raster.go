@@ -253,7 +253,19 @@ func fillStartRow(ymin float64, y0, y1 int) int {
 
 // fillPath fills the subpaths (already in device space) with col, using the
 // even-odd rule when evenOdd is true, otherwise the nonzero winding rule. It is
-// a scanline fill sampling at pixel-row centers.
+// a scanline fill sampling at pixel-row centers: scanPath finds the spans, and
+// span paints them (rounded to pixels, clipped, charged by width).
+func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
+	r.scanPath(subpaths, evenOdd, 0, r.h, func(x0, x1 float64, y int) { r.span(x0, x1, y, col) })
+}
+
+// scanPath is the scanline shared by fillPath and the clip-mask builder
+// (docs/design/clipping-paths.md §3.3): it walks the rows of [rowLo, rowHi)
+// (clamped to the path's own rows) that the subpaths cover and calls emit for
+// each inside span (x0, x1) of row y under the winding rule, in increasing x.
+// The spans are unrounded; spanPixels turns one into pixel columns. Fill and
+// clip share it, so a clip path's pixels are exactly the pixels fill would
+// paint for the same path (§2.1). rowLo and rowHi must lie in [0, r.h].
 //
 // Edges are ordered by the row they enter on and kept in an active-edge table,
 // so each row examines only the edges that cross it — about O(E + rows +
@@ -268,8 +280,9 @@ func fillStartRow(ymin float64, y0, y1 int) int {
 // spans charge their widths. Scratch memory is ≈ 20 bytes per point (edge
 // reference, entry row, order, active index) plus 16 bytes per crossing on the
 // widest row, each buffer sized once, so a path at the maxPathPoints cap
-// allocates no doubling garbage.
-func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
+// allocates no doubling garbage. emit may charge the budget (span charges the
+// span's width); the scan stops after the row on which the budget stops.
+func (r *raster) scanPath(subpaths [][]point, evenOdd bool, rowLo, rowHi int, emit func(x0, x1 float64, y int)) {
 	if len(subpaths) == 0 || r.b.stopped() {
 		return
 	}
@@ -295,8 +308,8 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 	}
 	// Clamp in float64 before converting (see clampToInt), so a huge path
 	// covers the same rows on every target.
-	y0 := clampToInt(math.Floor(minY), 0, float64(r.h))
-	y1 := clampToInt(math.Ceil(maxY), 0, float64(r.h))
+	y0 := clampToInt(math.Floor(minY), float64(rowLo), float64(rowHi))
+	y1 := clampToInt(math.Ceil(maxY), float64(rowLo), float64(rowHi))
 	if y0 >= y1 {
 		return
 	}
@@ -392,8 +405,11 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 			// Inf−Inf = NaN.
 			x := a.X
 			if b.X != a.X {
+				// The explicit conversion forbids fusing the product into a
+				// multiply-add (arm64 would; amd64 and wasm do not), so every
+				// target computes the same crossing (§7 of the clipping design).
 				t := (sy - a.Y) / (b.Y - a.Y)
-				x = a.X + t*(b.X-a.X)
+				x = a.X + float64(t*(b.X-a.X))
 			}
 			if math.IsNaN(x) {
 				located = false
@@ -424,14 +440,14 @@ func (r *raster) fillPath(subpaths [][]point, col color.RGBA, evenOdd bool) {
 
 		if evenOdd {
 			for i := 0; i+1 < len(xs); i += 2 {
-				r.span(xs[i].x, xs[i+1].x, y, col)
+				emit(xs[i].x, xs[i+1].x, y)
 			}
 		} else {
 			wind := 0
 			for i := 0; i+1 < len(xs); i++ {
 				wind += int(xs[i].dir)
 				if wind != 0 {
-					r.span(xs[i].x, xs[i+1].x, y, col)
+					emit(xs[i].x, xs[i+1].x, y)
 				}
 			}
 		}
@@ -448,18 +464,27 @@ func (r *raster) span(x0, x1 float64, y int, col color.RGBA) {
 	if y < r.clip.y0 || y >= r.clip.y1 {
 		return
 	}
-	if math.IsNaN(x0) || math.IsNaN(x1) {
-		return
-	}
-	lo, hi := float64(r.clip.x0), float64(r.clip.x1)
-	ix0 := clampToInt(math.Round(x0), lo, hi)
-	ix1 := clampToInt(math.Round(x1), lo, hi)
-	if ix1 <= ix0 || !r.b.chargePaint(int64(ix1-ix0)) {
+	ix0, ix1, ok := spanPixels(x0, x1, r.clip.x0, r.clip.x1)
+	if !ok || !r.b.chargePaint(int64(ix1-ix0)) {
 		return
 	}
 	for x := ix0; x < ix1; x++ {
 		r.blend(x, y, col)
 	}
+}
+
+// spanPixels returns the pixel columns [ix0, ix1) of a span from x0 to x1:
+// each bound rounded to the nearest pixel edge, then clamped to [lo, hi] in
+// float64 (see clampToInt). ok is false when the span covers no column,
+// including a NaN bound, which has no position on the row. It is the one
+// rounding rule for fills and clip masks (clipping-paths.md §2.1).
+func spanPixels(x0, x1 float64, lo, hi int) (ix0, ix1 int, ok bool) {
+	if math.IsNaN(x0) || math.IsNaN(x1) {
+		return 0, 0, false
+	}
+	ix0 = clampToInt(math.Round(x0), float64(lo), float64(hi))
+	ix1 = clampToInt(math.Round(x1), float64(lo), float64(hi))
+	return ix0, ix1, ix1 > ix0
 }
 
 // strokePath draws the subpaths as connected line segments of the given device

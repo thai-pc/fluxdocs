@@ -10,9 +10,11 @@ import (
 	"testing"
 )
 
-// fillPathFullScan is the pre-active-edge fillPath, kept verbatim as the
-// reference: every row scans every edge. The active-edge version must paint the
-// same pixels (render-budget.md §2.1).
+// fillPathFullScan is the pre-active-edge fillPath, kept as the reference:
+// every row scans every edge. The active-edge version must paint the same
+// pixels (render-budget.md §2.1). Its crossing carries the same explicit
+// float64 rounding as scanPath's (clipping-paths.md §7), so a target that
+// fuses multiply-adds (arm64) cannot make the two disagree.
 func fillPathFullScan(r *raster, subpaths [][]point, col color.RGBA, evenOdd bool) {
 	if len(subpaths) == 0 {
 		return
@@ -50,7 +52,7 @@ func fillPathFullScan(r *raster, subpaths [][]point, col color.RGBA, evenOdd boo
 					x := a.X
 					if b.X != a.X {
 						t := (sy - a.Y) / (b.Y - a.Y)
-						x = a.X + t*(b.X-a.X)
+						x = a.X + float64(t*(b.X-a.X))
 					}
 					if math.IsNaN(x) {
 						located = false
