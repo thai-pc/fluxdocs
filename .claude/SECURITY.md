@@ -42,7 +42,8 @@ and copyable. Many governments and organizations have leaked information this wa
   Every string `RedactText`/`AutoRedactPII` matched (4 or more characters) and
   the text removed under a region (8 or more) — compared after NFKC with
   white-space and invisible characters removed, case-sensitive — is searched
-  for on every page (what it shows, and what it holds but does not show:
+  for on every page, also when split across operators or wrapped onto the
+  next line (what it shows, and what it holds but does not show:
   comments, property lists, other operators' strings), in every annotation (its text, its field's values, its
   appearance) and in the document information, and removed there; a redaction
   that cannot remove an occurrence (text in a form on another page) fails, and
@@ -85,16 +86,22 @@ and copyable. Many governments and organizations have leaked information this wa
   document text. Reasons: `content_ambiguous`, `inline_image`, `form_text`,
   `pattern_text`, `softmask_text`, `type3_text`, `budget_exceeded`,
   `unsupported_xobject`.
-- **Known limitations (Phase 1; their leak-corpus rows stay `knownLeak` until
-  Phase 2):** `RedactText` matches one text-showing operator at a time, so a
-  string split across operators (two `Tj`, one character per `Tj`, two text
-  objects) is not matched — `RedactArea` has no such limit (Phase 2 step 2.6).
-  Text shown through a form, pattern, soft-mask group or Type 3 glyph
-  procedure is refused, not rewritten (2.3). Removal is per operator, not per
-  glyph (2.5), and per image, not per pixel (2.8). Inline images are accepted
-  only unfiltered, ASCIIHex or zlib Flate, in device colour spaces (2.7). A
-  font whose glyphs draw something other than its `/ToUnicode` says is out of
-  scope for `RedactText`: use `RedactArea`.
+- **Known limitations (their leak-corpus rows stay `knownLeak` until the step
+  named):** `RedactText` matches the page's text as `ExtractText` reads it —
+  in content order, the operators of one line joined with no separator — and
+  as each other decoding a reader may use reads it, so a string split across
+  operators on one line (two `Tj`, one character per `Tj`, two text objects)
+  is matched and every operator it touches is removed. It does not model
+  geometric reading order (step 2.6b): text a producer writes out of reading
+  order, places on one line with the CTM, or rotates glyph by glyph is matched
+  in the order the content holds it — `RedactArea` has no such limit. Matching
+  is per page, and line breaks and hyphens are not folded: the pattern must
+  allow them (e.g. `SEC-?\s*RET-\d+`). Text shown through a form, pattern,
+  soft-mask group or Type 3 glyph procedure is refused, not rewritten (2.3).
+  Removal is per operator, not per glyph (2.5), and per image, not per pixel
+  (2.8). Inline images are accepted only unfiltered, ASCIIHex or zlib Flate, in
+  device colour spaces (2.7). A font whose glyphs draw something other than
+  its `/ToUnicode` says is out of scope for `RedactText`: use `RedactArea`.
 
 **Test gate (non-negotiable):**
 - After any redaction, the removed text must not be found by `ExtractText()`,
