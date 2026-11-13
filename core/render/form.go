@@ -76,10 +76,14 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	savedPathPoints := in.pathPoints
 	savedCurX, savedCurY := in.curX, in.curY
 	savedStartX, savedStartY := in.startX, in.startY
+	savedPendingClip := in.pendingClip
 
 	if hasRef {
 		in.formPath[ref] = true
 	}
+	// The caller's clip mask stays held by savedGS while the form runs, even
+	// if a stray Q pops the implicit frame below (clip-mask liveness, clip.go).
+	in.formClips = append(in.formClips, savedGS.clip.mask)
 
 	// Single deferred cleanup: every exit path (the empty-clip skip and any future
 	// early return included) restores symmetrically. The stack truncation to
@@ -90,7 +94,14 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 		if hasRef {
 			delete(in.formPath, ref)
 		}
-		in.stack = in.stack[:baseLen]
+		// Unwind the form's frames as Q would, so the clip masks only they
+		// held leave the live count (clip.go), then restore the caller's
+		// state as a clip replacement at the caller's depth.
+		for len(in.stack) > baseLen {
+			in.restoreState()
+		}
+		in.formClips = in.formClips[:len(in.formClips)-1]
+		in.setClip(savedGS.clip)
 		in.gs = savedGS
 		in.stackFloor = savedFloor
 		in.skippedQ = savedSkippedQ
@@ -104,15 +115,18 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 		in.pathPoints = savedPathPoints
 		in.curX, in.curY = savedCurX, savedCurY
 		in.startX, in.startY = savedStartX, savedStartY
+		in.pendingClip = savedPendingClip
 		in.syncClip()
 	}()
 
 	// A conforming form has no pending path at Do time; clear defensively so a
-	// malformed form cannot leak marks into the caller's path.
+	// malformed form cannot leak marks into the caller's path. A pending W/W*
+	// mark belongs to the caller's path, so it is saved and cleared with it.
 	in.subpaths = nil
 	in.closed = nil
 	in.cur = nil
 	in.pathPoints = 0
+	in.pendingClip = clipNone
 
 	// --- implicit q: push graphics state; floor Q at the form's own frames ---
 	in.stack = append(in.stack, in.gs)
@@ -123,8 +137,10 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	in.gs.ctm = formMatrix(in.res, st.Dict).mul(in.gs.ctm)
 
 	// --- intersect the clip with the form /BBox device rectangle (§5) ---
+	// The /BBox stays the outer-rounded device box (clipping-paths.md Q1); it
+	// narrows the rectangle and keeps any inherited clip mask.
 	if bbox, ok := formBBox(in.res, st.Dict); ok {
-		in.gs.clip = in.gs.clip.intersect(deviceBounds(bbox, in.gs.ctm, fullClip(in.rs.w, in.rs.h)))
+		in.gs.clip.rect = in.gs.clip.rect.intersect(deviceBounds(bbox, in.gs.ctm, fullClip(in.rs.w, in.rs.h)))
 	}
 	in.syncClip()
 
@@ -140,12 +156,6 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	if !in.gs.clip.empty() {
 		in.interpret(parse.ScanContent(data))
 	}
-}
-
-// syncClip mirrors the graphics-state clip onto the raster, which enforces it per
-// pixel. Called whenever the clip changes: on form entry and after any Q.
-func (in *interp) syncClip() {
-	in.rs.clip = in.gs.clip
 }
 
 // formFonts returns the font scope of a form's /Resources, cached by the form's

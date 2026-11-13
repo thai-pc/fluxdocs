@@ -7,8 +7,8 @@ import (
 )
 
 // gstate is the subset of the PDF graphics state the Wave 1 rasterizer tracks:
-// the current transform, the fill/stroke colors and line width, plus text state
-// (font and the spacing parameters). Clipping, dash patterns, and blend modes
+// the current transform, the fill/stroke colors and line width, the clip, plus
+// text state (font and the spacing parameters). Dash patterns and blend modes
 // are not yet modeled. The text matrix is NOT here — it lives on interp because
 // BT resets it and q/Q do not save it.
 type gstate struct {
@@ -17,10 +17,11 @@ type gstate struct {
 	stroke    color.RGBA
 	lineWidth float64 // user-space units
 
-	// clip is the axis-aligned device-space clip rectangle. It lives in gstate so
-	// q/Q (and a Form XObject's implicit q/Q) save and restore it. Wave 1 narrows
-	// it only for a form's /BBox; W/W* path clipping is still ignored.
-	clip clipRect
+	// clip is the device-space clip (clip.go): a rectangle and an optional
+	// shared mask. It lives in gstate so q/Q (and a Form XObject's implicit
+	// q/Q) save and restore it. A form's /BBox and W/W* clip paths narrow it
+	// (§8.5.4); text clipping (Tr 4–7) is not modeled yet.
+	clip clipState
 
 	// Text state (§9.3).
 	font       *glyphFont
@@ -76,6 +77,16 @@ type interp struct {
 	// pathPoints counts the points in subpaths and cur, bounded by the budget's
 	// path cap; painting or n resets it.
 	pathPoints int64
+
+	// pendingClip is the W (clipNonzero) or W* (clipEvenOdd) mark on the
+	// current path, applied by the next painting operator after it paints
+	// (clip.go). Like the path, it is not part of the graphics state: q/Q do
+	// not touch it, and a form saves and clears it.
+	pendingClip int8
+
+	// formClips holds the clip mask of each active form's saved state, which
+	// the form restores on exit (clip-mask liveness, clip.go).
+	formClips []*clipMask
 }
 
 // maxSaveDepth caps the graphics-state stack (q nesting). ISO 32000-1 Annex C
@@ -92,8 +103,13 @@ const maxSaveDepth = 1024
 // form-recursion controls, the full-canvas clip and the render's font loader)
 // and hands the operator loop to interpret.
 func run(rs *raster, base matrix, ops []parse.ContentOp, res *parse.Resolver, resources parse.Dict) {
+	newInterp(rs, base, res, resources).interpret(ops)
+}
+
+// newInterp returns the page-level interpreter run uses, before any operator.
+func newInterp(rs *raster, base matrix, res *parse.Resolver, resources parse.Dict) *interp {
 	fonts := newFontLoader(res, rs.b).scope(resources)
-	in := &interp{
+	return &interp{
 		rs: rs,
 		b:  rs.b,
 		gs: gstate{
@@ -102,7 +118,7 @@ func run(rs *raster, base matrix, ops []parse.ContentOp, res *parse.Resolver, re
 			stroke:    color.RGBA{0, 0, 0, 0xff},
 			lineWidth: 1,
 			hScale:    1,
-			clip:      fullClip(rs.w, rs.h),
+			clip:      fullClipState(rs.w, rs.h),
 		},
 		res:        res,
 		resources:  resources,
@@ -113,7 +129,6 @@ func run(rs *raster, base matrix, ops []parse.ContentOp, res *parse.Resolver, re
 		formBudget: maxFormBudget,
 		fontCache:  map[parse.Reference]*fontScope{},
 	}
-	in.interpret(ops)
 }
 
 // interpret runs the operator loop. It is the shared interpretation core used by
@@ -150,10 +165,9 @@ func (in *interp) apply(op parse.ContentOp) {
 		}
 		// Refuse to pop below stackFloor so a stray Q inside a Form XObject cannot
 		// steal a caller's saved frame (form q/Q isolation, form.go).
-		if n := len(in.stack); n > in.stackFloor {
-			in.gs = in.stack[n-1]
-			in.stack = in.stack[:n-1]
-			in.syncClip() // Q may restore a wider clip (e.g. leaving a form /BBox)
+		// restoreState also re-syncs the raster: Q may restore a wider clip.
+		if len(in.stack) > in.stackFloor {
+			in.restoreState()
 		}
 	case "cm":
 		if len(o) >= 6 {
@@ -215,10 +229,15 @@ func (in *interp) apply(op parse.ContentOp) {
 		in.fillKeep(true)
 		in.strokeCurrent()
 	case "n":
-		in.clearPath()
-	case "W", "W*":
-		// Clipping is not modeled in Wave 1; the path is consumed by the
-		// following painting operator (usually n) as usual.
+		in.endPath()
+	case "W":
+		// Deferred (§8.5.4): the next painting operator paints with the old
+		// clip, then intersects it with this path (applyPendingClip). The
+		// last of W and W* before it sets the rule; more path construction
+		// in between keeps the mark (design Q3).
+		in.pendingClip = clipNonzero
+	case "W*":
+		in.pendingClip = clipEvenOdd
 
 	// --- color ---
 	case "g":
@@ -432,9 +451,16 @@ func (in *interp) clearPath() {
 	in.pathPoints = 0
 }
 
+// endPath ends the current path at a painting operator (or n): it applies a
+// pending W/W* clip with the path, then clears it.
+func (in *interp) endPath() {
+	in.applyPendingClip()
+	in.clearPath()
+}
+
 func (in *interp) fill(evenOdd bool) {
 	in.fillKeep(evenOdd)
-	in.clearPath()
+	in.endPath()
 }
 
 func (in *interp) fillKeep(evenOdd bool) {
@@ -445,7 +471,7 @@ func (in *interp) fillKeep(evenOdd bool) {
 func (in *interp) strokeCurrent() {
 	in.flushSub(false)
 	in.rs.strokePath(in.subpaths, in.closed, in.gs.stroke, in.gs.lineWidth*in.gs.ctm.scaleFactor())
-	in.clearPath()
+	in.endPath()
 }
 
 // --- operand and color helpers ---

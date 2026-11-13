@@ -4,10 +4,13 @@
 // fonts, parsed via golang.org/x/image/font/sfnt, and embedded Type 1 fonts
 // (/FontFile) and bare CFF fonts (/FontFile3 /Type1C and /CIDFontType0C),
 // parsed by core/internal/psfont, plus a common subset of image XObjects (see
-// image.go). Non-embedded fonts (the standard 14 included), Type 3 fonts,
-// shadings, and path clipping are not yet rendered; the interpreter
-// ignores those operators rather than failing, so a page still rasterizes (minus
-// those elements) instead of erroring.
+// image.go), clipped by W/W* clipping paths and Form XObject bounding boxes
+// (clip.go). Simple fonts with no embedded program (the standard 14 included)
+// are drawn with a bundled substitute face (substitute.go). Type 3 fonts and
+// shadings are not yet rendered, and the clipping effect of text render modes
+// 4–7 is not modelled (Tr itself is honoured: modes 3 and 7 are invisible);
+// the interpreter skips what it does not render rather than failing, so a page
+// still rasterizes (minus those elements) instead of erroring.
 //
 // Two build targets share this code: the native binary and GOOS=js/GOARCH=wasm.
 package render
@@ -138,6 +141,10 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 		run(rs, base, parse.ScanContent(content), r, pi.Resources)
 	}
 	if len(opts.Annotations) > 0 && !b.stopped() {
+		// The overlay is never clipped by page content: a page that ends
+		// inside an unbalanced W/W* clip (or form) must not hide annotations
+		// or redaction previews (clipping-paths.md §4).
+		rs.resetClip()
 		drawAnnotations(rs, base, opts.Annotations)
 	}
 	// Poll once more before encoding: the encode is not metered, and a render

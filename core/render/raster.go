@@ -92,10 +92,9 @@ func (m matrix) scaleFactor() float64 {
 type point struct{ X, Y float64 }
 
 // clipRect is an axis-aligned, half-open device-pixel clip rectangle
-// [x0,x1)×[y0,y1). It is the only clipping the Wave 1 rasterizer models, and it
-// exists solely to bound a Form XObject to its /BBox (see form.go); general
-// path clipping via W/W* is still ignored. A rectangle is "empty" when it has no
-// interior, in which case no pixel passes the clip.
+// [x0,x1)×[y0,y1): a Form XObject's /BBox (form.go), a rectangular W/W* clip
+// path, or the bounding box of a clip mask (clip.go). A rectangle is "empty"
+// when it has no interior, in which case no pixel passes the clip.
 type clipRect struct{ x0, y0, x1, y1 int }
 
 // fullClip returns the clip covering the whole w×h canvas (no restriction).
@@ -139,11 +138,14 @@ type raster struct {
 	img  *image.RGBA
 	w, h int
 
-	// clip is the active device-space clip rectangle enforced by blend, kept in
-	// sync with the interpreter's graphics-state clip. It starts as the full
-	// canvas and is narrowed only while a Form XObject's /BBox is in effect. A
-	// page is interpreted sequentially, so mutating this shared field is safe.
+	// clip and mask are the active device-space clip enforced by blend: the
+	// pixels inside clip and, when mask is non-nil, set in mask (clip.go).
+	// They mirror the interpreter's graphics-state clip (syncClip): the full
+	// canvas at the start, narrowed by a form's /BBox and by W/W* clip paths.
+	// A page is interpreted sequentially, so mutating these shared fields is
+	// safe.
 	clip clipRect
+	mask *clipMask
 
 	// b meters the raster work (budget.go). Every paint routine charges it per
 	// row or per call, never per pixel, and returns early once it is stopped.
@@ -164,14 +166,33 @@ func newRaster(w, h int) *raster {
 	return &raster{img: img, w: w, h: h, clip: fullClip(w, h), b: unlimitedBudget()}
 }
 
+// maskedExtra is the raster work, beyond the pixel visits themselves, of
+// visiting n pixels while a clip mask is active: blend tests a mask bit per
+// pixel, ≈ 30% of a pixel visit (BenchmarkCalibration/blend-masked), charged
+// as one unit per maskedPixelsPerUnit pixels. Without a mask it is 0, so
+// unclipped paint is charged exactly as before.
+func (r *raster) maskedExtra(n int64) int64 {
+	if r.mask == nil {
+		return 0
+	}
+	return (n + maskedPixelsPerUnit - 1) / maskedPixelsPerUnit
+}
+
+// resetClip makes the whole canvas paintable again, as before any content.
+func (r *raster) resetClip() {
+	r.clip = fullClip(r.w, r.h)
+	r.mask = nil
+}
+
 // blend composites src (source-over) onto the pixel at (x, y). Pixels outside
-// the canvas bounds or the active clip rectangle are rejected — the single choke
-// point through which fills, strokes, glyphs, and images honour the clip.
+// the canvas bounds or the active clip (rectangle and mask) are rejected — the
+// single choke point through which fills, strokes, glyphs, and images honour
+// the clip.
 func (r *raster) blend(x, y int, src color.RGBA) {
 	if x < 0 || y < 0 || x >= r.w || y >= r.h {
 		return
 	}
-	if !r.clip.contains(x, y) {
+	if !r.clip.contains(x, y) || r.mask != nil && !r.mask.bit(x, y) {
 		return
 	}
 	if src.A == 0 {
@@ -458,14 +479,23 @@ func (r *raster) scanPath(subpaths [][]point, evenOdd bool, rowLo, rowHi int, em
 }
 
 // span fills a horizontal run of pixels [x0, x1) on row y, bounds rounded to the
-// nearest pixel. It clamps to the active clip x-range for speed; blend re-checks
-// each pixel. A NaN bound has no position on the row and paints nothing.
+// nearest pixel. It clamps to the active clip x-range, and to the clip mask's
+// set columns on that row, for speed; blend re-checks each pixel. A NaN bound
+// has no position on the row and paints nothing.
 func (r *raster) span(x0, x1 float64, y int, col color.RGBA) {
 	if y < r.clip.y0 || y >= r.clip.y1 {
 		return
 	}
-	ix0, ix1, ok := spanPixels(x0, x1, r.clip.x0, r.clip.x1)
-	if !ok || !r.b.chargePaint(int64(ix1-ix0)) {
+	lo, hi := r.clip.x0, r.clip.x1
+	if r.mask != nil {
+		mlo, mhi := r.mask.rowRange(y)
+		lo, hi = maxInt(lo, mlo), minInt(hi, mhi)
+		if lo >= hi {
+			return
+		}
+	}
+	ix0, ix1, ok := spanPixels(x0, x1, lo, hi)
+	if !ok || !r.b.chargePaint(int64(ix1-ix0)+r.maskedExtra(int64(ix1-ix0))) {
 		return
 	}
 	for x := ix0; x < ix1; x++ {
@@ -537,7 +567,7 @@ func (r *raster) strokePath(subpaths [][]point, closed []bool, col color.RGBA, w
 //
 // Budget: lineCallCost per call (segments clipped away entirely still cost
 // their setup), lineRowCost per row for the range search, and the row's span
-// width before it is painted.
+// width (plus maskedExtra under a clip mask) before it is painted.
 func (r *raster) line(a, b point, col color.RGBA, width float64) {
 	if !r.b.chargePaint(lineCallCost) {
 		return
@@ -629,7 +659,7 @@ func (r *raster) line(a, b point, col color.RGBA, width float64) {
 		if xLo > xHi {
 			continue
 		}
-		if !r.b.chargePaint(int64(xHi-xLo) + 1) {
+		if !r.b.chargePaint(int64(xHi-xLo) + 1 + r.maskedExtra(int64(xHi-xLo)+1)) {
 			return
 		}
 		for ox := int(xLo); ox <= int(xHi); ox++ {

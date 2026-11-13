@@ -391,7 +391,7 @@ func TestPage_DPIDefaultAndExtremesHitCanvasCap(t *testing.T) {
 // 8 Mi q natively, fatal under js/wasm).
 func TestQ_SaveDepthIsCapped(t *testing.T) {
 	rs := newRaster(10, 10)
-	in := &interp{rs: rs, b: rs.b, gs: gstate{ctm: identity(), clip: fullClip(10, 10)}}
+	in := &interp{rs: rs, b: rs.b, gs: gstate{ctm: identity(), clip: fullClipState(10, 10)}}
 	q := parse.ContentOp{Op: "q"}
 	const n = 8 << 20
 	for i := 0; i < n; i++ {

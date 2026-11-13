@@ -19,7 +19,8 @@ import (
 
 // ErrBudgetExceeded is returned (wrapped, naming the resource) when a page render
 // exceeds a resource limit: raster work, interpreter steps, image samples,
-// content bytes, decoded bytes, or path points. core wraps it with ErrRenderBudgetExceeded.
+// content bytes, decoded bytes, path points, or live clip masks. core wraps it
+// with ErrRenderBudgetExceeded.
 var ErrBudgetExceeded = errors.New("render: budget exceeded")
 
 // ErrCanvasTooLarge is returned (wrapped) when the page's output canvas exceeds
@@ -64,6 +65,27 @@ const (
 	// maxPathPoints bounds the points in the current path (≈ 64 MiB of points).
 	// It is not cumulative: painting the path or n resets it.
 	maxPathPoints = 4 << 20
+	// maxClipMaskBytes bounds the clip masks alive at once in one render
+	// (clip.go): nested non-rectangular clips keep every level's mask, and
+	// 1024 levels of full-canvas masks would hold 8 GiB, fatal under js/wasm.
+	// 128 MiB is 16 masks at the canvas cap, ≈ 500 at Letter 150 DPI; the
+	// corpus peaks at ≈ 7.3 MiB (docs/design/clipping-paths.md §14).
+	maxClipMaskBytes = 128 << 20
+
+	// clipRowCost is the raster-work charge per row of a clip mask build, on
+	// top of the scan's own fill charges and clipWords per pass over the
+	// row's words. Calibrated by BenchmarkCalibration/clip-mask.
+	clipRowCost = 2
+	// clipWordsPerUnit is how many 64-bit mask words one raster-work unit
+	// pays for, per pass: zeroing with the row-extent scan, each span's OR,
+	// and the AND with an enclosing mask when there is one. Calibrated by
+	// BenchmarkCalibration/clip-mask and clip-and.
+	clipWordsPerUnit = 4
+	// maskedPixelsPerUnit is how many pixels visited under a clip mask pay
+	// one raster-work unit on top of their visits, for blend's mask test
+	// (raster.maskedExtra). Calibrated by BenchmarkCalibration/blend-masked:
+	// ≈ 1.30 px/unit without it.
+	maskedPixelsPerUnit = 3
 
 	// lineCallCost is the raster-work charge per stroke segment (line call),
 	// charged before anything else, so segments clipped away entirely still
@@ -184,6 +206,7 @@ type budgetLimits struct {
 	content    int64 // decoded content bytes
 	decoded    int64 // decoded image and font bytes beyond their samples (decode)
 	pathPoints int64 // points in the current path
+	clipMask   int64 // bytes of the clip masks alive at once
 }
 
 // budget meters one page render. It is owned by the page's single goroutine, so
@@ -201,6 +224,7 @@ type budget struct {
 	samples           int64
 	content           int64
 	decoded           int64
+	clipMask          int64        // bytes of the live clip masks (not cumulative)
 	lim               budgetLimits // the configured limits, for messages and the cold counters
 
 	// Work since the last context poll.
@@ -237,12 +261,13 @@ func newBudget(ctx context.Context, lim budgetLimits) *budget {
 func unlimitedBudget() *budget {
 	return newBudget(context.Background(), budgetLimits{
 		paint: unlimited, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited,
+		clipMask: unlimited,
 	})
 }
 
 // resolveLimits turns the public option values into limits for a canvas of
 // canvasPx pixels: 0 = default, < 0 = unlimited, > 0 = absolute. The image,
-// content and path caps are internal and always on.
+// content, path and clip-mask caps are internal and always on.
 func resolveLimits(maxPaint, maxOps, canvasPx int64) budgetLimits {
 	lim := budgetLimits{
 		paint:      maxPaint,
@@ -251,6 +276,7 @@ func resolveLimits(maxPaint, maxOps, canvasPx int64) budgetLimits {
 		content:    maxContentBytes,
 		decoded:    maxDecodedBytes,
 		pathPoints: maxPathPoints,
+		clipMask:   maxClipMaskBytes,
 	}
 	switch {
 	case maxPaint < 0:
@@ -438,6 +464,30 @@ func (b *budget) checkPathPoints(n int64) bool {
 	}
 	return true
 }
+
+// chargeClipMask adds n bytes of a clip mask about to be allocated to the live
+// clip-mask counter; false means skip the allocation (and stop the render).
+// releaseClipMask takes them out again when the mask dies (clip.go), so the
+// counter holds the masks alive at once, not a running total. Liveness
+// depends only on the operator sequence, so a trip happens at the same
+// operator on every target.
+func (b *budget) chargeClipMask(n int64) bool {
+	if b.err != nil {
+		return false
+	}
+	b.clipMask += n
+	if b.clipMask > b.lim.clipMask {
+		// The counter keeps n although the mask is never allocated, so
+		// the error reports the bytes that were asked for; the render is
+		// stopped, so nothing releases or charges against it again.
+		b.trip("clip masks", b.clipMask, b.lim.clipMask)
+		return false
+	}
+	return true
+}
+
+// releaseClipMask removes a dead mask's n bytes from the live counter.
+func (b *budget) releaseClipMask(n int64) { b.clipMask -= n }
 
 // trip records a limit error.
 func (b *budget) trip(resource string, used, limit int64) {

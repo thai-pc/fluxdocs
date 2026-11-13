@@ -486,7 +486,7 @@ func TestSubstitute_LoadCharged(t *testing.T) {
 	if want := int64(3) * (fontLoadCost + substituteLoadCost); rs.b.paint != want {
 		t.Errorf("paint charged %d, want %d", rs.b.paint, want)
 	}
-	b := newBudget(nil, budgetLimits{paint: fontLoadCost + substituteLoadCost/2, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited})
+	b := newBudget(nil, budgetLimits{paint: fontLoadCost + substituteLoadCost/2, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited, clipMask: unlimited})
 	if gf := newFontLoader(r, b).scope(page.Resources).font(names[0]); gf != nil || !b.stopped() {
 		t.Errorf("under a budget short of the substitute charge: font %v, stopped %v; want nil, true", gf, b.stopped())
 	}

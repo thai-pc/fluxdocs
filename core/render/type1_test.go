@@ -425,7 +425,7 @@ func TestType1_FontLoadsChargedAndCapped(t *testing.T) {
 		t.Errorf("the cap tripped the budget: %v", rs.b.err)
 	}
 
-	b := newBudget(nil, budgetLimits{paint: 10 * fontLoadCost, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited})
+	b := newBudget(nil, budgetLimits{paint: 10 * fontLoadCost, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited, clipMask: unlimited})
 	sc = newFontLoader(r, b).scope(page.Resources)
 	loaded := 0
 	for _, n := range names[:20] {

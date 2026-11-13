@@ -470,8 +470,8 @@ func decodeSMask(res *parse.Resolver, st *parse.Stream, b *budget) (alpha []uint
 // clamped device bounding box with nearest-neighbour sampling and source-over
 // compositing, so gaps never appear on upscaling and total work is bounded by
 // the canvas size. A degenerate (zero-area) placement is skipped. Each row of the
-// box is charged to the raster's budget (imagePixelCost per pixel) before it is
-// sampled.
+// box is charged to the raster's budget (imagePixelCost per pixel, plus
+// maskedExtra under a clip mask) before it is sampled.
 func drawImage(rs *raster, ctm matrix, img *decodedImage) {
 	// S maps sample (col,row) to the unit square (u,v) with the y-flip that puts
 	// row 0 at the top (v=1). Composed with ctm it maps samples to device pixels.
@@ -510,7 +510,7 @@ func drawImage(rs *raster, ctm matrix, img *decodedImage) {
 	}
 
 	for dy := y0; dy < y1; dy++ {
-		if !rs.b.chargePaint(int64(x1-x0) * imagePixelCost) {
+		if !rs.b.chargePaint(int64(x1-x0)*imagePixelCost + rs.maskedExtra(int64(x1-x0))) {
 			return
 		}
 		for dx := x0; dx < x1; dx++ {

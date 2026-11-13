@@ -365,7 +365,7 @@ func TestBudget_Trips(t *testing.T) {
 			// The same page renders when the tripped counter is off: the trip
 			// came from the budget, not from a broken input.
 			opts.MaxPaintPixels, opts.MaxOperators = -1, -1
-			opts.testLimits = &budgetLimits{paint: unlimited, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited}
+			opts.testLimits = &budgetLimits{paint: unlimited, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited, clipMask: unlimited}
 			if _, err := Page(r, pi, opts); err != nil {
 				t.Errorf("unlimited render: %v", err)
 			}
@@ -651,7 +651,7 @@ func TestBudget_DeadlineByClock(t *testing.T) {
 // the hot path stays one add and one compare.
 func TestBudget_PollQuantum(t *testing.T) {
 	past := clockOnlyCtx{Context: context.Background(), deadline: time.Now().Add(-time.Second)}
-	open := budgetLimits{paint: unlimited, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited}
+	open := budgetLimits{paint: unlimited, steps: unlimited, samples: unlimited, content: unlimited, decoded: unlimited, pathPoints: unlimited, clipMask: unlimited}
 
 	b := newBudget(past, open)
 	for i := 1; i < pollStepQuantum; i++ {
@@ -779,6 +779,14 @@ func charged(rs *raster, paint func()) func() int64 {
 //     span the canvas), sort included, charged by fillRowCost; sets
 //     fillCrossingCost;
 //   - image-pixel: pixels of a scaled image placement; sets imagePixelCost;
+//   - clip-mask: a full-canvas non-rectangular clip mask built repeatedly
+//     (Letter, 150 DPI): scan, zeroing, span bits and row extents, charged
+//     as the scan's fill charges plus clipRowCost and clipWords; sets
+//     clipRowCost and clipWordsPerUnit;
+//   - clip-and: the same clip built inside an enclosing mask, so every row
+//     also ANDs with it; a check on clipWords;
+//   - blend-masked: a full-canvas fill under a non-rectangular clip mask,
+//     the per-pixel mask test included; a check on the pixel-visit unit;
 //   - do-tiny-image: a 1×1 image Do'd repeatedly, per unit of steps + paint;
 //     sets doCost;
 //   - glyph-tiny-visible: visible glyphs too small to cover a row (outline
@@ -859,6 +867,33 @@ func BenchmarkCalibration(b *testing.B) {
 		}
 		rs := newRaster(4096, rows)
 		calibrate(b, charged(rs, func() { rs.fillPath([][]point{poly}, blackRGBA, false) }))
+	})
+	// A full-canvas quadrilateral clip at Letter, 150 DPI: two crossings per
+	// row, 20 words per row.
+	const lw, lh = 1275, 1650
+	quad := [][]point{{{3.5, 0.25}, {lw - 0.5, 40.5}, {lw - 30, lh - 0.75}, {0.25, lh - 60}}}
+	b.Run("clip-mask", func(b *testing.B) {
+		rs := newRaster(lw, lh)
+		calibrate(b, charged(rs, func() {
+			c := rs.buildClip(fullClipState(lw, lh), quad, false, 0)
+			rs.b.releaseClipMask(c.mask.bytes)
+		}))
+	})
+	b.Run("clip-and", func(b *testing.B) {
+		rs := newRaster(lw, lh)
+		outer := rs.buildClip(fullClipState(lw, lh), [][]point{{{0, 0}, {lw, 0}, {0, lh}}}, false, 0)
+		wide := [][]point{{{-50, -50}, {lw + 50, 0}, {lw, lh + 50}, {0, lh}}}
+		calibrate(b, charged(rs, func() {
+			c := rs.buildClip(outer, wide, false, 1)
+			rs.b.releaseClipMask(c.mask.bytes)
+		}))
+	})
+	b.Run("blend-masked", func(b *testing.B) {
+		rs := newRaster(lw, lh)
+		c := rs.buildClip(fullClipState(lw, lh), quad, false, 0)
+		rs.clip, rs.mask = c.rect, c.mask
+		full := [][]point{{{0, 0}, {lw, 0}, {lw, lh}, {0, lh}}}
+		calibrate(b, charged(rs, func() { rs.fillPath(full, blackRGBA, false) }))
 	})
 	b.Run("image-pixel", func(b *testing.B) {
 		const side = 512
