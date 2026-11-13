@@ -12,6 +12,8 @@ import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { inflateSync } from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -309,4 +311,86 @@ assert(ownerOnly.error === "" && ownerOnly.encrypted === true, `R6 owner-only op
 assert(fluxdocs.save(ownerOnly.handle).error === "", "R6 owner-only saves");
 fluxdocs.close(ownerOnly.handle);
 
+// Clipping paths render byte-identically on native amd64 and js/wasm
+// (clipping-paths.md §7): the parity fixture's pixel hash is the one
+// core/render pins (clipParityHash in core/render/clip_test.go; a Go test
+// checks this copy matches). arm64 is not checked in CI: Go may fuse
+// multiply-adds there outside clip.go (matrix.apply, raster.line, blend,
+// drawImage, segmentsToSubpaths). The PNG is decoded here and hashed like
+// the Go side's imgHash: "WxH\n" then 8-bit RGBA rows.
+const clipHash = "3192d00f3cd466d6f10b7cc19d762a5a3159da0ba1a21bbe92a7b05b71d3fb2f";
+const clipDoc = fluxdocs.open(new Uint8Array(readFileSync(join(here, "testdata", "clip.pdf"))));
+assert(clipDoc.error === "", `open clip fixture: ${clipDoc.error}`);
+const clipPng = fluxdocs.renderPage(clipDoc.handle, 0, { dpi: 72, format: "png" });
+assert(clipPng.error === "", `render clip fixture: ${clipPng.error}`);
+assert(pixelHash(clipPng.image) === clipHash, `clip fixture pixel hash ${pixelHash(clipPng.image)}, native ${clipHash}`);
+fluxdocs.close(clipDoc.handle);
+
 console.log(`OK — ${passed} assertions passed`);
+
+// pixelHash decodes a non-interlaced 8-bit RGB or RGBA PNG (what Go's encoder
+// writes for the renderer's canvas) and returns the SHA-256 of "WxH\n"
+// followed by its RGBA rows.
+// It assumes an opaque canvas: PNG stores straight alpha while imgHash hashes
+// premultiplied color.RGBA, so the two agree only where alpha is 255 (and an
+// RGB PNG is hashed with alpha 255).
+function pixelHash(bytes) {
+  const buf = Buffer.from(bytes);
+  let pos = 8, w = 0, h = 0, type = 0;
+  const idat = [];
+  while (pos < buf.length) {
+    const len = buf.readUInt32BE(pos);
+    const kind = buf.toString("latin1", pos + 4, pos + 8);
+    const data = buf.subarray(pos + 8, pos + 8 + len);
+    if (kind === "IHDR") {
+      w = data.readUInt32BE(0);
+      h = data.readUInt32BE(4);
+      if (data[8] !== 8 || data[12] !== 0) throw new Error("unsupported PNG layout");
+      type = data[9];
+    } else if (kind === "IDAT") {
+      idat.push(data);
+    }
+    pos += 12 + len;
+  }
+  const bpp = type === 6 ? 4 : type === 2 ? 3 : 0;
+  if (!bpp) throw new Error(`unsupported PNG color type ${type}`);
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = w * bpp;
+  const prev = new Uint8Array(stride);
+  const cur = new Uint8Array(stride);
+  const hash = createHash("sha256").update(`${w}x${h}\n`);
+  for (let y = 0; y < h; y++) {
+    const off = y * (stride + 1);
+    const filter = raw[off];
+    for (let i = 0; i < stride; i++) {
+      const x = raw[off + 1 + i];
+      const a = i >= bpp ? cur[i - bpp] : 0;
+      const b = prev[i];
+      const c = i >= bpp ? prev[i - bpp] : 0;
+      let v;
+      switch (filter) {
+        case 0: v = x; break;
+        case 1: v = x + a; break;
+        case 2: v = x + b; break;
+        case 3: v = x + ((a + b) >> 1); break;
+        case 4: {
+          const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+          v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+          break;
+        }
+        default: throw new Error(`bad PNG filter ${filter}`);
+      }
+      cur[i] = v & 0xff;
+    }
+    const row = new Uint8Array(w * 4);
+    for (let px = 0; px < w; px++) {
+      row[4 * px] = cur[bpp * px];
+      row[4 * px + 1] = cur[bpp * px + 1];
+      row[4 * px + 2] = cur[bpp * px + 2];
+      row[4 * px + 3] = bpp === 4 ? cur[bpp * px + 3] : 255;
+    }
+    hash.update(row);
+    prev.set(cur);
+  }
+  return hash.digest("hex");
+}
