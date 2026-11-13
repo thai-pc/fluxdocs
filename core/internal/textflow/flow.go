@@ -14,10 +14,16 @@
 // Each byte written is attributed to an owner given by the caller per
 // operator (Apply, Owned), so a match in the text can be mapped back to the
 // operators that showed it. Line-break newlines are separators and owned by
-// no operator (NoOwner).
+// no operator (NoOwner), including those the quote operators ' and " write.
+//
+// A Flow can also record the steps of its reading (Record, Events), so the
+// reading of the same content with some operators' text left out — what
+// extraction reads once those operators are removed — is computed without
+// reading the content again (Replay).
 package textflow
 
 import (
+	"math"
 	"strings"
 
 	"github.com/thai-pc/fluxdocs/core/internal/fontmodel"
@@ -46,12 +52,44 @@ type Piece struct {
 	Owner int32
 }
 
+// EventKind is the kind of a recorded reading step (Event).
+type EventKind uint8
+
+// The recorded reading steps.
+const (
+	// EventLine is a line break: a newline is written if any glyph was
+	// written before it (by any operator), else nothing.
+	EventLine EventKind = iota
+	// EventShow starts a text-showing operator (Tj, ', ", TJ) of Owner,
+	// whether or not it writes anything; for ' and " it follows the line
+	// break the operator makes.
+	EventShow
+	// EventText is shown text of Owner: String()[Start:End] of the recording
+	// Flow (never empty).
+	EventText
+	// EventGap is a TJ word gap of Owner: a space unless the output is empty
+	// or already ends in a space, newline or tab.
+	EventGap
+)
+
+// Event is one recorded reading step. Start and End are set for EventText
+// only.
+type Event struct {
+	Kind       EventKind
+	Owner      int32
+	Start, End int32
+}
+
 // Flow is the running reading of one content stream. The zero value is not
 // usable; create one with New. A Flow is not safe for concurrent use.
 type Flow struct {
-	out    strings.Builder
-	pieces []Piece
-	fonts  Fonts
+	sink
+	fonts Fonts
+
+	// record, when set, appends each reading step to events (Record).
+	record   bool
+	events   []Event
+	overflow bool // the output passed what an Event offset can hold
 
 	cur      *fontmodel.Font
 	fontSize float64
@@ -61,9 +99,57 @@ type Flow struct {
 	// is used for the line heuristic.
 	tlm [6]float64
 
-	emitted   bool    // any glyph written yet
 	haveLine  bool    // a line position has been established
 	lastLineY float64 // baseline Y of the current line
+}
+
+// sink is the output of a reading: the text, its pieces and owners, and
+// whether any glyph has been written. Flow and Replay write through the same
+// rules, so a replay of everything equals the reading it was recorded from.
+type sink struct {
+	out     strings.Builder
+	pieces  []Piece
+	emitted bool // any glyph written yet
+}
+
+// write appends s to the output, attributed to owner.
+func (s *sink) write(t string, owner int32) {
+	if n := len(s.pieces); n == 0 || s.pieces[n-1].Owner != owner {
+		s.pieces = append(s.pieces, Piece{Start: s.out.Len(), Owner: owner})
+	}
+	s.out.WriteString(t)
+}
+
+// text writes shown text (nothing for an empty one) and records that a glyph
+// was written.
+func (s *sink) text(t string, owner int32) {
+	if t == "" {
+		return
+	}
+	s.write(t, owner)
+	s.emitted = true
+}
+
+// line writes the newline of a line break once a glyph has been written.
+func (s *sink) line() {
+	if s.emitted {
+		s.write("\n", NoOwner)
+	}
+}
+
+// gap writes a TJ word gap's space unless the output is empty or already ends
+// with white space. The decision depends on the output before the operator,
+// so a leading gap's space is owned by the operator that wrote it.
+func (s *sink) gap(owner int32) {
+	buf := s.out.String()
+	if buf == "" {
+		return
+	}
+	switch buf[len(buf)-1] {
+	case ' ', '\n', '\t':
+		return
+	}
+	s.write(" ", owner)
 }
 
 // New returns an empty Flow that resolves Tf font names through fonts (nil
@@ -74,6 +160,42 @@ func New(fonts Fonts) *Flow {
 
 // String returns the text read so far.
 func (f *Flow) String() string { return f.out.String() }
+
+// Record makes the Flow record its reading steps (Events). Call it before the
+// first Apply.
+func (f *Flow) Record() { f.record = true }
+
+// Events returns the recorded reading steps in order, and false — with no
+// events — when the Flow did not record or its output grew past what an
+// Event offset holds (2 GiB). The slice aliases the Flow's state: it is valid
+// until the next Apply and must not be modified.
+func (f *Flow) Events() ([]Event, bool) {
+	if !f.record || f.overflow {
+		return nil, false
+	}
+	return f.events, true
+}
+
+// event records a reading step. A gap right after a gap of the same owner is
+// not recorded: once the first is written the output is empty or ends in
+// white space, in every replay that keeps them (they are kept together), so
+// the second writes nothing. A gap then follows another kind of step (an
+// owner changes only at a show step), so the steps are at most twice the
+// others: at most two per operator (a quote's line break and show) and one
+// per byte of shown text.
+func (f *Flow) event(kind EventKind, owner int32, start, end int) {
+	if !f.record || f.overflow {
+		return
+	}
+	if n := len(f.events); kind == EventGap && n > 0 && f.events[n-1].Kind == EventGap && f.events[n-1].Owner == owner {
+		return
+	}
+	if end > math.MaxInt32 {
+		f.overflow, f.events = true, nil
+		return
+	}
+	f.events = append(f.events, Event{Kind: kind, Owner: owner, Start: int32(start), End: int32(end)})
+}
 
 // Owned returns the pieces of String() and their owners, in output order (nil
 // when nothing was written). The slice aliases the Flow's state: it is valid
@@ -134,26 +256,22 @@ func (f *Flow) Apply(op string, operands []parse.Object, owner int32) {
 		f.moveLine(0, -f.leading)
 
 	case "Tj":
+		f.event(EventShow, owner, 0, 0)
 		f.show(lastString(operands), owner)
 	case "'":
 		// Move to next line, then show.
 		f.moveLine(0, -f.leading)
+		f.event(EventShow, owner, 0, 0)
 		f.show(lastString(operands), owner)
 	case "\"":
 		// aw ac string " — set word/char spacing (ignored), next line, show.
 		f.moveLine(0, -f.leading)
+		f.event(EventShow, owner, 0, 0)
 		f.show(lastString(operands), owner)
 	case "TJ":
+		f.event(EventShow, owner, 0, 0)
 		f.showArray(operands, owner)
 	}
-}
-
-// write appends s to the output, attributed to owner.
-func (f *Flow) write(s string, owner int32) {
-	if n := len(f.pieces); n == 0 || f.pieces[n-1].Owner != owner {
-		f.pieces = append(f.pieces, Piece{Start: f.out.Len(), Owner: owner})
-	}
-	f.out.WriteString(s)
 }
 
 // moveLine applies a relative Td-style move to the text line matrix and
@@ -176,9 +294,12 @@ func (f *Flow) moveLine(tx, ty float64) {
 // emit. Recovering spacing for glyph-positioned PDFs needs font widths.
 func (f *Flow) setLine(m [6]float64) {
 	y := m[5]
-	if f.emitted && f.haveLine {
+	// Whether the move is a line break does not depend on what was written,
+	// only whether a newline is written for it does (sink.line).
+	if f.haveLine {
 		if dy := f.lastLineY - y; abs(dy) > f.newlineThreshold() {
-			f.write("\n", NoOwner)
+			f.event(EventLine, NoOwner, 0, 0)
+			f.line()
 		}
 	}
 	f.tlm = m
@@ -204,8 +325,9 @@ func (f *Flow) show(raw []byte, owner int32) {
 	if text == "" {
 		return
 	}
-	f.write(text, owner)
-	f.emitted = true
+	start := f.out.Len()
+	f.text(text, owner)
+	f.event(EventText, owner, start, f.out.Len())
 }
 
 // showArray handles TJ: an array of strings interleaved with numeric position
@@ -221,29 +343,60 @@ func (f *Flow) showArray(operands []parse.Object, owner int32) {
 			f.show(v.Value, owner)
 		case parse.Integer:
 			if float64(v) <= -SpaceThreshold {
-				f.maybeSpace(owner)
+				f.wordGap(owner)
 			}
 		case parse.Real:
 			if float64(v) <= -SpaceThreshold {
-				f.maybeSpace(owner)
+				f.wordGap(owner)
 			}
 		}
 	}
 }
 
-// maybeSpace writes a space unless the output is empty or already ends with
-// white space. The decision depends on the output before the operator, so a
-// leading gap's space is owned by the operator that wrote it.
-func (f *Flow) maybeSpace(owner int32) {
-	buf := f.out.String()
-	if buf == "" {
-		return
+// wordGap writes a TJ word gap (sink.gap) and records it.
+func (f *Flow) wordGap(owner int32) {
+	f.event(EventGap, owner, 0, 0)
+	f.gap(owner)
+}
+
+// Replay returns the reading recorded in events (from a Flow whose String()
+// is text) with the operators of every owner keep rejects left out: what Flow
+// reads from the same content once those text-showing operators are removed
+// and their positioning kept (a ' or " replaced by its line move). Line
+// breaks and word gaps are decided again against what is left: a newline is
+// written only after the first kept glyph, and a gap's space only when the
+// kept output does not already end in white space. keep is never called with
+// NoOwner, whose steps are always kept.
+//
+// When shown is set, each kept operator writes shown(owner) instead of its
+// recorded text, and word gaps write nothing: the same line structure read
+// with another decoding of each operator (a glyph is written when shown
+// returns a non-empty text). shown is never called with NoOwner either: an
+// operator no owner is credited with writes nothing in that mode.
+//
+// Returns the text and its pieces (as Owned).
+func Replay(text string, events []Event, keep func(owner int32) bool, shown func(owner int32) string) (string, []Piece) {
+	var s sink
+	kept := func(owner int32) bool { return owner == NoOwner || keep == nil || keep(owner) }
+	for _, e := range events {
+		switch e.Kind {
+		case EventLine:
+			s.line()
+		case EventShow:
+			if shown != nil && e.Owner != NoOwner && kept(e.Owner) {
+				s.text(shown(e.Owner), e.Owner)
+			}
+		case EventText:
+			if shown == nil && kept(e.Owner) {
+				s.text(text[e.Start:e.End], e.Owner)
+			}
+		case EventGap:
+			if shown == nil && kept(e.Owner) {
+				s.gap(e.Owner)
+			}
+		}
 	}
-	switch buf[len(buf)-1] {
-	case ' ', '\n', '\t':
-		return
-	}
-	f.write(" ", owner)
+	return s.out.String(), s.pieces
 }
 
 // --- operand helpers ---

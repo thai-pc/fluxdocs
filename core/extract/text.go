@@ -41,8 +41,7 @@ func PageText(r *parse.Resolver, pi parse.PageInfo, opts Options) (string, error
 		return "", nil
 	}
 
-	fonts := buildFonts(r, pi.Resources)
-	fl := textflow.New(func(name parse.Name) *font { return fonts[name] })
+	fl := textflow.New(textflow.PageFonts(r, pi.Resources, loadFont(r)))
 	for _, op := range parse.ScanContent(content) {
 		fl.Apply(op.Op, op.Operands, textflow.NoOwner)
 	}
