@@ -292,7 +292,7 @@ func seeds() [][]byte {
 			"<< /Type /Page /Parent 2 0 R >>",
 			"<< /Filter /Standard /V 2 /R 3 /Length 256 /P -44 /O <" + strings.Repeat("AB", 32) + "> /U <" + strings.Repeat("CD", 32) + "> >>",
 		}, "/Encrypt 4 0 R /ID [<00112233445566778899AABBCCDDEEFF> <00112233445566778899AABBCCDDEEFF>] "),
-	}, append(append(append(append(append(deepNestingSeeds(), budgetSeedBytes()...), type1SeedBytes()...), append(cffSeedBytes(), std14SeedBytes()...)...), xrefSeedBytes()...), cryptV5SeedBytes()...)...)
+	}, append(append(append(append(append(deepNestingSeeds(), budgetSeedBytes()...), type1SeedBytes()...), append(cffSeedBytes(), std14SeedBytes()...)...), xrefSeedBytes()...), append(cryptV5SeedBytes(), clipSeedBytes()...)...)...)
 }
 
 // deepNestingDepth is deep enough to cross the parser's nesting bound many

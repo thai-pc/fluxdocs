@@ -618,13 +618,18 @@ func leakCases() []leakCase {
 			9: stm("", "1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f"),
 		}, "", 3), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
 		// Batch C review round 3 (BL-A): no clip narrows a paint (C46).
-		// FluxDocs' renderer ignores W/W* and text clips, and readers
-		// disagree on edge cases, so an image painted under a clip that
+		// Readers disagree on clip edge cases (FluxDocs' renderer applies
+		// W/W* but not text clips), so an image painted under a clip that
 		// keeps it away from the region is still removed.
 		{name: "d5_clip_re_W_n", pdf: clippedImage("0 0 50 50 re W n"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
 		{name: "d5_clip_text_Tr7", pdf: clippedImage("BT 7 Tr /F1 48 Tf 20 20 Td (CLIP) Tj ET"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
 		{name: "d5_clip_text_Tr4.5", pdf: clippedImage("BT 4.5 Tr /F1 48 Tf 20 20 Td (CLIP) Tj ET"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
 		{name: "d5_clip_no_point", pdf: clippedImage("h W n"), area: partial(300, 300, 100, 100), ops: []leakOp{opArea}, want: clean},
+		// docs/design/clipping-paths.md §8: text clipped away entirely (the
+		// renderer shows nothing for it) is still in the content, so a region
+		// over it removes it.
+		{name: "d5_clip_text_outside_W", pdf: page("q 0 0 1 1 re W n BT /F1 12 Tf 305 350 Td " + S + " Tj ET Q"), area: partial(300, 300, 100, 100), ops: []leakOp{opText, opArea}, want: clean},
+		{name: "d5_clip_text_outside_general_W", pdf: page("q 0 0 m 1 0 l 0 1 l h W* n BT /F1 12 Tf 305 350 Td " + S + " Tj ET Q"), area: partial(300, 300, 100, 100), ops: []leakOp{opText, opArea}, want: clean},
 		{name: "d5_sh_under_W_clip", pdf: onePage{content: []string{"q 0 0 50 50 re W n /Sh sh Q BT /F1 12 Tf 305 350 Td " + S + " Tj ET"},
 			res:   "<< /Font << /F1 5 0 R >> /Shading << /Sh << /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 400 0] /Function 6 0 R >> >> >>",
 			extra: map[int]string{6: stm("/FunctionType 0 /Domain [0 1] /Range [0 1] /Size [11] /BitsPerSample 8", secret)}}.pdf,
