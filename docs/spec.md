@@ -1096,7 +1096,9 @@ and npm downloads.
 
 **Weeks 3–4: Advanced rendering + WASM**
 - Font decoder (TrueType, basic Type1 — enough for 90% of real PDFs)
-- Render complex vector paths (Bezier curves, clipping)
+- Render complex vector paths (Bezier curves, clipping). *Status:* `W`/`W*`
+  path clipping is implemented (`docs/design/clipping-paths.md`, Phase A);
+  text clipping (`Tr` 4–7) is not yet
 - Build the WASM target, test it running in a browser via Canvas
 - Goroutine pool for parallel multi-page rendering
 
@@ -1648,7 +1650,9 @@ function renderPage(page, canvas):
             case 'Tf': graphicsState.font = resolveFont(token.fontName, token.size)
             case 'Tj': drawText(canvas, token.text, graphicsState)
             case 'm', 'l', 'c': graphicsState.path.addSegment(token)
-            case 'f', 'S':      canvas.paintPath(graphicsState.path, graphicsState)
+            case 'W', 'W*':     pendingClip = token.rule   // takes effect after the next paint
+            case 'f', 'S', 'n': canvas.paintPath(graphicsState.path, graphicsState)  // 'n' paints nothing
+                                if pendingClip: graphicsState.clip = intersect(graphicsState.clip, graphicsState.path, pendingClip)
             case 'Do':          drawXObject(canvas, token.name, graphicsState)  // image or form
             // ... ~40 other operators per the PDF 32000-1 spec
 
@@ -1670,7 +1674,9 @@ above runs under a per-page budget (design: `docs/design/render-budget.md`).
   - internal caps on decoded image samples, decoded content bytes, bytes
     decoded for images and fonts beyond their samples (every decode is capped
     at what is left, so a Flate bomb behind a 1×1 image re-decoded on each `Do`
-    is bounded), and current path points.
+    is bounded), current path points, and the bytes of the clip masks alive
+    at once (128 MiB; a non-rectangular `W`/`W*` clip builds a 1-bit mask,
+    charged as raster work, while a rectangular one allocates nothing).
 - **Graphics-state stack:** `q` nesting is capped at 1024 saved states. Past
   the cap a `q` is counted, not saved, and its matching `Q` is swallowed, so a
   flood of `q` cannot exhaust memory.

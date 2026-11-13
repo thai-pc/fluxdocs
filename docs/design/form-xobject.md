@@ -35,8 +35,11 @@ In scope this increment:
 Explicitly **out of scope** (defer; must degrade gracefully — no crash, rest of
 page still renders):
 
-- General clipping via `W` / `W*` (arbitrary clip paths). Still ignored, exactly
-  as today. Only the form `/BBox` produces a clip, and only an axis-aligned one.
+- General clipping via `W` / `W*` (arbitrary clip paths). Out of scope for this
+  note, which clips only to the form `/BBox`, axis-aligned. *Update:* path
+  clipping is now implemented (docs/design/clipping-paths.md, Phase A), and a
+  form's content clips inside its `/BBox`; text clipping (`Tr` 4–7) is still
+  not modelled.
 - `/Group` transparency groups (soft masks, isolated/knockout, blend modes).
   A form with a `/Group` is rendered as an ordinary form (group semantics
   ignored). Acceptable Wave-1 fidelity.
@@ -230,7 +233,8 @@ decode error → graceful no-op.
 
 ## 5. Clipping to `/BBox` — recommended: cheap axis-aligned device rect
 
-Clipping is not modelled today (`W`/`W*` are ignored). Two options for `/BBox`:
+Clipping was not modelled when this note was written (`W`/`W*` were ignored;
+since implemented, see docs/design/clipping-paths.md). Two options for `/BBox`:
 
 - **(a) Skip BBox clipping.** Simplest, but a form whose content draws outside
   its `/BBox` (legal, and relied upon by `/BBox` to crop) will **overpaint** the
@@ -264,8 +268,9 @@ Clipping is not modelled today (`W`/`W*` are ignored). Two options for `/BBox`:
   shared `raster.clip` is safe.
 
 Scope discipline: this clip machinery is introduced **only** for form `/BBox`.
-`W`/`W*` general path clipping stays out of scope and continues to be ignored;
-do not wire it up here. (Rotated/skewed `/Matrix` makes the axis-aligned box
+`W`/`W*` general path clipping stayed out of scope here; it has since been
+implemented on top of this clip by docs/design/clipping-paths.md (text clips,
+`Tr` 4–7, are still not modelled). (Rotated/skewed `/Matrix` makes the axis-aligned box
 larger than the true clip → mild overpaint only, never lost content — see O3.)
 
 ---

@@ -232,7 +232,8 @@ gives no cancellation. It is only used at the WASM boundary, see §5.)
 
 - Budget trip: `render.Page` returns `nil, fmt.Errorf("%w: %s %d > %d", ErrBudgetExceeded, resource, used, limit)`,
   where resource is one of `paint work`, `operators`, `image samples`,
-  `content bytes`, or `path points`.
+  `content bytes`, `decoded bytes`, `path points`, or `clip masks` (the live
+  clip-mask bytes, docs/design/clipping-paths.md §3.4).
   `core` wraps it at the boundary: `fmt.Errorf("%w: page %d: %w",
   ErrRenderBudgetExceeded, index, err)`. Go ≥ 1.20 multi-`%w`, so
   `errors.Is` matches both the core sentinel and `render.ErrBudgetExceeded`.
