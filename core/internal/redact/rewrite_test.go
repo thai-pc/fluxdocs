@@ -107,10 +107,10 @@ func TestRewriteRemovesWhatMeetsRegions(t *testing.T) {
 		{"gs /LW not a number meets every region", fixture{content: "/GS1 gs 300 100 m 300 700 l S",
 			res: "<< /ExtGState << /GS1 << /LW /Big >> >> >>"},
 			Rect{X: 0, Y: 0, Width: 1, Height: 1}, []string{" S"}, nil, false, ""},
-		// No clip narrows a paint (C46, reverting C44): FluxDocs' renderer
-		// ignores W/W* and text clips, so what a clip hides is still shown in
-		// our viewer, and readers disagree on edge cases (Tr 4.5, a clip
-		// with no point).
+		// No clip narrows a paint (C46, reverting C44): readers disagree on
+		// clip edge cases (Tr 4.5, a clip with no point), and FluxDocs'
+		// renderer applies W/W* but not text clips, so a paint under a clip
+		// that keeps it away from the region is still removed.
 		{"text clip does not bound a later fill", fixture{content: "BT 7 Tr /F1 48 Tf 50 50 Td (CLIP) Tj ET 0 0 612 792 re f"},
 			Rect{X: 340, Y: 340, Width: 5, Height: 5}, []string{"re f"}, []string{"(CLIP) Tj"}, false, ""},
 		{"W clip does not bound an image", fixture{content: "q 0 0 50 50 re W n 612 0 0 792 0 0 cm /X Do Q", res: xres, extra: img},
