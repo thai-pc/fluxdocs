@@ -250,8 +250,11 @@ func (d *Document) RedactArea(pageIndex int, rect Rect) error {
 // cannot be redacted safely (redaction fails closed rather than miss content
 // other viewers render; ExtractText and RenderPage stay lenient on such
 // content) — including a page automatic extension reaches that cannot be
-// redacted, e.g. one that shows the removed text through a form (the detail
-// then starts with "automatic extension") —, ErrInvalidPDF (wrapped) for page
+// redacted, e.g. one that shows the removed text through a form, and
+// removed text held by a form, pattern, soft-mask group or Type 3 glyph
+// procedure a redacted page paints (or an object it uses), which redaction
+// does not rewrite (the detail then starts with "automatic extension") —,
+// ErrInvalidPDF (wrapped) for page
 // content that cannot be decoded, a build error, ErrRedactionVerification
 // (wrapped; it matches ErrInternal) when the output would still hold removed
 // content or automatic extension did not converge ("not_converged"), or
@@ -374,6 +377,13 @@ func (d *Document) RedactAndFlatten() (_ *Document, err error) {
 		}
 		out, res, err := d.verifyRedaction(built, plan, ns, prepassed, budget)
 		if err != nil {
+			// Removed text in objects only redacted pages keep, all of them
+			// units Phase 1 does not rewrite (or objects those use), is that
+			// unit's refusal (redact_owned.go).
+			var owned *ownedHitError
+			if errors.As(err, &owned) {
+				return nil, d.attributeOwned(plan, owned)
+			}
 			return nil, err
 		}
 		if res.empty() {

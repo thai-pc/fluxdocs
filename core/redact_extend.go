@@ -285,8 +285,9 @@ func newRedactPlan(boxes, regions map[int][]Rect, marks map[int][]redact.Mark, p
 // is refused for another reason — when a page cannot be searched for
 // certain (its content or a unit it paints does not decode, or the strict
 // scanner reports a loss in it, behind which a lenient reading may hide
-// text), or past the call's budget. The detail of a refusal of a page the
-// caller did not plan starts with extensionDetail.
+// text), or past the call's budget. The detail of a refusal the search
+// causes starts with extensionDetail, whether or not the caller planned the
+// page.
 func (d *Document) prepass(plan *redactPlan, ns *needleSets, models map[int]*redact.Page, outs map[int]redact.Output, budget *callBudget) error {
 	sc := redact.NewTextScanner(d.resolver, ns.prop)
 	defer func() {
@@ -384,7 +385,10 @@ func extensionRefusal(err error) error {
 }
 
 // extensionDetail starts the detail of every refusal automatic extension
-// causes: the page refused is not one the caller planned.
+// causes: removed text found where it cannot be removed (in a unit, on any
+// page, the caller's included), a page the extension reaches that cannot be
+// redacted or searched for certain, or its budget. A refusal of a page the
+// caller planned, for the page's own content, does not carry it.
 const extensionDetail = "automatic extension: "
 
 // extensionScanError reports a page that automatic extension or

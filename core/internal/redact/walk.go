@@ -258,6 +258,10 @@ type walker struct {
 	// cover both.
 	glyphWX  map[*parse.Stream]float64
 	type3Adv map[uintptr]iv
+
+	// units, when set (PaintedUnits), receives the route of every unit
+	// walked, by object number.
+	units map[int]unitKind
 }
 
 func newWalker(r *parse.Resolver) *walker {
@@ -906,6 +910,9 @@ func ownScopes(sc *scope, kind unitKind, ownRes bool) []parse.Dict {
 // painting in sc; depth is st's own depth (the page is 0, its children 1). num
 // is its object number (0 if unknown), for the refusal detail.
 func (w *walker) walkUnit(st *parse.Stream, num int, kind unitKind, sc *scope, depth int) error {
+	if _, seen := w.units[num]; w.units != nil && num > 0 && !seen {
+		w.units[num] = kind
+	}
 	if w.path[st] {
 		return nil // already being checked further up this chain
 	}

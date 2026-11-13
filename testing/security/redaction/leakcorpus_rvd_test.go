@@ -194,6 +194,24 @@ func rvdCases() []leakCase {
 		// so the comment cannot be removed and the extension refuses.
 		{name: "r2_other_form_comment", pdf: twoPagesRes(show(S), "<< /Font << /F1 5 0 R >> /XObject << /Fm1 9 0 R >> >>", show("(public)")+" /Fm1 Do", "",
 			map[int]string{9: stm("/Type /XObject /Subtype /Form /BBox [0 0 10 10]", "%"+secret+"\n0 0 1 1 re f")}), ops: both, want: refuse, reason: "form_text"},
+		// The same in a form only the redacted page paints, for removed text
+		// that does not propagate (7 characters under a region) or that only
+		// an object the form uses holds: automatic extension searches what
+		// only redacted pages keep for every removed text, as verification
+		// does, and refuses (it was a verification failure).
+		{name: "r2_own_form_comment_short", pdf: onePage{content: []string{show("(AB-1234)") + " /Fm1 Do"},
+			res:   "<< /Font << /F1 5 0 R >> /XObject << /Fm1 9 0 R >> >>",
+			extra: map[int]string{9: stm("/Type /XObject /Subtype /Form /BBox [0 0 10 10]", "%AB-1234\n0 0 1 1 re f")}}.pdf,
+			ops: []leakOp{opArea}, area: line0, want: refuse, reason: "form_text"},
+		{name: "r2_own_form_dict_short", pdf: onePage{content: []string{show("(AB-1234)") + " /Fm1 Do"},
+			res:   "<< /Font << /F1 5 0 R >> /XObject << /Fm1 9 0 R >> >>",
+			extra: map[int]string{9: stm("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /X (AB-1234)", "0 0 1 1 re f")}}.pdf,
+			ops: []leakOp{opArea}, area: line0, want: refuse, reason: "form_text"},
+		{name: "r2_own_form_metadata", pdf: onePage{content: []string{show(S) + " /Fm1 Do"},
+			res: "<< /Font << /F1 5 0 R >> /XObject << /Fm1 9 0 R >> >>",
+			extra: map[int]string{9: stm("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Metadata 10 0 R", "0 0 1 1 re f"),
+				10: stm("/Type /Metadata /Subtype /XML", "<x>"+secret+"</x>")}}.pdf,
+			ops: both, area: line0, want: refuse, reason: "form_text"},
 		{name: "r2_other_actualtext_control", pdf: otherPage("/Span <</ActualText (" + secret + ")>> BDC " + show("(public)") + " EMC"), ops: both, want: clean},
 		{name: "r2_other_named_X_control", pdf: twoPagesRes(show(S), "<< /Font << /F1 5 0 R >> /Properties << /P0 << /X ("+secret+") >> >> >>", "/Span /P0 BDC "+show("(public)")+" EMC", "", nil), ops: both, want: clean},
 		{name: "rvd_unknown_subtype_name", pdf: twoPagesRes(show(S), "<< /Font << /F1 5 0 R >> >>", show("(public)"), " /Annots [9 0 R]",

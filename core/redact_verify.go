@@ -226,7 +226,8 @@ func (res *residuals) addAnnot(page, idx int, tags uint8) {
 }
 
 // searchObjects is checks 2 and 3b of verifyRedaction: owned objects and
-// orphans for every needle (a hit fails), the objects only the other pages
+// orphans for every needle (a hit fails: an *ownedHitError, which
+// RedactAndFlatten attributes, redact_owned.go), the objects only the other pages
 // reach for the propagating needles (a hit is a residual, attributed to the
 // pages and annotations that reach it). Content streams walked (with fonts)
 // are not searched by bytes again for the propagating needles.
@@ -236,43 +237,9 @@ func (res *residuals) addAnnot(page, idx int, tags uint8) {
 // one of the readings the pre-pass matched.
 func (d *Document) searchObjects(out *Document, plan *redactPlan, ns *needleSets, walked map[*parse.Stream]bool, res *residuals, budget *callBudget) error {
 	r := out.resolver
-	roles, err := redact.ObjectRoles(r, maxVerifyObjects)
+	cls, err := classifyOutput(out, plan)
 	if err != nil {
-		return &RedactionError{Page: -1, Reason: RedactionBudgetExceeded, Detail: "the redacted output has too many objects to verify"}
-	}
-	// A page object belongs to its own side (closeInto does not add page
-	// objects): its direct values (a direct annotation, /PieceInfo) are
-	// searched with it.
-	inM, inU := map[int]bool{}, map[int]bool{}
-	for i, pi := range out.pageInfos {
-		set := inU
-		if plan.redacted(i) {
-			set = inM
-		}
-		if n := pi.ObjectNumber(); n > 0 {
-			set[n] = true
-		}
-		if _, err := closeInto(r, set, pageRoots(pi), closeAll); err != nil {
-			return &RedactionError{Page: -1, Reason: RedactionBudgetExceeded, Detail: "the redacted output has too many objects to verify"}
-		}
-	}
-	// The structure: the catalog, the page tree, /Info.
-	structural := map[int]bool{}
-	if ref, ok := r.Trailer()["Root"].(parse.Reference); ok {
-		structural[ref.Number] = true
-	}
-	if ref, ok := r.Trailer()["Info"].(parse.Reference); ok {
-		structural[ref.Number] = true
-	}
-	maxNum := r.MaxObjectNumber()
-	for num := 1; num <= maxNum; num++ {
-		if obj, err := r.Resolve(parse.Reference{Number: num}); err == nil {
-			if d, ok := obj.(parse.Dict); ok {
-				if t, _ := d["Type"].(parse.Name); t == "Pages" {
-					structural[num] = true
-				}
-			}
-		}
+		return err
 	}
 
 	// Strings shown by content streams of the other pages are read as
@@ -280,17 +247,19 @@ func (d *Document) searchObjects(out *Document, plan *redactPlan, ns *needleSets
 	// then one the pre-pass would have found (attributable to the page).
 	search := &redact.ObjectSearch{R: r, Budget: maxRedactCallDecoded - budget.used}
 	uHits := map[int]uint8{} // objects of R_u holding a propagating needle: their tags
-	for num := 1; num <= maxNum; num++ {
-		if structural[num] {
+	// hit is the failure on the first owned object or orphan holding removed
+	// text; the search then only collects the others, for attribution
+	// (attributeOwned), and the failure is returned as it was found.
+	var hit *ownedHitError
+objects:
+	for num := 1; num <= cls.maxNum; num++ {
+		if cls.structural[num] {
 			continue
 		}
-		role, reached := roles[num]
-		if !reached {
-			role = redact.RoleData | redact.RoleUnreached
-		}
+		role := cls.role(num)
 		switch {
-		case inU[num]:
-			if ns.prop.Len() == 0 {
+		case cls.inU[num]:
+			if ns.prop.Len() == 0 || hit != nil {
 				continue
 			}
 			if role&redact.RoleContent != 0 {
@@ -315,11 +284,17 @@ func (d *Document) searchObjects(out *Document, plan *redactPlan, ns *needleSets
 				uHits[num] = tags
 			}
 		default: // owned (inM only) or an orphan
-			if inM[num] && isRewrittenContent(out, plan, num) {
-				continue // checked by the strict re-read (1)
+			tags, err := searchOwned(out, plan, cls, search, ns, num)
+			if hit != nil {
+				switch {
+				case err != nil:
+					hit.complete = false
+					break objects
+				case tags != 0:
+					hit.hits = append(hit.hits, num)
+				}
+				continue
 			}
-			search.Latin1Shown = false
-			tags, err := search.Search(num, role, ns.all, ns.raw)
 			if errors.Is(err, redact.ErrUndecodable) {
 				return &RedactionError{Page: -1, Reason: RedactionContentAmbiguous,
 					Detail: fmt.Sprintf("object %d of the output, which only redacted pages keep, does not decode, so it cannot be verified", num)}
@@ -329,12 +304,16 @@ func (d *Document) searchObjects(out *Document, plan *redactPlan, ns *needleSets
 			}
 			if tags != 0 {
 				where := "an orphan object"
-				if inM[num] {
+				if cls.inM[num] {
 					where = "an object only redacted pages reach"
 				}
-				return verificationError("removed text survives in %s (object %d of the output)", where, num)
+				hit = &ownedHitError{err: verificationError("removed text survives in %s (object %d of the output)", where, num),
+					out: out, hits: []int{num}, complete: true}
 			}
 		}
+	}
+	if hit != nil {
+		return hit
 	}
 	budget.used = maxRedactCallDecoded - search.Budget
 	if len(uHits) > 0 {
