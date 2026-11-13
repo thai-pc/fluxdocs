@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/png"
+	"math"
 	"testing"
 
 	"github.com/thai-pc/fluxdocs/core/internal/std14/faces"
@@ -83,6 +84,47 @@ func TestGlyph_InvisibleRenderMode(t *testing.T) {
 	img := renderFontPDF(t, "BT /F1 60 Tf 3 Tr 20 80 Td (Hello) Tj ET")
 	if got := darkPixels(img); got != 0 {
 		t.Errorf("dark pixels = %d, want 0 for invisible render mode", got)
+	}
+}
+
+// TestGlyph_RenderModeExactInteger: Tr selects a mode only when its operand
+// is exactly an integer 0–7 (redaction-hardening.md C54). Any other value
+// fills like mode 0, as Ghostscript renders it, where truncation made 3.5
+// and 7.9 invisible.
+func TestGlyph_RenderModeExactInteger(t *testing.T) {
+	fill := darkPixels(renderFontPDF(t, "BT /F1 60 Tf 20 80 Td (Hello) Tj ET"))
+	if fill < 100 {
+		t.Fatalf("mode 0 drew %d dark pixels", fill)
+	}
+	for _, tt := range []struct {
+		tr      string
+		visible bool
+	}{
+		{"0", true}, {"3", false}, {"3.0", false}, {"7", false}, {"7.0", false},
+		{"3.5", true}, {"7.9", true}, {"2.999", true}, {"-3", true}, {"8", true},
+		{"1e300", true}, {"/Seven", true}, {"", true},
+	} {
+		got := darkPixels(renderFontPDF(t, "BT /F1 60 Tf "+tt.tr+" Tr 20 80 Td (Hello) Tj ET"))
+		if want := map[bool]int{true: fill, false: 0}[tt.visible]; got != want {
+			t.Errorf("%q Tr: %d dark pixels, want %d", tt.tr, got, want)
+		}
+	}
+	for _, tt := range []struct {
+		ops  []parse.Object
+		want int
+	}{
+		{nil, 0},
+		{[]parse.Object{parse.Integer(4)}, 4},
+		{[]parse.Object{parse.Real(4)}, 4},
+		{[]parse.Object{parse.Real(4.5)}, 0},
+		{[]parse.Object{parse.Real(math.NaN())}, 0},
+		{[]parse.Object{parse.Real(math.Inf(1))}, 0},
+		{[]parse.Object{parse.Integer(1), parse.Integer(7)}, 7}, // the last operand, as other operators
+		{[]parse.Object{parse.Name("x")}, 0},
+	} {
+		if got := textRenderMode(tt.ops); got != tt.want {
+			t.Errorf("textRenderMode(%v) = %d, want %d", tt.ops, got, tt.want)
+		}
 	}
 }
 

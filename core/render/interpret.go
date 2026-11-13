@@ -2,6 +2,7 @@ package render
 
 import (
 	"image/color"
+	"math"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
@@ -31,7 +32,7 @@ type gstate struct {
 	hScale     float64 // Tz/100; 1.0 = normal
 	leading    float64 // TL
 	rise       float64 // Ts
-	renderMode int     // Tr; 3 and 7 are invisible
+	renderMode int     // Tr, 0–7 (textRenderMode); 3 and 7 are invisible
 }
 
 // interp interprets a page's content operators onto a raster surface. It builds
@@ -285,7 +286,7 @@ func (in *interp) apply(op parse.ContentOp) {
 	case "Ts":
 		in.gs.rise = lastNum(o)
 	case "Tr":
-		in.gs.renderMode = int(lastNum(o))
+		in.gs.renderMode = textRenderMode(o)
 
 	// --- text positioning ---
 	case "Td":
@@ -343,6 +344,22 @@ func lastNum(o []parse.Object) float64 {
 		return 0
 	}
 	return num(o[len(o)-1])
+}
+
+// textRenderMode returns the text rendering mode a Tr operand list sets
+// (§9.3.6, Table 106): its last operand when that is exactly an integer 0–7
+// (an integer-valued real such as 7.0 included), else 0, fill. Truncating
+// instead read 4.5 as a clip mode and 3.5 as invisible text; Ghostscript
+// renders any non-integer or out-of-range mode as fill. For a well-formed
+// single operand, redaction's text model takes the same exact integers as
+// modes and treats any other operand as undefined, a superset of fill
+// (docs/design/redaction-hardening.md C54); it rejects other operand counts,
+// where this reads the last.
+func textRenderMode(o []parse.Object) int {
+	if v := lastNum(o); v == math.Trunc(v) && v >= 0 && v <= 7 {
+		return int(v)
+	}
+	return 0
 }
 
 // lastStr returns the bytes of the last String operand, or nil.
