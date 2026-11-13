@@ -336,12 +336,14 @@ func inflateReference(t *testing.T, size, n int) time.Duration {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Inflate into a fresh buffer, as a decode does: the allocation, its
-		// page faults and the GC work it causes are most of a bomb's cost on
-		// a small runner, not the inflate itself.
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(zr, buf); err != nil {
-			t.Fatal(err)
+		// Read the way the decoder does (core/parse inflate: io.ReadAll over
+		// a LimitReader), so the buffer grows by doubling: those
+		// allocations, their page faults and the GC work they cause are
+		// most of a bomb's cost on a small runner, not the inflate itself.
+		// A single exact-size buffer measured about half of it.
+		buf, err := io.ReadAll(io.LimitReader(zr, int64(size)+1))
+		if err != nil || len(buf) != size {
+			t.Fatalf("inflate reference: %d bytes, err %v", len(buf), err)
 		}
 	}
 	return cpuTime() - start
