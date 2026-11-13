@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thai-pc/fluxdocs/core/internal/std14/faces"
 	"github.com/thai-pc/fluxdocs/core/parse"
 	"golang.org/x/image/font/gofont/goregular"
 )
@@ -49,7 +50,7 @@ func fontFixtures() []struct {
 } {
 	f := t1TestFont()
 	l1, l2, l3 := f.Lengths()
-	return []struct {
+	fixtures := []struct {
 		name     string
 		mk       func(string) []byte
 		ink, gap string
@@ -66,6 +67,10 @@ func fontFixtures() []struct {
 			}, "<< /Size 6 /Root 1 0 R >>")
 		}, "HIx", "H x"},
 	}
+	if !faces.Enabled {
+		fixtures = fixtures[:2] // the standard-14 face is not compiled in (nostd14)
+	}
+	return fixtures
 }
 
 // TestTextClip_Modes: in each clip mode a full-page fill after ET paints
@@ -423,8 +428,12 @@ func textClipParityPage() []byte {
 
 // TestTextClip_ParityHash pins the text-clip fixture's pixels, so native
 // amd64 and js/wasm renders are byte-identical (§7; arm64 is not checked,
-// see clipParityFixture).
+// see clipParityFixture). The fixture draws Helvetica with the bundled
+// substitute face, which -tags nostd14 leaves out.
 func TestTextClip_ParityHash(t *testing.T) {
+	if !faces.Enabled {
+		t.Skip("faces not compiled in (nostd14)")
+	}
 	img := renderPDF(t, textClipParityPage())
 	if got := imgHash(img); got != textClipParityHash {
 		t.Errorf("text-clip parity fixture hash = %s, want %s", got, textClipParityHash)
