@@ -4,13 +4,14 @@
 // fonts, parsed via golang.org/x/image/font/sfnt, and embedded Type 1 fonts
 // (/FontFile) and bare CFF fonts (/FontFile3 /Type1C and /CIDFontType0C),
 // parsed by core/internal/psfont, plus a common subset of image XObjects (see
-// image.go), clipped by W/W* clipping paths and Form XObject bounding boxes
-// (clip.go). Simple fonts with no embedded program (the standard 14 included)
-// are drawn with a bundled substitute face (substitute.go). Type 3 fonts and
-// shadings are not yet rendered, and the clipping effect of text render modes
-// 4–7 is not modelled (Tr itself is honoured: modes 3 and 7 are invisible);
-// the interpreter skips what it does not render rather than failing, so a page
-// still rasterizes (minus those elements) instead of erroring.
+// image.go), clipped by W/W* clipping paths, Form XObject bounding boxes
+// (clip.go) and text shown in the clipping render modes 4–7 (textclip.go).
+// Simple fonts with no embedded program (the standard 14 included) are drawn
+// with a bundled substitute face (substitute.go). Type 3 fonts, shadings and
+// stroked text are not yet rendered (render modes 1, 2, 5 and 6 fill; 3 and
+// 7 are invisible); the interpreter skips what it does not render rather
+// than failing, so a page still rasterizes (minus those elements) instead of
+// erroring.
 //
 // Two build targets share this code: the native binary and GOOS=js/GOARCH=wasm.
 package render

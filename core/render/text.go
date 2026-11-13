@@ -9,22 +9,35 @@ import (
 // drawText rasterizes a shown string with the current font and text state,
 // advancing the text matrix by each code's width w0 (glyphFont.advance: a
 // simple font's /Widths) plus character and word spacing. Invisible render
-// modes (3, 7) advance without drawing. Every glyph, drawn or only advanced,
-// is one budget step, so one Tj with a huge string is bounded like a huge
+// modes (3, 7) advance without painting; the clip modes (4–7) also add each
+// glyph to the text object's clip (textclip.go), so a clip-mode string shown
+// with no font discards that clip. Every glyph, drawn or only advanced, is
+// one budget step, so one Tj with a huge string is bounded like a huge
 // operator list.
 func (in *interp) drawText(raw []byte) {
 	gf := in.gs.font
-	if gf == nil || len(raw) == 0 {
+	if len(raw) == 0 {
 		return
 	}
-	invisible := in.gs.renderMode == 3 || in.gs.renderMode == 7
+	mode := in.gs.renderMode
+	clips := clipModes(mode)
+	if gf == nil {
+		if clips {
+			in.spoilTextClip() // no outline to clip with (fail-visible)
+		}
+		return
+	}
+	paints := mode != 3 && mode != 7
 
 	gf.forEachCode(raw, func(code uint32, isSpace bool) bool {
 		if !in.b.step() {
 			return false
 		}
 		gid, ok := gf.gid(code)
-		if ok && !invisible {
+		switch {
+		case clips:
+			in.showClipGlyph(gf, gid, ok, paints)
+		case ok && paints:
 			in.drawGlyph(gf, gid)
 		}
 
@@ -63,30 +76,37 @@ func (in *interp) drawTextArray(operands []parse.Object) {
 	}
 }
 
-// drawGlyph fills one glyph outline at the current text position: the
-// program maps it from glyph space through the text state (font size,
-// horizontal scale, rise), the text matrix and the CTM.
+// drawGlyph fills one glyph outline at the current text position.
 func (in *interp) drawGlyph(gf *glyphFont, gid uint32) {
+	if subpaths, ok := in.glyphOutline(gf, gid); ok && len(subpaths) > 0 {
+		in.rs.fillPath(subpaths, in.gs.fill, false) // nonzero winding (handles holes)
+	}
+}
+
+// glyphOutline returns one glyph's outline at the current text position, in
+// device space: the program maps it from glyph space through the text state
+// (font size, horizontal scale, rise), the text matrix and the CTM. ok is
+// false when the outline cannot be built or the budget stops; an empty
+// outline (a space) is ok.
+func (in *interp) glyphOutline(gf *glyphFont, gid uint32) ([][]point, bool) {
 	subpaths, ok := gf.prog.subpaths(gid, glyphXform{
 		fontSize: in.gs.fontSize, hScale: in.gs.hScale, rise: in.gs.rise,
 		tm: in.tm, ctm: in.gs.ctm,
 	})
 	if !ok {
-		return
+		return nil, false
 	}
 	// Loading and flattening an outline costs more per point than fillPath's
 	// fillPointCost setup charge: charge the difference, so a flood of tiny
-	// visible glyphs is bounded like any other raster work.
+	// glyphs is bounded like any other raster work.
 	npts := 0
 	for _, sp := range subpaths {
 		npts += len(sp)
 	}
 	if !in.b.chargePaint(int64(npts) * glyphPointCost) {
-		return
+		return nil, false
 	}
-	if len(subpaths) > 0 {
-		in.rs.fillPath(subpaths, in.gs.fill, false) // nonzero winding (handles holes)
-	}
+	return subpaths, true
 }
 
 // segmentsToSubpaths converts sfnt glyph segments to device-space polylines,

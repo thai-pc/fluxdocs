@@ -20,8 +20,8 @@ type gstate struct {
 
 	// clip is the device-space clip (clip.go): a rectangle and an optional
 	// shared mask. It lives in gstate so q/Q (and a Form XObject's implicit
-	// q/Q) save and restore it. A form's /BBox and W/W* clip paths narrow it
-	// (§8.5.4); text clipping (Tr 4–7) is not modeled yet.
+	// q/Q) save and restore it. A form's /BBox, W/W* clip paths (§8.5.4) and
+	// text objects shown in modes 4–7 (§9.3.6, textclip.go) narrow it.
 	clip clipState
 
 	// Text state (§9.3).
@@ -88,6 +88,11 @@ type interp struct {
 	// formClips holds the clip mask of each active form's saved state, which
 	// the form restores on exit (clip-mask liveness, clip.go).
 	formClips []*clipMask
+
+	// textClip is the clip accumulated by the open text object from the
+	// glyphs it shows in modes 4–7, applied at ET (textclip.go); nil until
+	// its first clip-mode glyph. Like the path, it is not graphics state.
+	textClip *textClip
 }
 
 // maxSaveDepth caps the graphics-state stack (q nesting). ISO 32000-1 Annex C
@@ -104,7 +109,9 @@ const maxSaveDepth = 1024
 // form-recursion controls, the full-canvas clip and the render's font loader)
 // and hands the operator loop to interpret.
 func run(rs *raster, base matrix, ops []parse.ContentOp, res *parse.Resolver, resources parse.Dict) {
-	newInterp(rs, base, res, resources).interpret(ops)
+	in := newInterp(rs, base, res, resources)
+	in.interpret(ops)
+	in.dropTextClip() // a text object without ET narrows nothing
 }
 
 // newInterp returns the page-level interpreter run uses, before any operator.
@@ -160,6 +167,12 @@ func (in *interp) apply(op parse.ContentOp) {
 		}
 		in.stack = append(in.stack, in.gs)
 	case "Q":
+		// Q inside a text object (which ISO does not allow) discards its
+		// clip accumulation (textclip.go): the clip it restores may be wider
+		// than the box the accumulation covers.
+		if in.textClip != nil {
+			in.spoilTextClip()
+		}
 		if in.skippedQ > 0 {
 			in.skippedQ--
 			break
@@ -264,10 +277,13 @@ func (in *interp) apply(op parse.ContentOp) {
 
 	// --- text state ---
 	case "BT":
+		in.dropTextClip() // a text object left open narrows nothing
 		in.tm = identity()
 		in.tlm = identity()
 	case "ET":
-		// no-op; glyphs are drawn eagerly
+		// Glyphs are drawn eagerly; ET applies the text object's clip, if
+		// it showed glyphs in a clip mode (textclip.go).
+		in.endTextClip()
 	case "Tf":
 		if len(o) >= 2 {
 			if name, ok := o[len(o)-2].(parse.Name); ok {

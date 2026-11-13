@@ -77,6 +77,15 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	savedCurX, savedCurY := in.curX, in.curY
 	savedStartX, savedStartY := in.startX, in.startY
 	savedPendingClip := in.pendingClip
+	// A form invoked inside a text object (which ISO does not allow)
+	// discards that object's clip accumulation, so the caller's ET narrows
+	// nothing; the form's own text objects accumulate separately
+	// (textclip.go). The discarded accumulation holds no mask.
+	if in.textClip != nil {
+		in.spoilTextClip()
+	}
+	savedTextClip := in.textClip
+	in.textClip = nil
 
 	if hasRef {
 		in.formPath[ref] = true
@@ -91,6 +100,9 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 	// q/Q balance.
 	defer func() {
 		in.formDepth--
+		// A text object the form leaves open narrows nothing. Dropped
+		// before the unwinding below, so its mask is not live past the form.
+		in.dropTextClip()
 		if hasRef {
 			delete(in.formPath, ref)
 		}
@@ -116,6 +128,7 @@ func (in *interp) execForm(st *parse.Stream, ref parse.Reference, hasRef bool) {
 		in.curX, in.curY = savedCurX, savedCurY
 		in.startX, in.startY = savedStartX, savedStartY
 		in.pendingClip = savedPendingClip
+		in.textClip = savedTextClip
 		in.syncClip()
 	}()
 

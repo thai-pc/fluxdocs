@@ -81,6 +81,17 @@ const (
 	// and the AND with an enclosing mask when there is one. Calibrated by
 	// BenchmarkCalibration/clip-mask and clip-and.
 	clipWordsPerUnit = 4
+	// textClipPasses is the number of clipWords passes a text object's clip
+	// accumulation is charged per row when it is allocated (textclip.go):
+	// the zeroing and the pass at ET that clears what lies outside the clip
+	// and records the row extents. In isolation one pass matches its CPU
+	// time (BenchmarkCalibration/text-clip-mask ≈ 1.0–1.08 px/unit with 1,
+	// ≈ 0.67 with 2), but a flood of text objects each allocating a
+	// page-sized mask spends as much again in the garbage collector, which a
+	// microbenchmark does not see: with one pass
+	// TestDoS_TextClipObjectFloodIsBounded ran at 2.6× the fill flood, the W
+	// clip flood at 1.7×; with two at ≈ 1.6–1.8×.
+	textClipPasses = 2
 	// maskedPixelsPerUnit is how many pixels visited under a clip mask pay
 	// one raster-work unit on top of their visits, for blend's mask test
 	// (raster.maskedExtra). Calibrated by BenchmarkCalibration/blend-masked:

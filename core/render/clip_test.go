@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
+	"golang.org/x/image/font/gofont/goregular"
 )
 
 // This file holds the clipping-path tests of docs/design/clipping-paths.md
@@ -552,7 +553,8 @@ func checkTight(t *testing.T, c clipState) {
 }
 
 // liveMaskBytes is the liveness oracle: the bytes of the distinct masks the
-// current state, the saved states and the active forms' saved states hold.
+// current state, the saved states, the active forms' saved states and the
+// open text object's clip accumulation (textclip.go) hold.
 func liveMaskBytes(in *interp) int64 {
 	seen := map[*clipMask]bool{}
 	add := func(m *clipMask) {
@@ -567,6 +569,9 @@ func liveMaskBytes(in *interp) int64 {
 	for _, m := range in.formClips {
 		add(m)
 	}
+	if in.textClip != nil {
+		add(in.textClip.mask)
+	}
 	var n int64
 	for m := range seen {
 		n += m.bytes
@@ -575,26 +580,32 @@ func liveMaskBytes(in *interp) int64 {
 }
 
 // TestClip_Liveness is §10.1 item 14: after every operator of scripted and
-// random q/W/Q/form sequences, including maxSaveDepth overflow and forms with
-// stray Q, the live clip-mask counter equals the bytes of the masks something
-// still holds.
+// random q/W/Q/form sequences, including maxSaveDepth overflow, forms with
+// stray Q and clip-mode text objects (complete, left open, with q or Q
+// inside, around a Do), the live clip-mask counter equals the bytes of the
+// masks something still holds.
 func TestClip_Liveness(t *testing.T) {
 	forms := map[string]string{
 		"F1": "q 0 0 m 50 0 l 0 50 l h W n Q Q 10 10 m 90 10 l 10 90 l h W n",
 		"F2": "q q 5 5 m 95 5 l 5 95 l h W n /F3 Do",
 		"F3": "0 0 m 100 0 l 0 100 l h W n Q 1 1 m 99 1 l 1 99 l h W* n",
 		"F4": "Q 20 20 m 80 20 l 20 80 l h W n q 30 30 m 70 30 l 30 70 l h W n",
+		"F5": "BT 7 Tr /F1 40 Tf 5 30 Td (Hx) Tj ET q BT 4 Tr /F1 30 Tf (I) Tj",
+		"F6": "Q BT 7 Tr /F1 40 Tf 5 30 Td (H) Tj /F5 Do ET",
 	}
 	objs := map[int]string{
-		1: "<< /Type /Catalog /Pages 2 0 R >>",
-		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
-		3: "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R >> >> /Contents 4 0 R >>",
-		4: streamObj(""),
+		1:  "<< /Type /Catalog /Pages 2 0 R >>",
+		2:  "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+		3:  "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R /F5 9 0 R /F6 10 0 R >> /Font << /F1 11 0 R >> >> /Contents 4 0 R >>",
+		4:  streamObj(""),
+		11: "<< /Type /Font /Subtype /TrueType /BaseFont /GoRegular /FontDescriptor 12 0 R >>",
+		12: "<< /Type /FontDescriptor /FontName /GoRegular /Flags 32 /FontFile2 13 0 R >>",
+		13: streamObj(string(goregular.TTF)),
 	}
-	for i, n := range []string{"F1", "F2", "F3", "F4"} {
-		objs[5+i] = streamObjDict("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /XObject << /F3 7 0 R >> >>", forms[n])
+	for i, n := range []string{"F1", "F2", "F3", "F4", "F5", "F6"} {
+		objs[5+i] = streamObjDict("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /XObject << /F3 7 0 R /F5 9 0 R >> /Font << /F1 11 0 R >> >>", forms[n])
 	}
-	r, err := parse.NewResolver(buildRenderPDF(objs, "<< /Size 9 /Root 1 0 R >>"))
+	r, err := parse.NewResolver(buildRenderPDF(objs, "<< /Size 14 /Root 1 0 R >>"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +613,8 @@ func TestClip_Liveness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := func(t *testing.T, src string) {
+	// run reports how many text accumulations held a mask after a glyph.
+	run := func(t *testing.T, src string) (accumulated int) {
 		t.Helper()
 		rs := newRaster(100, 100)
 		in := newInterp(rs, identity(), r, pages[0].Resources)
@@ -611,7 +623,11 @@ func TestClip_Liveness(t *testing.T) {
 			if got, want := rs.b.clipMask, liveMaskBytes(in); got != want {
 				t.Fatalf("after op %d (%s): live clip-mask bytes %d, held %d", i, op.Op, got, want)
 			}
+			if op.Op == "Tj" && in.textClip != nil && in.textClip.mask != nil {
+				accumulated++
+			}
 		}
+		return accumulated
 	}
 
 	tri := func(k int) string { return fmt.Sprintf("%d 0 m 100 %d l 0 100 l h", k, k) }
@@ -619,16 +635,24 @@ func TestClip_Liveness(t *testing.T) {
 		run(t, "q "+tri(1)+" W n q "+tri(2)+" W n "+tri(3)+" W n Q "+tri(4)+" W* n Q "+tri(5)+" W n "+
 			"q q /F1 Do Q /F2 Do /F4 Do Q "+tri(6)+" W n 10 10 50 50 re W n Q Q Q")
 	})
+	t.Run("text", func(t *testing.T) {
+		if n := run(t, "q "+tri(3)+" W n BT 7 Tr /F1 40 Tf 5 30 Td (Hx) Tj ET q BT 4 Tr (I) Tj Q ET "+
+			"BT 7 Tr (H) Tj q (x) Tj ET Q BT 7 Tr (H) Tj BT 7 Tr ( ) Tj ET /F5 Do /F6 Do "+
+			"q BT 7 Tr (H) Tj /F5 Do ET Q Q BT 7 Tr (Hx) Tj"); n < 5 {
+			t.Fatalf("%d text accumulations, want ≥ 5", n)
+		}
+	})
 	t.Run("past maxSaveDepth", func(t *testing.T) {
 		run(t, tri(1)+" W n "+strings.Repeat("q ", maxSaveDepth+5)+tri(2)+" W n "+tri(3)+" W n /F1 Do "+
 			strings.Repeat("Q ", 7)+tri(4)+" W n "+strings.Repeat("Q ", maxSaveDepth+5))
 	})
 	t.Run("random", func(t *testing.T) {
 		rng := rand.New(rand.NewPCG(31, 32))
+		texts := 0
 		for iter := 0; iter < 300; iter++ {
 			var b strings.Builder
 			for n := rng.IntN(60); n > 0; n-- {
-				switch rng.IntN(9) {
+				switch rng.IntN(14) {
 				case 0, 1:
 					b.WriteString("q ")
 				case 2, 3:
@@ -643,9 +667,22 @@ func TestClip_Liveness(t *testing.T) {
 					fmt.Fprintf(&b, "/F%d Do ", 1+rng.IntN(4))
 				case 8:
 					b.WriteString("0 0 0 0 re W n ")
+				case 9:
+					fmt.Fprintf(&b, "BT %d Tr /F1 %d Tf %d 20 Td (Hx) Tj ", 4+rng.IntN(4), 10+rng.IntN(60), rng.IntN(60))
+				case 10:
+					b.WriteString("ET ")
+				case 11:
+					b.WriteString("BT ")
+				case 12:
+					b.WriteString("( ) Tj ")
+				case 13:
+					fmt.Fprintf(&b, "/F%d Do ", 5+rng.IntN(2))
 				}
 			}
-			run(t, b.String())
+			texts += run(t, b.String())
+		}
+		if texts < 100 {
+			t.Fatalf("%d text accumulations in 300 sequences, want ≥ 100", texts)
 		}
 	})
 }

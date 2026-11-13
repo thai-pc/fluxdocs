@@ -785,6 +785,9 @@ func charged(rs *raster, paint func()) func() int64 {
 //     clipRowCost and clipWordsPerUnit;
 //   - clip-and: the same clip built inside an enclosing mask, so every row
 //     also ANDs with it; a check on clipWords;
+//   - text-clip-mask: a text object's clip accumulation over the whole
+//     canvas (allocation, one span, the ET pass), charged at
+//     textClipPasses; deliberately ≈ 0.67, see textClipPasses;
 //   - blend-masked: a full-canvas fill under a non-rectangular clip mask,
 //     the per-pixel mask test included; a check on the pixel-visit unit;
 //   - do-tiny-image: a 1×1 image Do'd repeatedly, per unit of steps + paint;
@@ -886,6 +889,16 @@ func BenchmarkCalibration(b *testing.B) {
 		calibrate(b, charged(rs, func() {
 			c := rs.buildClip(outer, wide, false, 1)
 			rs.b.releaseClipMask(c.mask.bytes)
+		}))
+	})
+	b.Run("text-clip-mask", func(b *testing.B) {
+		rs := newRaster(lw, lh)
+		full := fullClip(lw, lh)
+		calibrate(b, charged(rs, func() {
+			m, _ := rs.newMask(full, textClipPasses, 0)
+			m.setRun(800, 600, 640)
+			m.finish(nil, &full)
+			rs.b.releaseClipMask(m.bytes)
 		}))
 	})
 	b.Run("blend-masked", func(b *testing.B) {

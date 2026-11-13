@@ -6,7 +6,8 @@ import (
 )
 
 // This file implements clipping paths, the W and W* operators (ISO 32000-1
-// §8.5.4; design docs/design/clipping-paths.md). A clip is a device rectangle,
+// §8.5.4; design docs/design/clipping-paths.md), and the masks text clipping
+// shares with them (textclip.go). A clip is a device rectangle,
 // optionally intersected with an immutable 1-bit mask over the clip's
 // bounding box. Rectangles, the common case, allocate nothing; a mask is built
 // once per non-rectangular clip and shared by pointer between the graphics
@@ -200,26 +201,13 @@ func (r *raster) buildClip(cur clipState, subpaths [][]point, evenOdd bool, dept
 	if box.empty() {
 		return clipState{}
 	}
-	x0w, x1w := box.x0>>6, (box.x1+63)>>6
-	stride, rows := x1w-x0w, box.y1-box.y0
-	// box lies inside the canvas (≤ maxCanvasPixels), so these products are
-	// small; they are formed in int64 all the same.
-	nbytes := int64(stride)*int64(rows)*8 + int64(rows)*8
 	passes := int64(1) // zeroing and the row-extent scan
 	if cur.mask != nil {
 		passes = 2 // and the AND with the enclosing mask
 	}
-	if !r.b.chargePaint(int64(rows) * (clipRowCost + passes*clipWords(stride))) {
+	m, ok := r.newMask(box, passes, depth)
+	if !ok {
 		return cur
-	}
-	if !r.b.chargeClipMask(nbytes) {
-		return cur
-	}
-	m := &clipMask{
-		x0w: x0w, x1w: x1w, y0: box.y0, y1: box.y1, stride: stride,
-		bits:  make([]uint64, stride*rows),
-		rowX:  make([]int32, 2*rows),
-		depth: depth, bytes: nbytes,
 	}
 	r.scanPath(subpaths, evenOdd, box.y0, box.y1, func(x0, x1 float64, y int) {
 		ix0, ix1, ok := spanPixels(x0, x1, box.x0, box.x1)
@@ -229,18 +217,62 @@ func (r *raster) buildClip(cur clipState, subpaths [][]point, evenOdd bool, dept
 		m.setRun(y, ix0, ix1)
 	})
 	if r.b.stopped() {
-		r.b.releaseClipMask(nbytes)
+		r.b.releaseClipMask(m.bytes)
 		return cur
 	}
+	tight := m.finish(cur.mask, nil)
+	if tight.empty() {
+		r.b.releaseClipMask(m.bytes)
+		return clipState{}
+	}
+	return clipState{rect: tight, mask: m}
+}
 
-	// Intersect with the current mask and record each row's extent and the
-	// tight box of what is left.
+// newMask allocates an empty mask over the pixels of box (not empty, inside
+// the canvas) at stack depth depth. The bytes are charged to the live
+// clip-mask counter and the rows to raster work (clipRowCost each, plus
+// clipWords per pass over the row's words, passes ≥ 1 counting the zeroing
+// with the row-extent scan) before the allocation (SECURITY.md §2). ok is
+// false, with nothing allocated, on a trip.
+func (r *raster) newMask(box clipRect, passes int64, depth int) (*clipMask, bool) {
+	x0w, x1w := box.x0>>6, (box.x1+63)>>6
+	stride, rows := x1w-x0w, box.y1-box.y0
+	// box lies inside the canvas (≤ maxCanvasPixels), so these products are
+	// small; they are formed in int64 all the same.
+	nbytes := int64(stride)*int64(rows)*8 + int64(rows)*8
+	if !r.b.chargePaint(int64(rows) * (clipRowCost + passes*clipWords(stride))) {
+		return nil, false
+	}
+	if !r.b.chargeClipMask(nbytes) {
+		return nil, false
+	}
+	return &clipMask{
+		x0w: x0w, x1w: x1w, y0: box.y0, y1: box.y1, stride: stride,
+		bits:  make([]uint64, stride*rows),
+		rowX:  make([]int32, 2*rows),
+		depth: depth, bytes: nbytes,
+	}, true
+}
+
+// finish completes a mask whose bits are set: it intersects them with parent
+// (when not nil) and with the rectangle within (when not nil), records each
+// row's extent and returns the tight box of the bits left, empty when none
+// is. The newMask charge pays for the extent pass, which also clears the
+// bits outside within; the caller pays for the AND with parent.
+func (m *clipMask) finish(parent *clipMask, within *clipRect) clipRect {
 	tight := clipRect{x0: math.MaxInt, y0: math.MaxInt, x1: math.MinInt, y1: math.MinInt}
-	for y := box.y0; y < box.y1; y++ {
-		row := m.bits[(y-box.y0)*stride : (y-box.y0+1)*stride]
-		if cur.mask != nil {
+	for y := m.y0; y < m.y1; y++ {
+		row := m.bits[(y-m.y0)*m.stride : (y-m.y0+1)*m.stride]
+		if within != nil {
+			if y < within.y0 || y >= within.y1 {
+				clear(row)
+				continue
+			}
+			keepColumns(row, m.x0w, within.x0, within.x1)
+		}
+		if parent != nil {
 			for i := range row {
-				row[i] &= cur.mask.word(y, x0w+i)
+				row[i] &= parent.word(y, m.x0w+i)
 			}
 		}
 		first, last := -1, -1
@@ -255,18 +287,41 @@ func (r *raster) buildClip(cur clipState, subpaths [][]point, evenOdd bool, dept
 		if first < 0 {
 			continue
 		}
-		lo := (x0w+first)<<6 + bits.TrailingZeros64(row[first])
-		hi := (x0w+last)<<6 + 64 - bits.LeadingZeros64(row[last])
-		m.rowX[2*(y-box.y0)] = int32(lo)
-		m.rowX[2*(y-box.y0)+1] = int32(hi)
+		lo := (m.x0w+first)<<6 + bits.TrailingZeros64(row[first])
+		hi := (m.x0w+last)<<6 + 64 - bits.LeadingZeros64(row[last])
+		m.rowX[2*(y-m.y0)] = int32(lo)
+		m.rowX[2*(y-m.y0)+1] = int32(hi)
 		tight.x0, tight.x1 = minInt(tight.x0, lo), maxInt(tight.x1, hi)
 		tight.y0, tight.y1 = minInt(tight.y0, y), maxInt(tight.y1, y+1)
 	}
-	if tight.empty() {
-		r.b.releaseClipMask(nbytes)
-		return clipState{}
+	return tight
+}
+
+// keepColumns clears the bits of one mask row, whose first word is canvas
+// word column x0w, outside the pixel columns [lo, hi) (lo < hi). Only the
+// words outside the range and its two edge words are touched.
+func keepColumns(row []uint64, x0w, lo, hi int) {
+	w0, w1 := lo>>6-x0w, (hi-1)>>6-x0w // edge words, as row indices
+	if w0 >= len(row) || w1 < 0 {
+		clear(row)
+		return
 	}
-	return clipState{rect: tight, mask: m}
+	if w0 > 0 {
+		clear(row[:w0])
+	} else {
+		w0 = 0
+	}
+	if w1 < len(row)-1 {
+		clear(row[w1+1:])
+	} else {
+		w1 = len(row) - 1
+	}
+	if base := (x0w + w0) << 6; lo > base {
+		row[w0] &= ^uint64(0) << uint(lo-base)
+	}
+	if base := (x0w + w1) << 6; hi < base+64 {
+		row[w1] &= ^uint64(0) >> uint(base+64-hi)
+	}
 }
 
 // applyPendingClip applies a W/W* mark left by the path just painted (§4.1):
