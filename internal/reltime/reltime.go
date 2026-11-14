@@ -29,8 +29,9 @@ import (
 )
 
 // Runs is the number of alternated runs a gate takes the median over by
-// default. FewRuns is for a gate whose measured ratio is under half its bound
-// (AgainstN, LinearN): the median of three is then as safe and costs less.
+// default. FewRuns is for a gate whose measured ratio is well under its bound
+// (AgainstN, LinearN; Bounded and LinearBounded stop there on their own):
+// the median of three is then as safe and costs less.
 const (
 	Runs    = 5
 	FewRuns = 3
@@ -171,15 +172,15 @@ func ComparePrepared(runs int, clock Clock, reps int, ref, work Prepared) Result
 }
 
 // compare is ComparePrepared; first, when set, is an already measured first
-// run (ref, then work, reps each). With bound > 0 it stops after FewRuns runs
-// when their median ratio is at most half of bound (Bounded).
-func compare(runs int, clock Clock, reps int, ref, work Prepared, first *[2]time.Duration, bound float64) Result {
+// run (ref, then work, reps each). With early > 0 it stops after FewRuns runs
+// when their median ratio is at most early (Bounded, LinearBounded).
+func compare(runs int, clock Clock, reps int, ref, work Prepared, first *[2]time.Duration, early float64) Result {
 	var ratios []float64
 	var refs, works []time.Duration
 	for i := 0; i < runs; i++ {
-		if bound > 0 && i == FewRuns {
+		if early > 0 && i == FewRuns {
 			sorted := slices.Sorted(slices.Values(ratios))
-			if sorted[FewRuns/2] <= bound/2 {
+			if sorted[FewRuns/2] <= early {
 				runs = FewRuns
 				break
 			}
@@ -208,14 +209,24 @@ func compare(runs int, clock Clock, reps int, ref, work Prepared, first *[2]time
 // to Runs when their median ratio is within 2× of bound — a wide margin
 // needs fewer runs, a tight one keeps the median of Runs.
 func Bounded(clock Clock, ref, work Prepared, bound float64) Result {
-	return against(Runs, clock, ref, work, bound)
+	return against(Runs, clock, ref, work, bound/2)
 }
 
-// LinearBounded is LinearPrepared with Bounded's run count, for bound.
+// linearEarly is the fraction of its bound under which a LinearBounded gate
+// stops after FewRuns runs. Bounded's half would be 4 for LinearBound, the
+// very ratio a linear cost has at scale 4: the testing/security/dos gates'
+// medians of three runs lie at 3.6–4.9, so most of them went on to all Runs
+// runs (11 and 13 of 15 checks in two runs of the package). 0.65 of
+// LinearBound is 5.2: above every median measured, 1.5× under the bound and
+// 3× under a quadratic cost's 16.
+const linearEarly = 0.65
+
+// LinearBounded is LinearPrepared for bound: FewRuns runs, extended to Runs
+// when their median ratio is above linearEarly × bound.
 func LinearBounded(clock Clock, scale int, f func(n int) func(), n int, bound float64) Result {
 	small := Prepared(func() func() { return f(n) })
 	large := Prepared(func() func() { return f(scale * n) })
-	return against(Runs, clock, small, large, bound)
+	return against(Runs, clock, small, large, linearEarly*bound)
 }
 
 // Against compares work to ref, both Prepared, repeated so that the slower
@@ -232,15 +243,15 @@ func AgainstN(runs int, clock Clock, ref, work Prepared) Result {
 	return against(runs, clock, ref, work, 0)
 }
 
-// against is AgainstN, stopping early for bound > 0 (Bounded).
-func against(runs int, clock Clock, ref, work Prepared, bound float64) Result {
+// against is AgainstN, stopping early for early > 0 (compare).
+func against(runs int, clock Clock, ref, work Prepared, early float64) Result {
 	first := [2]time.Duration{TimePrepared(clock, 1, ref), TimePrepared(clock, 1, work)}
 	slower := max(first[0], first[1], time.Microsecond)
 	reps := max(int(clock.Target()/slower), 1)
 	if reps == 1 {
-		return compare(runs, clock, 1, ref, work, &first, bound)
+		return compare(runs, clock, 1, ref, work, &first, early)
 	}
-	return compare(runs, clock, reps, ref, work, nil, bound)
+	return compare(runs, clock, reps, ref, work, nil, early)
 }
 
 // PerCall returns the median, over runs runs, of p's time per call by clock,
