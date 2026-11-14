@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	tb "github.com/thai-pc/fluxdocs/core/internal/psfont/t1build"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // TestDecryptKnownAnswer pins the Type 1 cipher (Ch. 7) with vectors computed
@@ -652,22 +652,26 @@ func TestType1_NotdefArrayIsBuiltinEncoding(t *testing.T) {
 // repeatedSubrs is a private part of n "/Subrs 1 array dup 65535 0 RD  NP"
 // definitions before one glyph. Each once reallocated a 65,536-entry table,
 // uncharged: 493,444 repeats (16 MiB, a few KiB compressed) took minutes.
-func repeatedSubrs(n int) []byte {
-	priv := append([]byte("/lenIV -1 def\n"), bytes.Repeat([]byte("/Subrs 1 array dup 65535 0 RD  NP\n"), n)...)
+// With index "00000" (0, inside the declared size) the part is the same
+// size and token for token the same shape: the benign reference.
+func repeatedSubrs(n int) []byte { return repeatedSubrsAt(n, "65535") }
+
+func repeatedSubrsAt(n int, index string) []byte {
+	priv := append([]byte("/lenIV -1 def\n"), bytes.Repeat([]byte("/Subrs 1 array dup "+index+" 0 RD  NP\n"), n)...)
 	return append(priv, "/CharStrings 1 dict dup begin /a 1 RD \x0e ND end"...)
 }
 
 // TestType1_RepeatedSubrsAreBounded checks only the first /Subrs that parses
 // is read and no table outgrows its declared size (B-new): a 16 MiB private
-// part of repeated /Subrs parses fast and allocates about its own size.
+// part of repeated /Subrs parses about as fast as the same part with an index
+// inside the declared size (bounded at 3×, measured against it in the same
+// run; reltime) and allocates about its own size.
 func TestType1_RepeatedSubrsAreBounded(t *testing.T) {
 	data := eexecProgram(repeatedSubrs(493444))
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	start := time.Now()
 	f, err := ParseType1(data, Options{})
-	took := time.Since(start)
 	runtime.ReadMemStats(&after)
 	if err != nil || f.NumGlyphs() != 1 {
 		t.Fatalf("ParseType1: %v", err)
@@ -680,9 +684,23 @@ func TestType1_RepeatedSubrsAreBounded(t *testing.T) {
 	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 3*uint64(len(data))/2 {
 		t.Errorf("parse allocated %d MiB for a %d MiB program", alloc>>20, len(data)>>20)
 	}
-	if took > 5*time.Second {
-		t.Errorf("parse took %v", took)
-	}
+	t.Run("cost against an in-range index", func(t *testing.T) {
+		reltime.Skip(t)
+		benign := eexecProgram(repeatedSubrsAt(493444, "00000"))
+		if len(benign) != len(data) {
+			t.Fatalf("reference program is %d bytes, want %d", len(benign), len(data))
+		}
+		parse := func(b []byte) func() {
+			return func() {
+				if _, err := ParseType1(b, Options{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		reps := reltime.Reps(reltime.CPU, reltime.CPU.Target(), parse(data))
+		r := reltime.Compare(reltime.Runs, reltime.CPU, reltime.Repeat(reps, parse(benign)), reltime.Repeat(reps, parse(data)))
+		reltime.Check(t, "repeated out-of-range /Subrs against in-range ones", r, 3)
+	})
 	f = mustParse(t, eexecProgram([]byte("/lenIV -1 def /Subrs 1 array dup 0 1 RD \x0b NP /Subrs 2 array dup 1 1 RD \x0b NP /CharStrings 1 dict dup begin /a 1 RD \x0e ND end")))
 	if len(f.subrs) != 1 {
 		t.Errorf("the second /Subrs replaced the first: %d subrs, want 1", len(f.subrs))

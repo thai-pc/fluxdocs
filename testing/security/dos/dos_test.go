@@ -19,12 +19,15 @@ import (
 	"io"
 	"math/rand/v2"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
 	"github.com/thai-pc/fluxdocs/core/parse"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // skipUnlessTimed skips a wall-clock gate under -short or the race detector.
@@ -36,6 +39,32 @@ func skipUnlessTimed(t *testing.T) {
 	if raceEnabled {
 		t.Skip("wall-clock gate: run without -race")
 	}
+}
+
+// sharedRefs holds the references perTestRef measured, by top-level test and
+// name. It lives as long as the test binary: with -count=N, the later runs of
+// a test reuse the reference its first run measured instead of measuring
+// again, so they are bounded against the first run's host conditions (the
+// gates calling it are subtests, which cannot clear it when their top-level
+// test ends). For a fresh reference per run, run the binary N times.
+var sharedRefs sync.Map
+
+// perTestRef returns ref's per-call CPU time, measured once per top-level test
+// (the median of reltime.FewRuns runs, reltime.PerCall) and reused by every
+// gate of that test that bounds against it (reltime.AgainstFixed), instead of
+// being alternated with each. The dos tests run one at a time, so the
+// measurement and the gates share the host's conditions closely.
+func perTestRef(t *testing.T, what string, ref reltime.Prepared) time.Duration {
+	t.Helper()
+	top, _, _ := strings.Cut(t.Name(), "/")
+	key := top + "\x00" + what
+	if v, ok := sharedRefs.Load(key); ok {
+		return v.(time.Duration)
+	}
+	d := reltime.PerCall(reltime.FewRuns, reltime.CPU, ref)
+	sharedRefs.Store(key, d)
+	t.Logf("reference %s: %v CPU per call, measured once for %s", what, d, top)
+	return d
 }
 
 // floodDoc builds a document of pages pages, each mediaBox-sized and filling the
@@ -86,26 +115,52 @@ func contentDoc(t *testing.T, mediaBox string, contents ...string) *core.Documen
 
 // TestDoS_DefaultBudgetBoundsPage: 100k full-page fills on a Letter page would
 // be ≈ 2·10^11 pixel visits (minutes). At 150 DPI the default budget (≈ 67 M
-// visits, ≈ 0.3–0.8 s) stops it.
+// visits) stops it at ≈ 6.5× the cost of a normal Letter page at 150 DPI
+// (normalPageContent: text, a table grid and filled boxes), measured in the
+// same run (reltime, process CPU time), not by an absolute time. The bound,
+// 12×, anchors the default budget's size only coarsely: a budget twice as
+// large measures ≈ 13×, so it fails, but one about 1.8× as large would still
+// pass. The exact default values are pinned by core/render TestResolveLimits;
+// this gate checks that they still cost what a page should, for the font
+// gates' reference (fontGateRef) and every gate bounded by a default
+// budget's worth of work.
 func TestDoS_DefaultBudgetBoundsPage(t *testing.T) {
-	skipUnlessTimed(t)
+	opts := core.RenderOptions{DPI: 150}
 	doc := floodDoc(t, 1, "[0 0 612 792]", 100_000)
-	start := time.Now()
-	img, err := doc.RenderPage(0, core.RenderOptions{DPI: 150})
-	elapsed := time.Since(start)
-	if !errors.Is(err, core.ErrRenderBudgetExceeded) || img != nil {
-		t.Fatalf("err = %v (%d bytes), want ErrRenderBudgetExceeded and no image", err, len(img))
+	flood := func() {
+		img, err := doc.RenderPage(0, opts)
+		if !errors.Is(err, core.ErrRenderBudgetExceeded) || img != nil {
+			t.Fatalf("err = %v (%d bytes), want ErrRenderBudgetExceeded and no image", err, len(img))
+		}
 	}
-	if elapsed > 20*time.Second { // ≈ 1 s expected; slack for -race and loaded CI
-		t.Errorf("render took %v, want the budget to stop it within seconds", elapsed)
+	if testing.Short() || raceEnabled {
+		flood() // the functional check alone; the timed runs below make it too
+		skipUnlessTimed(t)
 	}
-	t.Logf("default budget at 150 DPI stopped the page after %v", elapsed)
+	normal := openPDF(t, canvasPDF("[0 0 612 792]", "<< /Font << /F1 4 0 R >> >>", normalPageContent()))
+	page := func() {
+		if _, err := normal.RenderPage(0, opts); err != nil {
+			t.Fatalf("normal page: %v", err)
+		}
+	}
+	// The normal page is repeated to about reltime.CPUTarget; the ratio is
+	// per render.
+	k := reltime.Reps(reltime.CPU, reltime.CPU.Target(), page)
+	res := reltime.Compare(reltime.Runs, reltime.CPU, reltime.Repeat(k, page), flood)
+	res.Ratio *= float64(k)
+	for i := range res.Ratios {
+		res.Ratios[i] *= float64(k)
+	}
+	reltime.Check(t, fmt.Sprintf("the flood at the default budget against a normal page (%d per run), per render", k), res, 12)
 }
 
 // TestDoS_HostileBatchIsCanceled: a 64-page document where every page exceeds
 // the budget costs about one wave of NumCPU pages, not 64 pages, because the
 // first failure cancels the batch. It compares against a batch of exactly one
-// wave, so parallel contention on the host affects both sides alike.
+// wave, in wall time (the batch is parallel), in runs alternated with it so
+// that parallel contention on the host affects both sides alike (reltime):
+// at most half the uncanceled waves (at least 1.5×; measured ≈ 1× against
+// 2.67× on 12 cores, so over reltime.FewRuns).
 func TestDoS_HostileBatchIsCanceled(t *testing.T) {
 	skipUnlessTimed(t)
 	const pages = 64
@@ -114,30 +169,27 @@ func TestDoS_HostileBatchIsCanceled(t *testing.T) {
 		t.Skipf("NumCPU %d: a %d-page batch is under two waves, nothing to compare", wave, pages)
 	}
 	opts := core.RenderOptions{DPI: 72}
-	batch := func(n int) time.Duration {
-		doc := floodDoc(t, n, "[0 0 612 792]", 100_000)
+	// Each document is built once and rendered in every run (a failed
+	// render leaves nothing cached). 2,000 fills are ≈ 60× what the 72 DPI
+	// budget admits on a Letter page.
+	batch := func(n int) reltime.Prepared {
+		doc := floodDoc(t, n, "[0 0 612 792]", 2_000)
 		var fired int
 		doc.OnPageRendered(func(int, []byte) { fired++ })
-		start := time.Now()
-		imgs, err := doc.RenderAllPagesContext(context.Background(), opts)
-		elapsed := time.Since(start)
-		if !errors.Is(err, core.ErrRenderBudgetExceeded) || errors.Is(err, context.Canceled) || imgs != nil {
-			t.Fatalf("%d pages: err = %v (%d images), want the budget error and no images", n, err, len(imgs))
-		}
-		if fired != 0 {
-			t.Errorf("%d pages: OnPageRendered fired %d times for failed pages", n, fired)
-		}
-		return elapsed
+		return reltime.Unprepared(func() {
+			imgs, err := doc.RenderAllPagesContext(context.Background(), opts)
+			if !errors.Is(err, core.ErrRenderBudgetExceeded) || errors.Is(err, context.Canceled) || imgs != nil {
+				t.Fatalf("%d pages: err = %v (%d images), want the budget error and no images", n, err, len(imgs))
+			}
+			if fired != 0 {
+				t.Errorf("%d pages: OnPageRendered fired %d times for failed pages", n, fired)
+			}
+		})
 	}
-	oneWave := batch(wave)
-	all := batch(pages)
 	// Uncanceled, 64 pages cost pages/wave waves; canceled, about one.
 	waves := float64(pages) / float64(wave)
-	if limit := time.Duration(float64(oneWave) * max(waves/2, 1.5)); all > limit+2*time.Second {
-		t.Errorf("%d-page batch took %v vs %v for one wave of %d (%.1f waves uncanceled), want early cancellation",
-			pages, all, oneWave, wave, waves)
-	}
-	t.Logf("one wave (%d pages) %v, %d-page hostile batch %v", wave, oneWave, pages, all)
+	reltime.Check(t, fmt.Sprintf("%d-page hostile batch against one wave of %d (%.1f waves uncanceled)", pages, wave, waves),
+		reltime.AgainstN(reltime.FewRuns, reltime.Wall, batch(wave), batch(pages)), max(waves/2, 1.5))
 }
 
 // zigzagContent is one path of n vertices alternating between the bottom and
@@ -491,28 +543,75 @@ func TestDoS_BrokenObjStmIsDecodedOnce(t *testing.T) {
 		t.Errorf("render took %v CPU, want ≤ %v (2× the flood gate + 1 s)", elapsed, limit)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	start := time.Now()
-	_, err = open().RenderPageContext(ctx, 0, core.RenderOptions{DPI: 72})
-	wall := time.Since(start)
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("deadline render: err = %v", err)
+	t.Logf("%v CPU (limit %v)", elapsed, limit)
+
+	// Under a deadline of four 64 MiB inflates, the render returns before
+	// the deadline: the ObjStm is inflated once, so it ends at ≈ a quarter
+	// of it; inflated per Do (≈ 200 inflates), it returned after ≈ 11× a 1 s
+	// deadline. Wall time (deadlines are wall-clock): the inflate is the
+	// median of three runs each repeated to about reltime.Target, the render
+	// the median of three, bounded against the deadline.
+	inflate := inflateOnce(t, 64<<20)
+	k := reltime.Reps(reltime.Wall, reltime.Wall.Target(), inflate)
+	var per []time.Duration
+	for i := 0; i < 3; i++ {
+		per = append(per, reltime.Time(reltime.Wall, reltime.Repeat(k, inflate))/time.Duration(k))
 	}
-	if wall > 3*time.Second { // 1 s deadline + slack for a loaded host
-		t.Errorf("render under a 1 s deadline returned after %v", wall)
+	slices.Sort(per)
+	d := 4 * per[1]
+	pdf := brokenObjStmPDF(200)
+	var ratios []float64
+	var took []time.Duration
+	for i := 0; i < 3; i++ {
+		doc, err := core.OpenBytes(pdf)
+		if err != nil {
+			t.Fatalf("OpenBytes: %v", err)
+		}
+		w := reltime.Time(reltime.Wall, func() {
+			ctx, cancel := context.WithTimeout(context.Background(), d)
+			defer cancel()
+			if _, err := doc.RenderPageContext(ctx, 0, core.RenderOptions{DPI: 72}); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("deadline render: err = %v", err)
+			}
+		})
+		took = append(took, w)
+		ratios = append(ratios, float64(w)/float64(d))
 	}
-	t.Logf("%v CPU (limit %v); under a 1 s deadline: %v wall, err %v", elapsed, limit, wall, err)
+	slices.Sort(ratios)
+	slices.Sort(took)
+	reltime.Check(t, "render under a deadline of four 64 MiB inflates, against the deadline",
+		reltime.Result{Ratio: ratios[1], Ratios: ratios, Ref: d, Work: took[1]}, 1.5)
+}
+
+// inflateOnce returns a function inflating a zlib body of size zero bytes into
+// a new buffer the way the decoder does (inflateReference), once.
+func inflateOnce(t *testing.T, size int) func() {
+	var z bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&z, zlib.BestCompression)
+	zw.Write(make([]byte, size))
+	zw.Close()
+	return func() {
+		zr, err := zlib.NewReader(bytes.NewReader(z.Bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf, err := io.ReadAll(io.LimitReader(zr, int64(size)+1))
+		if err != nil || len(buf) != size {
+			t.Fatalf("inflate reference: %d bytes, err %v", len(buf), err)
+		}
+	}
 }
 
 // repeatedBombContentsDoc is a page whose /Contents array lists one Flate
 // stream reps times; the stream inflates to 64 MiB of spaces (a 64 KB file).
 func repeatedBombContentsDoc(t *testing.T, reps int) *core.Document {
 	t.Helper()
-	var z bytes.Buffer
-	zw, _ := zlib.NewWriterLevel(&z, zlib.BestCompression)
-	zw.Write(bytes.Repeat([]byte(" "), 64<<20))
-	zw.Close()
+	bombOnce.Do(func() {
+		zw, _ := zlib.NewWriterLevel(&bomb64, zlib.BestCompression)
+		zw.Write(bytes.Repeat([]byte(" "), 64<<20))
+		zw.Close()
+	})
+	z := &bomb64
 	pdf := classicPDF([]string{
 		"<< /Type /Catalog /Pages 2 0 R >>",
 		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -525,6 +624,12 @@ func repeatedBombContentsDoc(t *testing.T, reps int) *core.Document {
 	}
 	return doc
 }
+
+// bomb64 is the Flate stream of repeatedBombContentsDoc, compressed once.
+var (
+	bombOnce sync.Once
+	bomb64   bytes.Buffer
+)
 
 // classicPDF serializes objs as objects 1..n with a classic xref table and a
 // trailer whose /Root is object 1.
@@ -552,29 +657,27 @@ func classicPDF(objs []string) []byte {
 // parse.MaxPageContent (256 MiB) and a repeated stream is decoded once, so
 // each shape fails after one 64 MiB inflate: the render with
 // ErrRenderBudgetExceeded naming content bytes, extraction with
-// parse.ErrDecodeLimit.
+// parse.ErrDecodeLimit. Shapes: at the cap (4 refs) and past it (12; 24
+// behaved the same and was dropped to keep the gate cheap).
 func TestDoS_RepeatedContentsBombIsCapped(t *testing.T) {
 	skipUnlessTimed(t)
-	for _, reps := range []int{4, 12, 24} {
+	// The reference, measured once for the test (perTestRef): inflating
+	// 64 MiB.
+	inflate := inflateOnce(t, 64<<20)
+	for _, reps := range []int{4, 12} {
 		t.Run(fmt.Sprintf("%d refs", reps), func(t *testing.T) {
 			doc := repeatedBombContentsDoc(t, reps)
-			err, elapsed, alloc := timedRender(doc, core.RenderOptions{DPI: 72})
+			err, _, alloc := timedRender(doc, core.RenderOptions{DPI: 72})
 			if !errors.Is(err, core.ErrRenderBudgetExceeded) || !strings.Contains(err.Error(), "content bytes") {
 				t.Fatalf("render err = %v, want ErrRenderBudgetExceeded naming content bytes", err)
 			}
 			if alloc > 600<<20 {
 				t.Errorf("render allocated %d MB, want ≤ 600 MB", alloc>>20)
 			}
-			if elapsed > 3*time.Second { // one 64 MiB inflate: ≈ 0.1–0.3 s
-				t.Errorf("render took %v CPU, want ≤ 3 s", elapsed)
-			}
-
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
-			start := cpuTime()
 			_, xerr := doc.ExtractText(core.ExtractOptions{})
-			xelapsed := cpuTime() - start
 			runtime.ReadMemStats(&after)
 			if !errors.Is(xerr, parse.ErrDecodeLimit) {
 				t.Fatalf("ExtractText err = %v, want parse.ErrDecodeLimit", xerr)
@@ -582,10 +685,20 @@ func TestDoS_RepeatedContentsBombIsCapped(t *testing.T) {
 			if xalloc := after.TotalAlloc - before.TotalAlloc; xalloc > 600<<20 {
 				t.Errorf("ExtractText allocated %d MB, want ≤ 600 MB", xalloc>>20)
 			}
-			if xelapsed > 3*time.Second {
-				t.Errorf("ExtractText took %v CPU, want ≤ 3 s", xelapsed)
-			}
-			t.Logf("render %v CPU, %d MB allocated; ExtractText %v CPU", elapsed, alloc>>20, xelapsed)
+			t.Logf("render %d MB allocated", alloc>>20)
+			// Each fails after one 64 MiB inflate: at most 4× inflating
+			// 64 MiB, measured in the same test (≈ 0.9–1×, so the median of
+			// reltime.FewRuns; inflating every reference was up to 24×,
+			// ≈ 10 s). Each run opens the document afresh (untimed).
+			ref := perTestRef(t, "inflating 64 MiB", reltime.Unprepared(inflate))
+			reltime.Check(t, "render against one 64 MiB inflate", reltime.AgainstFixed(reltime.FewRuns, reltime.CPU, ref, func() func() {
+				doc := repeatedBombContentsDoc(t, reps)
+				return func() { doc.RenderPage(0, core.RenderOptions{DPI: 72}) }
+			}), 4)
+			reltime.Check(t, "ExtractText against one 64 MiB inflate", reltime.AgainstFixed(reltime.FewRuns, reltime.CPU, ref, func() func() {
+				doc := repeatedBombContentsDoc(t, reps)
+				return func() { doc.ExtractText(core.ExtractOptions{}) }
+			}), 4)
 		})
 	}
 }
@@ -670,13 +783,16 @@ func objStmBombsPDF(streams, perStream, pad int, interleave bool) []byte {
 func TestDoS_ObjStmCacheIsBounded(t *testing.T) {
 	skipUnlessTimed(t)
 	const pad = 192 << 20
+	// The reference, measured once for both shapes (perTestRef): one
+	// 192 MiB inflate. Each open is bounded at 8× it (2× the four inflates
+	// it needs at most); measured ≈ 3.5–3.9×, so the median of
+	// reltime.FewRuns.
+	inflate := reltime.Unprepared(inflateOnce(t, pad))
 
 	t.Run("distinct ObjStm bombs", func(t *testing.T) {
 		pdf := objStmBombsPDF(4, 1, pad, false)
 		runtime.GC()
-		start := cpuTime()
 		doc, err := core.OpenBytes(pdf) // the page-tree walk decodes all four
-		elapsed := cpuTime() - start
 		if err != nil {
 			t.Fatalf("OpenBytes: %v", err)
 		}
@@ -687,10 +803,11 @@ func TestDoS_ObjStmCacheIsBounded(t *testing.T) {
 		if ms.HeapAlloc > 384<<20 {
 			t.Errorf("open document retains %d MB of heap, want ≤ 384 MB (one 192 MiB ObjStm cached, not four)", ms.HeapAlloc>>20)
 		}
-		if elapsed > 10*time.Second { // four 192 MiB inflates: ≈ 1–2 s
-			t.Errorf("OpenBytes took %v CPU, want ≤ 10 s", elapsed)
-		}
-		t.Logf("%v CPU; %d MB heap retained with the document open", elapsed, ms.HeapAlloc>>20)
+		t.Logf("%d MB heap retained with the document open", ms.HeapAlloc>>20)
+		// Four 192 MiB inflates: at most 2× inflating four, in the same run.
+		ref := perTestRef(t, "inflating 192 MiB", inflate)
+		reltime.Check(t, "OpenBytes against one 192 MiB inflate",
+			reltime.AgainstFixed(reltime.FewRuns, reltime.CPU, ref, reltime.Unprepared(func() { core.OpenBytes(pdf) })), 8)
 	})
 
 	t.Run("loads rotating between ObjStm bombs", func(t *testing.T) {
@@ -698,15 +815,14 @@ func TestDoS_ObjStmCacheIsBounded(t *testing.T) {
 		// one, so without a re-decode budget every page would re-inflate
 		// 192 MiB (64 × 192 MiB ≈ 12 GiB of inflate).
 		pdf := objStmBombsPDF(2, 32, pad, true)
-		start := cpuTime()
 		_, err := core.OpenBytes(pdf)
-		elapsed := cpuTime() - start
 		if err == nil || !strings.Contains(err.Error(), "re-decode budget") {
 			t.Fatalf("OpenBytes err = %v, want the re-decode budget error", err)
 		}
-		if elapsed > 10*time.Second { // ≈ 3.3 inflates of 192 MiB
-			t.Errorf("OpenBytes took %v CPU, want ≤ 10 s", elapsed)
-		}
-		t.Logf("%v CPU; err %v", elapsed, err)
+		// ≈ 3.3 inflates of 192 MiB: at most 2× inflating four, in the
+		// same run (64 re-inflates were ≈ 12 GiB).
+		ref := perTestRef(t, "inflating 192 MiB", inflate)
+		reltime.Check(t, "OpenBytes against one 192 MiB inflate",
+			reltime.AgainstFixed(reltime.FewRuns, reltime.CPU, ref, reltime.Unprepared(func() { core.OpenBytes(pdf) })), 8)
 	})
 }

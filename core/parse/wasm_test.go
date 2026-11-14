@@ -2,6 +2,7 @@
 
 package parse
 
-// The WASM target runs the scanner a few times slower than native; timing
-// bounds in tests scale by timingScale (see race_test.go).
+// The WASM target runs the scanner a few times slower than native.
+// timingScale is unused (robust_test.go): the timing gates are relative
+// (internal/reltime).
 func init() { timingScale = 5 }

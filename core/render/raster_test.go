@@ -2,25 +2,23 @@ package render
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
-// renderWithin renders content on the 100x100pt test page at DPI 72 (1px/pt) in
-// a goroutine and fails the test if it has not finished after d. The deadline
-// turns an unbounded rasterizer loop into a test failure instead of a hang (the
-// goroutine is abandoned on timeout). Under js/wasm there is no async
-// preemption, so a regression there hangs until go test -timeout instead;
-// keep a modest -timeout on wasm test runs.
-func renderWithin(t *testing.T, content string, d time.Duration) image.Image {
+// testPage builds the 100x100pt test page holding content.
+func testPage(t *testing.T, content string) (*parse.Resolver, parse.PageInfo) {
 	t.Helper()
 	pdf := buildRenderPDF(map[int]string{
 		1: "<< /Type /Catalog /Pages 2 0 R >>",
@@ -36,13 +34,43 @@ func renderWithin(t *testing.T, content string, d time.Duration) image.Image {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return r, pages[0]
+}
+
+// referenceContent is an ordinary stroke across the test page: the cost the
+// hostile cases are bounded against.
+const referenceContent = "0 50 m 100 50 l S"
+
+// hangGuard is how long renderWithin waits: 10,000 times a reference render
+// of referenceContent (median of five), ≈ 1 s on a development machine. It
+// only turns a hang into a failure; boundedCost bounds the cost.
+func hangGuard(t *testing.T) time.Duration {
+	t.Helper()
+	r, pi := testPage(t, referenceContent)
+	var ds []time.Duration
+	for i := 0; i < 5; i++ {
+		ds = append(ds, reltime.Time(reltime.Wall, func() { Page(r, pi, Options{DPI: 72, Format: "png"}) }))
+	}
+	slices.Sort(ds)
+	return 10_000 * ds[2]
+}
+
+// renderWithin renders content on the 100x100pt test page at DPI 72 (1px/pt) in
+// a goroutine and fails the test if it has not finished after guard
+// (hangGuard). The guard turns an unbounded rasterizer loop into a test
+// failure instead of a hang (the goroutine is abandoned on timeout). Under
+// js/wasm there is no async preemption, so a regression there hangs until go
+// test -timeout instead; keep a modest -timeout on wasm test runs.
+func renderWithin(t *testing.T, content string, guard time.Duration) image.Image {
+	t.Helper()
+	r, pi := testPage(t, content)
 	type result struct {
 		data []byte
 		err  error
 	}
 	done := make(chan result, 1)
 	go func() {
-		data, err := Page(r, pages[0], Options{DPI: 72, Format: "png"})
+		data, err := Page(r, pi, Options{DPI: 72, Format: "png"})
 		done <- result{data, err}
 	}()
 	select {
@@ -55,10 +83,38 @@ func renderWithin(t *testing.T, content string, d time.Duration) image.Image {
 			t.Fatalf("decode PNG: %v", err)
 		}
 		return img
-	case <-time.After(d):
-		t.Fatalf("render still running after %v (unbounded stroke work)", d)
+	case <-time.After(guard):
+		t.Fatalf("render still running after %v, 10,000× a reference render (unbounded work)", guard)
 		return nil
 	}
+}
+
+// boundedCost bounds the CPU time of rendering every one of contents on the
+// test page against rendering referenceContent as many times, in runs
+// alternated with it (reltime): hostile coordinates and widths must cost
+// about what an ordinary stroke does, the canvas bounding the work.
+func boundedCost(t *testing.T, contents []string, bound float64) {
+	t.Helper()
+	t.Run("cost against an ordinary stroke", func(t *testing.T) {
+		reltime.Skip(t)
+		render := func(content string) func() {
+			r, pi := testPage(t, content)
+			return func() { Page(r, pi, Options{DPI: 72, Format: "png"}) }
+		}
+		var cases []func()
+		for _, c := range contents {
+			cases = append(cases, render(c))
+		}
+		all := func() {
+			for _, f := range cases {
+				f()
+			}
+		}
+		ref := reltime.Repeat(len(contents), render(referenceContent))
+		reps := reltime.Reps(reltime.CPU, reltime.CPU.Target(), all)
+		res := reltime.Compare(reltime.Runs, reltime.CPU, reltime.Repeat(reps, ref), reltime.Repeat(reps, all))
+		reltime.Check(t, fmt.Sprintf("%d hostile renders against as many ordinary ones", len(contents)), res, bound)
+	})
 }
 
 // isDark reports whether the pixel at (x, y) is near-black stroke ink.
@@ -140,12 +196,16 @@ func TestStroke_HostileInputIsBounded(t *testing.T) {
 		// The page sits deep inside this rectangle, beyond the reach of its edges.
 		{"wide stroke of a huge rect", "100000 w -1000000000 -1000000000 2000000000 2000000000 re S", blank},
 	}
+	guard := hangGuard(t)
+	var contents []string
 	for _, tc := range cases {
+		contents = append(contents, tc.content)
 		t.Run(tc.name, func(t *testing.T) {
-			img := renderWithin(t, tc.content, 2*time.Second)
+			img := renderWithin(t, tc.content, guard)
 			tc.check(t, img)
 		})
 	}
+	boundedCost(t, contents, 4)
 }
 
 // lineBySamples is the pre-fix stroke rasterizer (one width×width stamp per
@@ -433,14 +493,18 @@ func TestFill_ExtremeCoordinates(t *testing.T) {
 		// CTM [Inf 0 0 -1 0 100]: x is NaN at user x=0 and +Inf at x=1, y finite.
 		{"NaN x with finite y", huge + " 0 0 1 0 0 cm " + huge + " 0 0 1 0 0 cm 0 0 1 50 re f", 0},
 	}
+	guard := hangGuard(t)
+	var contents []string
 	for _, tc := range cases {
+		contents = append(contents, tc.content)
 		t.Run(tc.name, func(t *testing.T) {
-			img := renderWithin(t, tc.content, 2*time.Second)
+			img := renderWithin(t, tc.content, guard)
 			if got := darkPixels(img); got != tc.want {
 				t.Errorf("dark pixels = %d, want %d", got, tc.want)
 			}
 		})
 	}
+	boundedCost(t, contents, 4)
 }
 
 // TestSpan_ExtremeBounds calls span directly on a 10x3 raster and counts the

@@ -16,6 +16,7 @@ jobs:
   test:
     name: Build & Test (native)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -45,14 +46,16 @@ jobs:
 
       # The race detector needs CGO (C runtime); the code stays pure-Go, CGO is
       # on only for the race runtime and nothing imports C.
+      # The DoS package runs about 5 min under -race locally, more on a 2-core
+      # runner: past go test's 10 min default per package.
       - name: Test (race)
-        run: go test -race ./...
+        run: go test -race -timeout 25m ./...
 
       # SECURITY GATE: hostile documents must stop at the per-page render budget
       # (SECURITY.md §2). CPU-time gates (plus deadline checks), so they run
       # without -race.
       - name: Render budget DoS gate
-        run: go test ./testing/security/dos/...
+        run: go test -timeout 25m ./testing/security/dos/...
 
       # SECURITY GATE: redacted content must not be extractable afterwards
       # (spec §13.4, .claude/SECURITY.md §1). Must pass 100% once tests exist.

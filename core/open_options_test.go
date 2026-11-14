@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // encryptedFixture reads a fixture of testing/corpus/encrypted (written by
@@ -248,23 +249,20 @@ func TestDoS_RepairLadderDerivesKeyOnce(t *testing.T) {
 	}
 	// The owner password makes each derivation 4 hashes (a failed user
 	// test, the owner test, the key, the empty-password check), so the key
-	// derivation dominates both opens; the two are measured interleaved, the
-	// fastest of each kept, so machine load affects both alike.
+	// derivation dominates both opens; the two are measured in process CPU
+	// time, repeated to about reltime.CPUTarget, in reltime.Runs alternated runs
+	// (reltime), so machine load affects both alike.
 	opts := OpenOptions{Password: "owner"}
-	once := func(data []byte) time.Duration {
-		start := time.Now()
-		if _, err := OpenBytesWithOptions(data, opts); err != nil {
-			t.Fatal(err)
+	once := func(data []byte) func() {
+		return func() {
+			if _, err := OpenBytesWithOptions(data, opts); err != nil {
+				t.Fatal(err)
+			}
 		}
-		return time.Since(start)
 	}
-	base, ladder := time.Duration(1<<63-1), time.Duration(1<<63-1)
-	for k := 0; k < 11; k++ {
-		base = min(base, once(clean))
-		ladder = min(ladder, once(damaged))
-	}
-	t.Logf("clean open %v, repaired open %v (%.2f×)", base, ladder, float64(ladder)/float64(base))
-	if ladder > base*16/10 {
-		t.Errorf("repaired open %v > 1.6 × the clean open %v: the key is derived per rung", ladder, base)
-	}
+	t.Run("cost against the clean open", func(t *testing.T) {
+		reltime.Skip(t)
+		res := reltime.Against(reltime.CPU, reltime.Unprepared(once(clean)), reltime.Unprepared(once(damaged)))
+		reltime.Check(t, "repaired open against the clean open (the key derived per rung: ≈ 2×)", res, 1.6)
+	})
 }

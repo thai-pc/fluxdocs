@@ -3,15 +3,14 @@ package dos
 import (
 	"bytes"
 	"compress/zlib"
-	"context"
 	"errors"
 	"fmt"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 	"github.com/thai-pc/fluxdocs/testing/internal/t1min"
 )
 
@@ -20,9 +19,55 @@ import (
 // at 16,384 operators, charged to raster work once per glyph per render),
 // and its bytes are decoded and decrypted (charged to decoded bytes).
 
-// t1Deadline bounds each gate's render: generous for CI, far below the
-// minutes an unbounded loop would take.
-const t1Deadline = 20 * time.Second
+// The gates bound each render's CPU time relative to fontGateRef, measured in
+// the same test (reltime, perTestRef), never by an absolute time.
+
+// fontGateRef is the font gates' reference: their 200 × 200 pt page at 72 DPI
+// filled until the default raster-work budget stops it (its 16 Mi floor,
+// ≈ 420 fills): the most raster work a default render of the page may do.
+// A font gate's render is bounded at a small multiple of it (boundedT1).
+// The reference grows with the default budget, so it does not anchor the
+// budget's size itself: TestDoS_DefaultBudgetBoundsPage does, against a
+// normal page, and the render-package unit test TestResolveLimits pins the
+// budget's values.
+func fontGateRef(t *testing.T) reltime.Prepared {
+	t.Helper()
+	pdf := classicPDF([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>",
+		"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+		streamBody(strings.Repeat("0 0 200 200 re f\n", 10_000)),
+	})
+	return func() func() {
+		doc, err := core.OpenBytes(pdf)
+		if err != nil {
+			t.Fatalf("OpenBytes: %v", err)
+		}
+		return func() {
+			if _, err := doc.RenderPage(0, core.RenderOptions{DPI: 72, Format: "png"}); !errors.Is(err, core.ErrRenderBudgetExceeded) {
+				t.Fatalf("reference render: err = %v, want ErrRenderBudgetExceeded", err)
+			}
+		}
+	}
+}
+
+// boundedT1 bounds the CPU time of rendering page 0 of pdf (opened afresh
+// each time, untimed) at bound × fontGateRef, measured once per test
+// (perTestRef): the median ratio of reltime.FewRuns runs, each repeated to
+// about reltime.CPUTarget. Every font gate measures under half its bound
+// (the largest, ≈ 5.8× against 16×).
+func boundedT1(t *testing.T, what string, pdf []byte, bound float64) {
+	t.Helper()
+	ref := perTestRef(t, "the default budget's worth of fills (fontGateRef)", fontGateRef(t))
+	render := func() func() {
+		doc, err := core.OpenBytes(pdf)
+		if err != nil {
+			t.Fatalf("OpenBytes: %v", err)
+		}
+		return func() { doc.RenderPage(0, core.RenderOptions{DPI: 72, Format: "png"}) }
+	}
+	reltime.Check(t, what+", against the default budget's worth of fills", reltime.AgainstFixed(reltime.FewRuns, reltime.CPU, ref, render), bound)
+}
 
 func flateBytes(t *testing.T, data []byte) []byte {
 	t.Helper()
@@ -60,18 +105,16 @@ func bombSubrs() [][]byte {
 	}
 }
 
-// renderT1 renders page 0 of pdf at 72 DPI under t1Deadline.
-func renderT1(t *testing.T, pdf []byte) (error, time.Duration) {
+// renderT1 renders page 0 of pdf at 72 DPI with the default budget and
+// returns the error; boundedT1 bounds its cost.
+func renderT1(t *testing.T, pdf []byte) error {
 	t.Helper()
 	doc, err := core.OpenBytes(pdf)
 	if err != nil {
 		t.Fatalf("OpenBytes: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), t1Deadline)
-	defer cancel()
-	start := time.Now()
-	_, err = doc.RenderPageContext(ctx, 0, core.RenderOptions{DPI: 72, Format: "png"})
-	return err, time.Since(start)
+	_, err = doc.RenderPage(0, core.RenderOptions{DPI: 72, Format: "png"})
+	return err
 }
 
 // TestDoS_Type1GlyphBombIsBounded shows 10^5 glyphs of a font whose every
@@ -121,17 +164,15 @@ func TestDoS_Type1GlyphBombIsBounded(t *testing.T) {
 				}
 			}
 			content.WriteString("ET\n")
-			err, took := renderT1(t, t1min.PDF(t1min.Program(glyphs, bombSubrs(), 0), nil, fonts, content.String()))
+			pdf := t1min.PDF(t1min.Program(glyphs, bombSubrs(), 0), nil, fonts, content.String())
+			err := renderT1(t, pdf)
 			switch {
 			case tt.wantBudget && !errors.Is(err, core.ErrRenderBudgetExceeded):
 				t.Errorf("err = %v, want ErrRenderBudgetExceeded", err)
 			case !tt.wantBudget && err != nil:
 				t.Errorf("err = %v, want a render", err)
 			}
-			if took > t1Deadline/2 {
-				t.Errorf("render took %v, want well under %v", took, t1Deadline)
-			}
-			t.Logf("%s: %v in %v", tt.name, err, took)
+			boundedT1(t, tt.name, pdf, 3)
 		})
 	}
 }
@@ -154,14 +195,11 @@ func TestDoS_Type1SharedProgramParsedOnce(t *testing.T) {
 		fmt.Fprintf(&content, "/%s 1 Tf <00> Tj\n", name)
 	}
 	content.WriteString("ET\n")
-	err, took := renderT1(t, t1min.PDF(prog, flateBytes(t, prog), fonts, content.String()))
-	if err != nil {
+	pdf := t1min.PDF(prog, flateBytes(t, prog), fonts, content.String())
+	if err := renderT1(t, pdf); err != nil {
 		t.Errorf("err = %v, want a render (the program decoded once)", err)
 	}
-	if took > t1Deadline/2 {
-		t.Errorf("render took %v", took)
-	}
-	t.Logf("10,000 fonts over one 30 MiB program: %v", took)
+	boundedT1(t, "10,000 fonts over one 30 MiB program", pdf, 10)
 }
 
 // TestDoS_Type1ManyFontDictsAreBounded: 100,000 distinct font dictionaries
@@ -184,29 +222,24 @@ func TestDoS_Type1ManyFontDictsAreBounded(t *testing.T) {
 		fmt.Fprintf(&content, "/%s 1 Tf <00> Tj\n", name)
 	}
 	content.WriteString("ET\n")
-	doc, err := core.OpenBytes(t1min.PDF(prog, nil, fonts, content.String()))
+	pdf := t1min.PDF(prog, nil, fonts, content.String())
+	doc, err := core.OpenBytes(pdf)
 	if err != nil {
 		t.Fatalf("OpenBytes: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), t1Deadline)
-	defer cancel()
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	start := time.Now()
-	_, err = doc.RenderPageContext(ctx, 0, core.RenderOptions{DPI: 72, Format: "png"})
-	took := time.Since(start)
+	_, err = doc.RenderPage(0, core.RenderOptions{DPI: 72, Format: "png"})
 	runtime.ReadMemStats(&after)
 	if err != nil && !errors.Is(err, core.ErrRenderBudgetExceeded) {
 		t.Errorf("err = %v, want a render or ErrRenderBudgetExceeded", err)
 	}
-	if took > 2*time.Second {
-		t.Errorf("render took %v, want < 2 s", took)
-	}
 	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 256<<20 {
 		t.Errorf("render allocated %d MiB, want < 256 MiB", alloc>>20)
 	}
-	t.Logf("%d font dictionaries over one program: %v, %d MiB allocated, err %v", n, took, (after.TotalAlloc-before.TotalAlloc)>>20, err)
+	t.Logf("%d font dictionaries over one program: %d MiB allocated, err %v", n, (after.TotalAlloc-before.TotalAlloc)>>20, err)
+	boundedT1(t, fmt.Sprintf("%d font dictionaries over one program", n), pdf, 10)
 }
 
 // TestDoS_Type1UnusedFontsAreNotLoaded: a /Font dictionary of 2,000 fonts,
@@ -234,14 +267,11 @@ func TestDoS_Type1UnusedFontsAreNotLoaded(t *testing.T) {
 		fmt.Fprintf(&fontDict, " /F%d %d 0 R", i, n)
 	}
 	objs[2] = "<< /Type /Page /Parent 2 0 R /Resources << /Font <<" + fontDict.String() + " >> >> /Contents 4 0 R >>"
-	err, took := renderT1(t, classicPDF(objs))
-	if err != nil {
+	pdf := classicPDF(objs)
+	if err := renderT1(t, pdf); err != nil {
 		t.Errorf("err = %v, want a render (one font loaded)", err)
 	}
-	if took > t1Deadline/2 {
-		t.Errorf("render took %v", took)
-	}
-	t.Logf("2,000 declared fonts, one used: %v", took)
+	boundedT1(t, "2,000 declared fonts, one used", pdf, 3)
 }
 
 func streamBody(content string) string {

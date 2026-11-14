@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // hostileXrefZeros is the decoded size of the hostile xref streams' body:
@@ -126,9 +127,7 @@ func TestDoS_XrefStreamEntriesAreCapped(t *testing.T) {
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
-			start := time.Now()
 			doc, err := core.OpenBytes(pdf)
-			elapsed := time.Since(start)
 			runtime.ReadMemStats(&after)
 			alloc := after.TotalAlloc - before.TotalAlloc
 
@@ -145,10 +144,8 @@ func TestDoS_XrefStreamEntriesAreCapped(t *testing.T) {
 			if alloc > tc.maxAlloc {
 				t.Errorf("OpenBytes allocated %d KB, want ≤ %d KB (at most one row past the cap decoded)", alloc>>10, tc.maxAlloc>>10)
 			}
-			if !raceEnabled && elapsed > time.Second {
-				t.Errorf("OpenBytes took %v, want < 1 s", elapsed)
-			}
-			t.Logf("%d-byte file: %v, %d KB allocated; err %v", len(pdf), elapsed, alloc>>10, err)
+			t.Logf("%d-byte file: %d KB allocated; err %v", len(pdf), alloc>>10, err)
+			boundedOpen(t, pdf, 4)
 		})
 	}
 
@@ -190,6 +187,29 @@ func TestDoS_XrefStreamShortSizeOverBomb(t *testing.T) {
 		t.Errorf("OpenBytes allocated %d KB, want ≤ 512 KB (one row decoded, not 256 MiB)", alloc>>10)
 	}
 	t.Logf("%d-byte file: %v, %d KB allocated", len(pdf), elapsed, alloc>>10)
+}
+
+// boundedOpen bounds the CPU time of opening pdf (failing or not) at bound ×
+// inflating 4 MiB of zeros — twice the most a capped xref stream decodes, one
+// /W [1 0 0] row past the 2 Mi-row cap — measured once per test (perTestRef;
+// the median of reltime.FewRuns runs of the open, ≈ 1.3× at most against
+// 4×), not by an absolute time. Inflating the whole 256 MiB body is ≈ 60× it.
+func boundedOpen(t *testing.T, pdf []byte, bound float64) {
+	t.Helper()
+	reltime.Skip(t)
+	z := zlibZeros(t, 4<<20)
+	inflate := func() {
+		zr, err := zlib.NewReader(bytes.NewReader(z))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, err := io.Copy(io.Discard, zr); err != nil || n != 4<<20 {
+			t.Fatalf("inflate reference: %d bytes, %v", n, err)
+		}
+	}
+	ref := perTestRef(t, "inflating 4 MiB", reltime.Unprepared(inflate))
+	reltime.Check(t, "open against inflating 4 MiB",
+		reltime.AgainstFixed(reltime.FewRuns, reltime.CPU, ref, reltime.Unprepared(func() { core.OpenBytes(pdf) })), bound)
 }
 
 // Mirrors of the parser's xref caps (core/parse/xref.go: maxXrefEntries,
@@ -257,22 +277,24 @@ func TestDoS_XrefAtTheCap(t *testing.T) {
 	half := int64(xrefEntryCap/2 - 2)
 	lo := fmt.Sprintf("[4 %d]", half)
 	hi := fmt.Sprintf("[%d %d]", 4+half, half)
+	q := int64(xrefEntryCap/8 - 2) // a quarter of half
+	qlo, qhi := fmt.Sprintf("[4 %d]", q), fmt.Sprintf("[%d %d]", 4+q, q)
 	for _, tc := range []struct {
 		name    string
 		indexes []string
 		rows    int64
+		quarter []byte // the same shape at a quarter of the rows
 	}{
-		{"one section of maxXrefEntries rows", []string{fmt.Sprintf("[4 %d]", xrefEntryCap-4)}, xrefEntryCap - 4},
-		{"four sections, maxXrefRows rows", []string{lo, hi, lo, hi}, half},
+		{"one section of maxXrefEntries rows", []string{fmt.Sprintf("[4 %d]", xrefEntryCap-4)}, xrefEntryCap - 4,
+			xrefChainPDF(t, []string{fmt.Sprintf("[4 %d]", xrefEntryCap/4-4)}, xrefEntryCap/4-4)},
+		{"four sections, maxXrefRows rows", []string{lo, hi, lo, hi}, half, xrefChainPDF(t, []string{qlo, qhi, qlo, qhi}, q)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pdf := xrefChainPDF(t, tc.indexes, tc.rows)
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
-			start := time.Now()
 			doc, err := core.OpenBytes(pdf)
-			elapsed := time.Since(start)
 			runtime.ReadMemStats(&after)
 			alloc := after.TotalAlloc - before.TotalAlloc
 			if err != nil || doc.PageCount != 1 {
@@ -284,10 +306,24 @@ func TestDoS_XrefAtTheCap(t *testing.T) {
 			if alloc > 600<<20 {
 				t.Errorf("OpenBytes allocated %d MiB, want ≤ 600 MiB (one map, no per-section copies)", alloc>>20)
 			}
-			if !raceEnabled && elapsed > 6*time.Second {
-				t.Errorf("OpenBytes took %v, want < 6 s (measured ~1.1 s)", elapsed)
+			t.Logf("%d-byte file: %d MiB allocated", len(pdf), alloc>>20)
+			// The table at the cap against a quarter of it (each section's
+			// rows and the /Index ranges a quarter as long): one map, filled
+			// once, is linear in the rows.
+			reltime.Skip(t)
+			open := func(q int) func() {
+				pdf := tc.quarter
+				if q == 4 {
+					pdf = xrefChainPDF(t, tc.indexes, tc.rows)
+				}
+				return func() {
+					if _, err := core.OpenBytes(pdf); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
-			t.Logf("%d-byte file: %v, %d MiB allocated", len(pdf), elapsed, alloc>>20)
+			reltime.Check(t, "the table at the cap against a quarter of it",
+				reltime.LinearBounded(reltime.CPU, 4, open, 1, reltime.LinearBound), reltime.LinearBound)
 		})
 	}
 }
@@ -308,9 +344,7 @@ func TestDoS_XrefStreamWideRows(t *testing.T) {
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
-			start := time.Now()
 			doc, err := core.OpenBytes(pdf)
-			elapsed := time.Since(start)
 			runtime.ReadMemStats(&after)
 			alloc := after.TotalAlloc - before.TotalAlloc
 			if err != nil {
@@ -324,10 +358,8 @@ func TestDoS_XrefStreamWideRows(t *testing.T) {
 			if alloc > 1<<20 {
 				t.Errorf("OpenBytes allocated %d KB, want ≤ 1 MB (nothing inflated)", alloc>>10)
 			}
-			if !raceEnabled && elapsed > time.Second {
-				t.Errorf("OpenBytes took %v, want < 1 s", elapsed)
-			}
-			t.Logf("%d-byte file: %v, %d KB allocated; err %v", len(pdf), elapsed, alloc>>10, err)
+			t.Logf("%d-byte file: %d KB allocated; err %v", len(pdf), alloc>>10, err)
+			boundedOpen(t, pdf, 4)
 		})
 	}
 }

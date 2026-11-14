@@ -17,7 +17,7 @@ testing/
 ├── security/
 │   ├── redaction/       # GATE: extract-after-redact must be empty. 100% to merge.
 │   ├── fuzz/            # seed corpus for go test -fuzz (parser/tokenizer)
-│   ├── dos/             # GATE: render-budget wall-clock gates (hostile pages/batches)
+│   ├── dos/             # GATE: hostile-document cost gates, relative timing (see below)
 │   └── encryption/      # crypto / signature / share-link tests
 ├── e2e/                 # end-to-end via client wrappers (React/Vue + WASM)
 ├── benchmark/           # benchmark suite (ms/page, MB/s, bundle size)
@@ -49,6 +49,38 @@ Each Go package also has its own `testdata/` (e.g.
    `FLUXDOCS_REQUIRE_GS=1`, so the oracle cannot be skipped there (the job is
    non-blocking until it has run green and stable on CI).
 5. Golden diffs (if any) reviewed by hand.
+
+## Timing gates: relative, never absolute
+
+A test that bounds how long something takes never compares against a fixed
+time: CI runs on 2-core runners, often loaded, and an absolute threshold
+either flakes there or is too loose to catch anything on a fast machine.
+Every timing gate (in `core/...` and `testing/security/dos`) measures the work
+it bounds and a reference in the same run, with `internal/reltime`:
+
+- **Reference.** The same operation on a quarter (or half) of the input for a
+  linearity gate (`reltime.Linear`: linear ≈ 4×, quadratic ≈ 16×, bounded at
+  `reltime.LinearBound` = 8×); a benign input of the same size; or the work a
+  budget allows (the font gates' default-budget flood, an inflate of the bytes
+  a cap permits).
+- **Measurement.** Process CPU time (wall time for deadlines and parallel
+  batches), each side repeated to about 0.25 s of CPU time (`reltime.CPUTarget`;
+  0.5 s of wall time, `reltime.Target`), in runs alternated with each other;
+  the bound is on the median ratio. Five runs (`reltime.Runs`) where the
+  measured ratio is within 2× of its bound, three (`reltime.FewRuns`) where it
+  is under half of it. A reference several gates of one test share (the font
+  gates' default-budget flood, an inflate of the bytes a cap permits, a
+  normal page) is measured once per test (`reltime.PerCall`, the dos
+  package's `perTestRef`) and each gate bounded against it
+  (`reltime.AgainstFixed`).
+- **Deadlines.** `reltime.AfterDeadline` sets the deadline at a quarter of a
+  reference render stopped by a scaled paint budget, and bounds the time to
+  return at 0.75× the reference.
+- They are skipped under `-short` and `-race` (`reltime.Skip`); the functional
+  checks around them still run. CI's native job tests with `-race`, so the
+  gates in `core/...` run only in the `nostd14` job (`go test -tags nostd14
+  ./core/...`, no `-race`); the `testing/security/dos` gates run in the
+  native job's "Render budget DoS gate" step, without `-race`.
 
 ## Cross-reference repair: the byte-identity gate
 

@@ -1,13 +1,11 @@
 package dos
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
 )
@@ -86,29 +84,26 @@ func TestDoS_SubstituteManyFontDictsAreBounded(t *testing.T) {
 	content.WriteString("ET\n")
 	objs[2] = "<< /Type /Page /Parent 2 0 R /Resources << /Font << " + fonts.String() + ">> >> /Contents 4 0 R >>"
 	objs[3] = streamBody(content.String())
-	doc, err := core.OpenBytes(classicPDF(objs))
+	pdf := classicPDF(objs)
+	doc, err := core.OpenBytes(pdf)
 	if err != nil {
 		t.Fatalf("OpenBytes: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), t1Deadline)
-	defer cancel()
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	start := time.Now()
-	_, err = doc.RenderPageContext(ctx, 0, core.RenderOptions{DPI: 72, Format: "png"})
-	took := time.Since(start)
+	_, err = doc.RenderPage(0, core.RenderOptions{DPI: 72, Format: "png"})
 	runtime.ReadMemStats(&after)
 	if err != nil && !errors.Is(err, core.ErrRenderBudgetExceeded) {
 		t.Errorf("err = %v, want a render or ErrRenderBudgetExceeded", err)
 	}
-	if took > 3*time.Second {
-		t.Errorf("render took %v, want < 3 s", took)
-	}
 	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 320<<20 {
 		t.Errorf("render allocated %d MiB, want < 320 MiB", alloc>>20)
 	}
-	t.Logf("%d non-embedded font dictionaries: %v, %d MiB allocated, err %v", n, took, (after.TotalAlloc-before.TotalAlloc)>>20, err)
+	t.Logf("%d non-embedded font dictionaries: %d MiB allocated, err %v", n, (after.TotalAlloc-before.TotalAlloc)>>20, err)
+	// ≈ 5–6× the reference: every dictionary is resolved for its Tf, the
+	// first 4,096 loaded; uncharged, 200,000 loads were ≈ 35×.
+	boundedT1(t, fmt.Sprintf("%d non-embedded font dictionaries", n), pdf, 16)
 }
 
 // TestDoS_SubstituteHostileFontDict renders text in non-embedded fonts with
@@ -131,14 +126,13 @@ func TestDoS_SubstituteHostileFontDict(t *testing.T) {
 		"<< /Type /Font /Subtype /Type1 /BaseFont /Symbol /FirstChar -5 /Widths [-1 -2 -3] /Encoding /NoSuchEncoding >>",
 		"<< /Type /FontDescriptor /Flags 99999999999999999999 /ItalicAngle " + hugeReal + " /MissingWidth -" + hugeReal + " >>",
 	}
-	err, took := renderT1(t, classicPDF(objs))
+	pdf := classicPDF(objs)
+	err := renderT1(t, pdf)
 	if err != nil && !errors.Is(err, core.ErrRenderBudgetExceeded) {
 		t.Errorf("err = %v, want a render or ErrRenderBudgetExceeded", err)
 	}
-	if took > t1Deadline/2 {
-		t.Errorf("render took %v", took)
-	}
-	t.Logf("hostile non-embedded fonts: %v, err %v", took, err)
+	t.Logf("hostile non-embedded fonts: err %v", err)
+	boundedT1(t, "hostile non-embedded fonts", pdf, 10)
 }
 
 // TestDoS_SubstituteGlyphFloodIsBounded shows 10^6 large substitute glyphs:
@@ -160,12 +154,11 @@ func TestDoS_SubstituteGlyphFloodIsBounded(t *testing.T) {
 		streamBody(content.String()),
 		"<< /Type /Font /Subtype /Type1 /BaseFont /Times-BoldItalic >>",
 	}
-	err, took := renderT1(t, classicPDF(objs))
+	pdf := classicPDF(objs)
+	err := renderT1(t, pdf)
 	if err != nil && !errors.Is(err, core.ErrRenderBudgetExceeded) {
 		t.Errorf("err = %v, want a render or ErrRenderBudgetExceeded", err)
 	}
-	if took > t1Deadline/2 {
-		t.Errorf("render took %v", took)
-	}
-	t.Logf("10^6 substitute glyphs: %v, err %v", took, err)
+	t.Logf("10^6 substitute glyphs: err %v", err)
+	boundedT1(t, "10^6 substitute glyphs", pdf, 10)
 }

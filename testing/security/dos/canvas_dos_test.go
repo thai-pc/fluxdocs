@@ -5,13 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // Gates for the cost of a page's canvas (render-budget.md §3, canvas caps): an
@@ -75,38 +75,33 @@ func openPDF(t *testing.T, data []byte) *core.Document {
 	return doc
 }
 
-// renderCPU renders page 0 of doc reps times and returns the process CPU time
-// that took (cpuTime) and the last error.
-func renderCPU(doc *core.Document, opts core.RenderOptions, reps int) (time.Duration, error) {
-	runtime.GC()
-	var err error
-	start := cpuTime()
-	for i := 0; i < reps; i++ {
-		_, err = doc.RenderPage(0, opts)
+// renderOnce renders page 0 of doc once with opts, failing t on an error.
+func renderOnce(t *testing.T, doc *core.Document, opts core.RenderOptions) func() {
+	return func() {
+		if _, err := doc.RenderPage(0, opts); err != nil {
+			t.Fatalf("render: %v", err)
+		}
 	}
-	return cpuTime() - start, err
 }
 
 // TestDoS_EmptyPageCanvasIsBounded: an empty page at the canvas caps costs,
 // per output pixel, a small multiple of a normal page's cost per pixel, in
 // every shape the caps admit; the slivers past the side cap — the fuzz input
 // among them — are refused before any canvas exists. The reference is a
-// normal Letter page at 150 DPI, rendered enough times to take about as long
-// as the empty page, in runs alternated with it, and each bound is on the
-// median ratio of five such runs (process CPU time: a loaded host delays both
-// alike). The admitted shapes measure ≈ 0.4× the normal page per pixel;
-// before the side cap, slivers measured 1.5× (2 × 32 Mi px), 1.8×
-// (1 × 64 Mi px) and 2.2× (1 × 5 M px, the fuzz input's canvas at 72 DPI).
+// normal Letter page at 150 DPI, its CPU time per render measured once for
+// the test (perTestRef; process CPU time, which a loaded host moves little),
+// and the bound is on the median ratio per pixel of reltime.FewRuns renders
+// of each shape: the admitted shapes measure ≈ 0.4× the normal page per
+// pixel, so three runs suffice. Before
+// the side cap, slivers measured 1.5× (2 × 32 Mi px), 1.8× (1 × 64 Mi px)
+// and 2.2× (1 × 5 M px, the fuzz input's canvas at 72 DPI).
 func TestDoS_EmptyPageCanvasIsBounded(t *testing.T) {
-	skipUnlessTimed(t)
 	normal := openPDF(t, canvasPDF("[0 0 612 792]", "<< /Font << /F1 4 0 R >> >>", normalPageContent()))
 	opts := core.RenderOptions{DPI: 150, Format: "png"}
 	if _, err := normal.RenderPage(0, opts); err != nil {
 		t.Fatalf("normal page: %v", err)
 	}
 	const normalPx = 1275 * 1650
-	one, _ := renderCPU(normal, opts, 1)
-	reps := max(int(time.Second/max(one, time.Millisecond)), 5) // ≥ 1 s of reference work per run
 
 	const bound = 1.0 // per-pixel cost over the normal page's
 	for _, tc := range []struct {
@@ -119,25 +114,18 @@ func TestDoS_EmptyPageCanvasIsBounded(t *testing.T) {
 		{"wide at the side cap", "[0 0 65535 1024]", 65535 * 1024},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			reltime.Skip(t)
 			doc := openPDF(t, canvasPDF(tc.mediaBox, "<< >>", ""))
-			empty := core.RenderOptions{DPI: 72, Format: "png"}
-			var ratios []float64
-			for run := 0; run < 5; run++ {
-				ref, err := renderCPU(normal, opts, reps)
-				if err != nil {
-					t.Fatalf("normal page: %v", err)
-				}
-				got, err := renderCPU(doc, empty, 1)
-				if err != nil {
-					t.Fatalf("empty page: %v", err)
-				}
-				ratios = append(ratios, (float64(got)/tc.px)/(float64(ref)/float64(reps)/normalPx))
+			ref := perTestRef(t, "a normal Letter page at 150 DPI", reltime.Unprepared(renderOnce(t, normal, opts)))
+			res := reltime.AgainstFixed(reltime.FewRuns, reltime.CPU, ref, reltime.Unprepared(renderOnce(t, doc, core.RenderOptions{DPI: 72, Format: "png"})))
+			// Per pixel: the ratio times the normal page's pixels over the
+			// empty page's.
+			perPx := normalPx / tc.px
+			res.Ratio *= perPx
+			for i := range res.Ratios {
+				res.Ratios[i] *= perPx
 			}
-			slices.Sort(ratios)
-			t.Logf("per-pixel cost over the normal page's: median %.2f (runs %.2f), bound %.1f", ratios[2], ratios, bound)
-			if ratios[2] > bound {
-				t.Errorf("an empty %s page costs %.2f× a normal page per pixel, want ≤ %.1f×", tc.mediaBox, ratios[2], bound)
-			}
+			reltime.Check(t, fmt.Sprintf("an empty %s page per pixel, against a normal page", tc.mediaBox), res, bound)
 		})
 	}
 
@@ -159,8 +147,13 @@ func TestDoS_EmptyPageCanvasIsBounded(t *testing.T) {
 			if !errors.Is(err, core.ErrRenderBudgetExceeded) {
 				t.Fatalf("err = %v, want ErrRenderBudgetExceeded (canvas too large)", err)
 			}
-			if limit := one / 4; took > limit || alloc > 1<<20 {
-				t.Errorf("refusal took %v CPU and %d bytes, want ≤ %v (a quarter of a normal page) and ≤ 1 MiB", took, alloc, limit)
+			if alloc > 1<<20 {
+				t.Errorf("refusal allocated %d bytes, want ≤ 1 MiB", alloc)
+			}
+			reltime.Skip(t)
+			ref := perTestRef(t, "a normal Letter page at 150 DPI", reltime.Unprepared(renderOnce(t, normal, opts)))
+			if limit := ref / 4; took > limit {
+				t.Errorf("refusal took %v CPU, want ≤ %v (a quarter of a normal page)", took, limit)
 			}
 		})
 	}
@@ -172,13 +165,16 @@ var fuzzTallPage = []byte("%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\
 
 // TestDoS_CanvasHonoursDeadline: the canvas clear and the encode poll the
 // render's deadline, so an empty page at the caps whose deadline passes
-// half-way through its render returns soon after. The reference is the same
+// half-way through its render returns soon after (the polls are per band of
+// rows: a sliver of fewer rows, 65535 × 256, measured 0.87×, its last band
+// too large a share of the render). The reference is the same
 // render without a deadline (wall time, median of three); the deadline is
 // half of it, after the clear (≈ a quarter), so only the encode's polls can
 // stop it. Before they did, the render ran to its end (≈ 1.0× the
-// reference); with them it returns at ≈ 0.5–0.6×.
+// reference); with them it returns at ≈ 0.5–0.6×, so the median of
+// reltime.FewRuns renders under the deadline is bounded against it.
 func TestDoS_CanvasHonoursDeadline(t *testing.T) {
-	skipUnlessTimed(t)
+	reltime.Skip(t)
 	const bound = 0.8 // of the reference
 	for _, tc := range []struct{ name, mediaBox string }{
 		{"square at the area cap", "[0 0 8192 8192]"},
@@ -187,37 +183,33 @@ func TestDoS_CanvasHonoursDeadline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := openPDF(t, canvasPDF(tc.mediaBox, "<< >>", ""))
 			opts := core.RenderOptions{DPI: 72, Format: "png"}
-			wall := func(ctx context.Context) (time.Duration, error) {
-				runtime.GC()
-				start := time.Now()
-				_, err := doc.RenderPageContext(ctx, 0, opts)
-				return time.Since(start), err
-			}
-			var refs, got []time.Duration
-			for run := 0; run < 3; run++ {
-				ref, err := wall(context.Background())
-				if err != nil {
+			full := func() {
+				if _, err := doc.RenderPageContext(context.Background(), 0, opts); err != nil {
 					t.Fatalf("render: %v", err)
 				}
-				refs = append(refs, ref)
+			}
+			var refs, took []time.Duration
+			for i := 0; i < reltime.FewRuns; i++ {
+				refs = append(refs, reltime.Time(reltime.Wall, full))
 			}
 			slices.Sort(refs)
-			ref := refs[1]
-			for run := 0; run < 3; run++ {
-				ctx, cancel := context.WithTimeout(context.Background(), ref/2)
-				took, err := wall(ctx)
-				cancel()
-				if !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("render with a deadline of %v: err = %v after %v, want DeadlineExceeded", ref/2, err, took)
-				}
-				got = append(got, took)
+			d := refs[1] / 2
+			var ratios []float64
+			for i := 0; i < reltime.FewRuns; i++ {
+				w := reltime.Time(reltime.Wall, func() {
+					ctx, cancel := context.WithTimeout(context.Background(), d)
+					defer cancel()
+					if _, err := doc.RenderPageContext(ctx, 0, opts); !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("render with a deadline of %v: err = %v, want DeadlineExceeded", d, err)
+					}
+				})
+				took = append(took, w)
+				ratios = append(ratios, float64(w)/float64(refs[1]))
 			}
-			slices.Sort(got)
-			ratio := float64(got[1]) / float64(ref)
-			t.Logf("reference %v, deadline %v, returned after %v (runs %v): %.2f× the reference, bound %.1f", ref, ref/2, got[1], got, ratio, bound)
-			if ratio > bound {
-				t.Errorf("returned after %.2f× the full render, want ≤ %.1f×", ratio, bound)
-			}
+			slices.Sort(ratios)
+			slices.Sort(took)
+			res := reltime.Result{Ratio: ratios[1], Ratios: ratios, Ref: refs[1], Work: took[1]}
+			reltime.Check(t, fmt.Sprintf("render under a deadline of %v (half the full render), against the full render", d), res, bound)
 		})
 	}
 }

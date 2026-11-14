@@ -8,7 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 func TestScanContent_OperandsAndOperators(t *testing.T) {
@@ -448,25 +449,36 @@ func TestOperandsFit(t *testing.T) {
 
 // TestScanContent_UnterminatedStringIsLinear: after a token that runs to end of
 // input the scanner resumes at the end, not one byte later — otherwise each
-// retry re-lexes to the end (1 MB of '(' took hours). The 2s bound is scaled by
-// timingScale for -race and WASM.
+// retry re-lexes to the end (1 MB of '(' took hours). The strict scan reports
+// the unterminated string. The cost of both scans of 4n units is bounded
+// against their cost at n (reltime.Linear: ≈ 4 when linear, 16 when
+// quadratic; bounded at reltime.LinearBound), not by an absolute time.
 func TestScanContent_UnterminatedStringIsLinear(t *testing.T) {
-	for _, tc := range []struct{ name, in string }{
-		{"literal strings", strings.Repeat("(", 1<<20)},
-		{"array of literal strings", strings.Repeat("[(", 200_000)},
-		{"hex strings", strings.Repeat("<0", 200_000)},
-		{"inline-image dictionaries", strings.Repeat("BI (", 200_000)},
+	for _, tc := range []struct {
+		name, unit string
+		n          int // units of the full-size input
+	}{
+		{"literal strings", "(", 1 << 20},
+		{"array of literal strings", "[(", 200_000},
+		{"hex strings", "<0", 200_000},
+		{"inline-image dictionaries", "BI (", 200_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			begin := time.Now()
-			ScanContentSpans([]byte(tc.in))
-			_, err := ScanContentSpansStrict([]byte(tc.in))
-			if elapsed, limit := time.Since(begin), 2*time.Second*timingScale; elapsed > limit {
-				t.Errorf("scan took %v, want < %v", elapsed, limit)
-			}
-			if err == nil {
+			full := []byte(strings.Repeat(tc.unit, tc.n))
+			// Always run, -race included: a quadratic lenient scan of the
+			// full input (hours) times the test out even where the timing
+			// gate below is skipped.
+			ScanContentSpans(full)
+			if _, err := ScanContentSpansStrict(full); err == nil {
 				t.Errorf("strict scan of an unterminated string: err = nil")
 			}
+			reltime.Skip(t)
+			scan := func(n int) {
+				in := []byte(strings.Repeat(tc.unit, n))
+				ScanContentSpans(in)
+				ScanContentSpansStrict(in)
+			}
+			reltime.Check(t, "scan of 4n units against n", reltime.Linear(reltime.CPU, 4, scan, tc.n/4), reltime.LinearBound)
 		})
 	}
 }

@@ -189,6 +189,12 @@ func TestThumbnailClientGone(t *testing.T) {
 // TestThumbnailClampsDPI: an absurd ?dpi is clamped to maxThumbnailDPI rather
 // than hitting the canvas cap.
 func TestThumbnailClampsDPI(t *testing.T) {
+	// Lift the deadline so the outcome cannot depend on host speed: a
+	// 1250x3334 render under -race on a loaded host can outlast the 10 s
+	// default (503).
+	old := thumbnailTimeout
+	thumbnailTimeout = time.Hour
+	t.Cleanup(func() { thumbnailTimeout = old })
 	rr := post(t, NewServer(), "/thumbnail?page=0&dpi=100000", secretPDF())
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())

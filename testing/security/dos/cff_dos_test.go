@@ -2,12 +2,10 @@ package dos
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
 	"github.com/thai-pc/fluxdocs/testing/internal/cffmin"
@@ -78,17 +76,15 @@ func TestDoS_CFFGlyphBombIsBounded(t *testing.T) {
 				}
 			}
 			content.WriteString("ET\n")
-			err, took := renderT1(t, cffmin.PDF(cffmin.Program(glyphs, cffBombSubrs(), 0), nil, fonts, content.String()))
+			pdf := cffmin.PDF(cffmin.Program(glyphs, cffBombSubrs(), 0), nil, fonts, content.String())
+			err := renderT1(t, pdf)
 			switch {
 			case tt.wantBudget && !errors.Is(err, core.ErrRenderBudgetExceeded):
 				t.Errorf("err = %v, want ErrRenderBudgetExceeded", err)
 			case !tt.wantBudget && err != nil:
 				t.Errorf("err = %v, want a render", err)
 			}
-			if took > t1Deadline/2 {
-				t.Errorf("render took %v, want well under %v", took, t1Deadline)
-			}
-			t.Logf("%s: %v in %v", tt.name, err, took)
+			boundedT1(t, tt.name, pdf, 3)
 		})
 	}
 }
@@ -110,14 +106,11 @@ func TestDoS_CFFSharedProgramParsedOnce(t *testing.T) {
 		fmt.Fprintf(&content, "/%s 1 Tf <00> Tj\n", name)
 	}
 	content.WriteString("ET\n")
-	err, took := renderT1(t, cffmin.PDF(prog, flateBytes(t, prog), fonts, content.String()))
-	if err != nil {
+	pdf := cffmin.PDF(prog, flateBytes(t, prog), fonts, content.String())
+	if err := renderT1(t, pdf); err != nil {
 		t.Errorf("err = %v, want a render (the program decoded once)", err)
 	}
-	if took > t1Deadline/2 {
-		t.Errorf("render took %v", took)
-	}
-	t.Logf("10,000 fonts over one 30 MiB CFF program: %v", took)
+	boundedT1(t, "10,000 fonts over one 30 MiB CFF program", pdf, 10)
 }
 
 // TestDoS_CFFFontDictsSharingPrivate: a CID-keyed program of 256 Font
@@ -132,22 +125,11 @@ func TestDoS_CFFFontDictsSharingPrivate(t *testing.T) {
 	for _, overlap := range []bool{false, true} {
 		t.Run(fmt.Sprintf("overlap %v", overlap), func(t *testing.T) {
 			prog := cffmin.CIDProgram(glyph, 256, 16<<20, overlap)
-			doc, err := core.OpenBytes(cffmin.CIDPDF(prog, map[string]string{"F1": ""}, "BT /F1 50 Tf 10 10 Td <0001> Tj ET"))
-			if err != nil {
-				t.Fatalf("OpenBytes: %v", err)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), t1Deadline)
-			defer cancel()
-			start := time.Now()
-			_, err = doc.RenderPageContext(ctx, 0, core.RenderOptions{DPI: 72, Format: "png"})
-			took := time.Since(start)
-			if err != nil {
+			pdf := cffmin.CIDPDF(prog, map[string]string{"F1": ""}, "BT /F1 50 Tf 10 10 Td <0001> Tj ET")
+			if err := renderT1(t, pdf); err != nil {
 				t.Errorf("err = %v, want a render", err)
 			}
-			if took > 2*time.Second {
-				t.Errorf("render took %v, want < 2 s", took)
-			}
-			t.Logf("256 Font DICTs, overlap %v: %v", overlap, took)
+			boundedT1(t, fmt.Sprintf("256 Font DICTs, overlap %v", overlap), pdf, 10)
 		})
 	}
 }
@@ -207,17 +189,15 @@ func TestDoS_CIDWidthsCharged(t *testing.T) {
 				fmt.Fprintf(&content, "/%s 1 Tf <0001> Tj\n", name)
 			}
 			content.WriteString("ET\n")
-			err, took := renderT1(t, cffmin.CIDPDFExtra(prog, fonts, content.String(), cidWidths(form, 65535), tt.perFont))
+			pdf := cffmin.CIDPDFExtra(prog, fonts, content.String(), cidWidths(form, 65535), tt.perFont)
+			err := renderT1(t, pdf)
 			switch {
 			case tt.wantBudget && !errors.Is(err, core.ErrRenderBudgetExceeded):
 				t.Errorf("err = %v, want ErrRenderBudgetExceeded", err)
 			case !tt.wantBudget && err != nil:
 				t.Errorf("err = %v, want a render", err)
 			}
-			if took > 2*time.Second {
-				t.Errorf("render took %v, want < 2 s", took)
-			}
-			t.Logf("%s: %v in %v", tt.name, err, took)
+			boundedT1(t, tt.name, pdf, 10)
 		})
 	}
 }
@@ -237,12 +217,9 @@ func TestDoS_CIDWidthRangesIndexed(t *testing.T) {
 		content.WriteString(show)
 	}
 	content.WriteString("ET\n")
-	err, took := renderT1(t, cffmin.CIDPDFExtra(prog, map[string]string{"F0": ""}, content.String(), cidWidths("ranges", 65535), false))
-	if err != nil {
+	pdf := cffmin.CIDPDFExtra(prog, map[string]string{"F0": ""}, content.String(), cidWidths("ranges", 65535), false)
+	if err := renderT1(t, pdf); err != nil {
 		t.Errorf("err = %v, want a render", err)
 	}
-	if took > 2*time.Second {
-		t.Errorf("render took %v, want < 2 s", took)
-	}
-	t.Logf("200,000 glyphs over 65,535 /W ranges: %v", took)
+	boundedT1(t, "200,000 glyphs over 65,535 /W ranges", pdf, 10)
 }

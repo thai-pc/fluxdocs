@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // longChainSalt is a user validation salt found by an offline search over
@@ -17,28 +18,19 @@ var longChainSalt = []byte{0, 0, 0, 0, 0, 0, 0x05, 0x95}
 
 const longChainRounds = 107
 
-// minDuration runs f n times and returns the fastest run: the measure least
-// disturbed by other work on the machine.
-func minDuration(n int, f func()) time.Duration {
-	best := time.Duration(1<<63 - 1)
-	for i := 0; i < n; i++ {
-		start := time.Now()
-		f()
-		best = min(best, time.Since(start))
-	}
-	return best
-}
-
 // TestDoS_R6KeyDerivationIsBounded is the design §11.3 DoS gate. An attacker
 // picks the salts, so they pick the 2.B round count; the longest chain is 287
 // rounds (hash2BStop), and the loop's cap is 288. The worst open runs
 // v5MaxHashes hashes — across the whole repair ladder (DecryptionCache) —
 // with a 127-byte password and the 48-byte user key, each forced to the
-// 288-round cap by the stop-test hook. Its cost
-// is bounded relative to a measured baseline — one forced 64-round hash of
-// the same inputs — not by an absolute time, so it holds under -race, on
-// js/wasm and on a slow CI runner alike: the ratio is 6 × 288 / 64 = 27 and
-// the gate allows 45. The open path itself never runs more than v5MaxHashes
+// 288-round cap by the stop-test hook. Its cost is bounded relative to a
+// baseline doing the same number of rounds in forced 64-round hashes of the
+// same inputs (27 of them: 6 × 288 / 64), not by an absolute time: in process
+// CPU time, each side repeated to about reltime.CPUTarget, median of
+// reltime.Runs alternated runs (reltime). The ratio is ≈ 1 when key
+// derivation is linear in rounds and the gate allows 45/27 ≈ 1.67 (the bound
+// the gate had on a single 64-round hash, 45×). The min-of-five wall-clock
+// version measured 57× once on a loaded host. The open path itself never runs more than v5MaxHashes
 // hashes (TestPasswordCandidates_HashBound) and a hostile dictionary cannot
 // raise the round bound.
 func TestDoS_R6KeyDerivationIsBounded(t *testing.T) {
@@ -55,13 +47,14 @@ func TestDoS_R6KeyDerivationIsBounded(t *testing.T) {
 			}
 		}
 	}
-	base := minDuration(5, run(64, 1))
-	worst := minDuration(3, run(hash2BMaxRounds, v5MaxHashes))
-	t.Logf("one 64-round hash (127-byte password, user key): %v; worst open (%d hashes × %d rounds): %v (%.1f×)",
-		base, v5MaxHashes, hash2BMaxRounds, worst, float64(worst)/float64(base))
-	if limit := 45 * base; worst > limit {
-		t.Errorf("worst open took %v, more than 45 × the %v baseline (%v): key derivation is not linear in rounds", worst, base, limit)
-	}
+	t.Run("cost against the same rounds in 64-round hashes", func(t *testing.T) {
+		reltime.Skip(t)
+		equal := v5MaxHashes * hash2BMaxRounds / 64 // 27 hashes of 64 rounds
+		// A hasher allows v5MaxHashes calls: one hasher per reference hash.
+		ref := reltime.Repeat(equal, run(64, 1))
+		res := reltime.Against(reltime.CPU, reltime.Unprepared(ref), reltime.Unprepared(run(hash2BMaxRounds, v5MaxHashes)))
+		reltime.Check(t, fmt.Sprintf("worst open (%d hashes × %d rounds) against %d hashes × 64 rounds", v5MaxHashes, hash2BMaxRounds, equal), res, 45.0/27)
+	})
 
 	// Through the open path: a wrong 127-byte password whose SASLprep form
 	// differs is tried twice, as user and owner: 4 hashes, all forced to 288

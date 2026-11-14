@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/thai-pc/fluxdocs/core"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // Render-budget seeds (SECURITY.md §2; design: docs/design/render-budget.md
@@ -20,12 +21,18 @@ import (
 // renderer must stop them with ErrRenderBudgetExceeded, or at the per-input
 // deadline exercise sets, never run for minutes.
 
-// renderDeadline bounds each render in exercise; renderSlack absorbs -race and
-// a loaded CI host on top of it. A render past both is a hang.
-const (
-	renderDeadline = 2 * time.Second
-	renderSlack    = 10 * time.Second
-)
+// renderDeadline bounds each render in exercise; renderSlack absorbs a loaded
+// CI host on top of it, and under -race, which slows rendering several-fold
+// and ran past 12 s on a loaded host, is 60 s. A render past both is a hang
+// (one that never polls its deadline runs for minutes).
+const renderDeadline = 2 * time.Second
+
+var renderSlack = func() time.Duration {
+	if reltime.Race {
+		return 60 * time.Second
+	}
+	return 10 * time.Second
+}()
 
 // budgetSeed is a named budget seed and whether, at exercise's DPI, it must trip
 // the budget (rather than possibly hitting the deadline first under -race).

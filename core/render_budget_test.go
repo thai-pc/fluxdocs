@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thai-pc/fluxdocs/core/render"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // budgetPageSpec is one page of budgetDoc: its /MediaBox and content stream.
@@ -99,7 +100,6 @@ func TestRenderPageContext_Deadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	start := time.Now()
 	img, err := doc.RenderPageContext(ctx, 0, RenderOptions{DPI: 300, MaxPaintPixels: -1, MaxOperators: -1})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
@@ -110,9 +110,10 @@ func TestRenderPageContext_Deadline(t *testing.T) {
 	if img != nil || fired.Load() != 0 {
 		t.Errorf("got %d bytes and %d callbacks, want none", len(img), fired.Load())
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("returned after %v, want shortly after the deadline", elapsed)
-	}
+	renderDeadlineGate(t, func(ctx context.Context, opts RenderOptions) error {
+		_, err := doc.RenderPageContext(ctx, 0, opts)
+		return err
+	})
 
 	canceled, cancelNow := context.WithCancel(context.Background())
 	cancelNow()
@@ -200,14 +201,14 @@ func TestRenderAllPagesContext_ParentWins(t *testing.T) {
 		doc := budgetDoc(t, heavyPage(), heavyPage(), heavyPage())
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		start := time.Now()
 		_, err := doc.RenderAllPagesContext(ctx, RenderOptions{DPI: 300, MaxPaintPixels: -1})
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 		}
-		if elapsed := time.Since(start); elapsed > 5*time.Second {
-			t.Errorf("returned after %v, want shortly after the deadline", elapsed)
-		}
+		renderDeadlineGate(t, func(ctx context.Context, opts RenderOptions) error {
+			_, err := doc.RenderAllPagesContext(ctx, opts)
+			return err
+		})
 	})
 	t.Run("custom cause", func(t *testing.T) {
 		doc := budgetDoc(t, plainPage)
@@ -271,4 +272,30 @@ func TestRenderAllPagesContext_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// renderDeadlineGate bounds how soon render, a render of heavy pages at
+// 300 DPI with no paint budget, returns under a deadline: at under
+// reltime.DeadlineBound of a reference render of the same pages stopped by a
+// paint budget scaled to about reltime.Target, the deadline being a quarter
+// of the reference (reltime.AfterDeadline) — relative, not an absolute time.
+func renderDeadlineGate(t *testing.T, render func(ctx context.Context, opts RenderOptions) error) {
+	t.Helper()
+	t.Run("returns soon after the deadline", func(t *testing.T) {
+		reltime.Skip(t)
+		budgeted := func(w int64) {
+			if err := render(context.Background(), RenderOptions{DPI: 300, MaxPaintPixels: w, MaxOperators: -1}); !errors.Is(err, ErrRenderBudgetExceeded) {
+				t.Fatalf("reference render: err = %v, want ErrRenderBudgetExceeded", err)
+			}
+		}
+		w := reltime.Scaled(reltime.Wall, 16<<20, budgeted)
+		res := reltime.AfterDeadline(func() { budgeted(w) }, func(d time.Duration) {
+			ctx, cancel := context.WithTimeout(context.Background(), d)
+			defer cancel()
+			if err := render(ctx, RenderOptions{DPI: 300, MaxPaintPixels: -1, MaxOperators: -1}); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("render under a %v deadline: err = %v, want context.DeadlineExceeded", d, err)
+			}
+		})
+		reltime.Check(t, "render under a deadline of a quarter of the reference", res, reltime.DeadlineBound)
+	})
 }

@@ -2,6 +2,6 @@
 
 package parse
 
-// The race detector slows the scanner several-fold; timing bounds in tests
-// scale by timingScale so they still catch recursion or quadratic work.
+// The race detector slows the scanner several-fold. timingScale is unused
+// (robust_test.go): the timing gates are relative (internal/reltime).
 func init() { timingScale = 10 }

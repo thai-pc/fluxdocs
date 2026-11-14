@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 // These tests pin down hostile-input robustness (SECURITY.md §2): the parser
@@ -392,14 +394,18 @@ func TestSkipOverDeep_AcceptsOnlyWhatParseValueAccepts(t *testing.T) {
 	}
 }
 
-// timingScale stretches wall-clock bounds under -race and on the WASM target
-// (race_test.go, wasm_test.go).
+// timingScale is the factor -race (race_test.go) and the js/wasm target
+// (wasm_test.go) slow the scanner by. Unused: the package's timing gates
+// bound costs relative to a reference measured in the same run
+// (internal/reltime), which those slowdowns move alike. It is kept, with the
+// files that set it, for a gate that needs an absolute bound again.
 var timingScale time.Duration = 1
 
 // TestScanContent_HugeDeepOperandIsLinear: the over-deep skip is iterative, so
-// the 3,000,000-level operand that used to overflow the stack scans in linear
-// time with constant stack. The 2s bound (scaled under -race) is several times
-// the measured time; it catches recursion or a quadratic rescan.
+// the 3,000,000-level operand that used to overflow the stack scans with
+// constant stack and in linear time: a 4×-deeper operand costs ≈ 4× (bounded
+// at reltime.LinearBound, 8×; recursion or a quadratic rescan is ≈ 16×), measured against the
+// shallower one in the same run (reltime.Linear), not by an absolute time.
 func TestScanContent_HugeDeepOperandIsLinear(t *testing.T) {
 	const depth = 3_000_000
 	for _, tc := range []struct{ name, open, close string }{
@@ -408,11 +414,7 @@ func TestScanContent_HugeDeepOperandIsLinear(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := []byte("[ (keep) " + nested(tc.open, "1", tc.close, depth) + " ] TJ")
-			begin := time.Now()
 			spans := ScanContentSpans(in)
-			if elapsed, limit := time.Since(begin), 2*time.Second*timingScale; elapsed > limit {
-				t.Errorf("scan of a %d-deep operand took %v, want < %v", depth, elapsed, limit)
-			}
 			if len(spans) != 1 || spans[0].Op != "TJ" {
 				t.Fatalf("spans = %d, want one TJ", len(spans))
 			}
@@ -423,6 +425,9 @@ func TestScanContent_HugeDeepOperandIsLinear(t *testing.T) {
 			if s, ok := arr[0].(String); !ok || string(s.Value) != "keep" {
 				t.Errorf("TJ string = %v, want (keep)", arr[0])
 			}
+			reltime.Skip(t)
+			scan := func(d int) { ScanContentSpans([]byte("[ (keep) " + nested(tc.open, "1", tc.close, d) + " ] TJ")) }
+			reltime.Check(t, "scan of a 4×-deeper operand", reltime.Linear(reltime.CPU, 4, scan, depth/4), reltime.LinearBound)
 		})
 	}
 }

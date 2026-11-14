@@ -19,6 +19,7 @@ import (
 	cb "github.com/thai-pc/fluxdocs/core/internal/psfont/cffbuild"
 	tb "github.com/thai-pc/fluxdocs/core/internal/psfont/t1build"
 	"github.com/thai-pc/fluxdocs/core/parse"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 )
 
 var blackRGBA = color.RGBA{0, 0, 0, 0xff}
@@ -498,6 +499,14 @@ func TestResolveLimits(t *testing.T) {
 	if got := letter(150); got != 1275*1650 {
 		t.Fatalf("letter(150) = %d, want %d", got, 1275*1650)
 	}
+	// The values themselves (render-budget.md §3), which the rows above
+	// read through the constants; the dos gates' default-budget reference
+	// (TestDoS_DefaultBudgetBoundsPage) is calibrated on them.
+	if defaultMaxOperators != 8<<20 || maxImageSamples != 256<<20 || maxContentBytes != 512<<20 ||
+		maxDecodedBytes != 512<<20 || maxPathPoints != 4<<20 {
+		t.Errorf("default caps changed: steps %d, samples %d, content %d, decoded %d, path points %d",
+			defaultMaxOperators, maxImageSamples, maxContentBytes, maxDecodedBytes, maxPathPoints)
+	}
 }
 
 // TestBudget_DefaultTripsUnlimitedRenders checks the zero-value options enforce
@@ -592,15 +601,15 @@ func TestBudget_NilContext(t *testing.T) {
 
 // TestBudget_DeadlineMidRender runs an unbounded-budget heavy page under a short
 // deadline: it must stop with DeadlineExceeded (not a budget error) shortly
-// after the deadline.
+// after the deadline — at under 0.75× of a reference render of the same page
+// stopped by a paint budget, with the deadline at a quarter of it
+// (deadlineGate), not within an absolute time.
 func TestBudget_DeadlineMidRender(t *testing.T) {
 	// 300 DPI: 417x417 px per fill; 20000 fills ≈ 3.5 G pixel visits.
 	r, pi := contentPage(t, heavyContent(20000))
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	start := time.Now()
 	data, err := Page(r, pi, Options{DPI: 300, MaxPaintPixels: -1, MaxOperators: -1, Context: ctx})
-	elapsed := time.Since(start)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
@@ -610,9 +619,34 @@ func TestBudget_DeadlineMidRender(t *testing.T) {
 	if data != nil {
 		t.Errorf("got %d bytes, want nil", len(data))
 	}
-	if elapsed > 5*time.Second { // generous slack for -race and loaded CI
-		t.Errorf("render returned after %v, want shortly after the 50ms deadline", elapsed)
-	}
+	deadlineGate(t, r, pi, func(d time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), d)
+	})
+}
+
+// deadlineGate bounds, relative to a reference, how soon a render of page pi
+// at 300 DPI with no budget returns under the context deadlineCtx(d) makes
+// (reltime.AfterDeadline). The reference is the same render stopped by a
+// paint budget scaled to take about reltime.Target.
+func deadlineGate(t *testing.T, r *parse.Resolver, pi parse.PageInfo, deadlineCtx func(d time.Duration) (context.Context, context.CancelFunc)) {
+	t.Helper()
+	t.Run("returns soon after the deadline", func(t *testing.T) {
+		reltime.Skip(t)
+		budgeted := func(w int64) {
+			if _, err := Page(r, pi, Options{DPI: 300, MaxPaintPixels: w, MaxOperators: -1}); !errors.Is(err, ErrBudgetExceeded) {
+				t.Fatalf("reference render: err = %v, want ErrBudgetExceeded", err)
+			}
+		}
+		w := reltime.Scaled(reltime.Wall, 16<<20, budgeted)
+		res := reltime.AfterDeadline(func() { budgeted(w) }, func(d time.Duration) {
+			ctx, cancel := deadlineCtx(d)
+			defer cancel()
+			if _, err := Page(r, pi, Options{DPI: 300, MaxPaintPixels: -1, MaxOperators: -1, Context: ctx}); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("render under a %v deadline: err = %v, want context.DeadlineExceeded", d, err)
+			}
+		})
+		reltime.Check(t, "render under a deadline of a quarter of the reference", res, reltime.DeadlineBound)
+	})
 }
 
 // clockOnlyCtx has a deadline but never reports itself done, like a
@@ -629,14 +663,13 @@ func (c clockOnlyCtx) Deadline() (time.Time, bool) { return c.deadline, true }
 func TestBudget_DeadlineByClock(t *testing.T) {
 	r, pi := contentPage(t, heavyContent(20000))
 	ctx := clockOnlyCtx{Context: context.Background(), deadline: time.Now().Add(30 * time.Millisecond)}
-	start := time.Now()
 	_, err := Page(r, pi, Options{DPI: 300, MaxPaintPixels: -1, MaxOperators: -1, Context: ctx})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded from the clock check", err)
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("render returned after %v, want shortly after the 30ms deadline", elapsed)
-	}
+	deadlineGate(t, r, pi, func(d time.Duration) (context.Context, context.CancelFunc) {
+		return clockOnlyCtx{Context: context.Background(), deadline: time.Now().Add(d)}, func() {}
+	})
 
 	// A deadline already past by the clock stops the render before any work.
 	r, pi = contentPage(t, "0 0 100 100 re f")
