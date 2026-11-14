@@ -3,8 +3,8 @@ package core
 import (
 	"bufio"
 	"fmt"
+	"github.com/thai-pc/fluxdocs/internal/reltime"
 	"os"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -187,37 +187,33 @@ func TestRedactVerifyCorpusCost(t *testing.T) {
 // verification against regressions (an accidental quadratic, a pass that
 // stops skipping work): on 20 pages with a region on page 0 and nothing to
 // extend to, RedactAndFlatten with them must stay within a generous multiple
-// of RedactAndFlatten without them, in process CPU time (median of 5). The
-// ratio measured when this guard was added was about 3.
+// of RedactAndFlatten without them, in process CPU time. One call takes about
+// 1 ms without them, too short to time alone on a CI runner (a single sample
+// read 15×), so each side is repeated to reltime.CPUTarget and the median of
+// alternated runs is bounded. The ratio measured locally is about 5.
 func TestRedactVerifyCostGuard(t *testing.T) {
-	if testing.Short() || raceEnabled || cpuTime() == 0 {
-		t.Skip("CPU-time ratio check: needs CPU time, no -race, no -short")
+	reltime.Skip(t)
+	if cpuTime() == 0 {
+		t.Skip("CPU-time ratio check: needs CPU time")
 	}
 	pdf := benchTextDoc(20)
 	mark := redactArea(0, Rect{X: 0, Y: 300, Width: 612, Height: 200})
-	measure := func(base bool) time.Duration {
-		redactHooks.noPrepass, redactHooks.noVerify = base, base
-		defer func() { redactHooks.noPrepass, redactHooks.noVerify = false, false }()
-		var runs []time.Duration
-		for i := 0; i < 5; i++ {
+	side := func(base bool) reltime.Prepared {
+		return func() func() {
 			d, err := OpenBytes(pdf)
 			if err != nil {
 				t.Fatal(err)
 			}
 			mark(d)
-			c0 := cpuTime()
-			if _, err := d.RedactAndFlatten(); err != nil {
-				t.Fatal(err)
+			return func() {
+				redactHooks.noPrepass, redactHooks.noVerify = base, base
+				defer func() { redactHooks.noPrepass, redactHooks.noVerify = false, false }()
+				if _, err := d.RedactAndFlatten(); err != nil {
+					t.Fatal(err)
+				}
 			}
-			runs = append(runs, cpuTime()-c0)
 		}
-		sort.Slice(runs, func(i, j int) bool { return runs[i] < runs[j] })
-		return runs[2]
 	}
-	base, full := measure(true), measure(false)
-	ratio := float64(full) / float64(max(base, time.Microsecond))
-	t.Logf("CPU base %v, full %v, ratio %.1f", base, full, ratio)
-	if ratio > 15 {
-		t.Errorf("pre-pass and verification cost %.1f× RedactAndFlatten without them, want ≤ 15× (was about 3×)", ratio)
-	}
+	res := reltime.Against(reltime.CPU, side(true), side(false))
+	reltime.Check(t, "pre-pass and verification against RedactAndFlatten without them", res, 15)
 }
