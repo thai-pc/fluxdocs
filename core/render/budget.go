@@ -24,7 +24,8 @@ import (
 var ErrBudgetExceeded = errors.New("render: budget exceeded")
 
 // ErrCanvasTooLarge is returned (wrapped) when the page's output canvas exceeds
-// maxCanvasPixels. Its message keeps "exceeds"; core wraps it with
+// maxCanvasPixels in area or maxCanvasSide on a side. Its message keeps
+// "exceeds"; core wraps it with
 // ErrRenderBudgetExceeded, so both sentinels match with errors.Is.
 var ErrCanvasTooLarge = errors.New("render: canvas exceeds pixel cap")
 

@@ -227,6 +227,13 @@ func seeds() [][]byte {
 		mediaBoxPDF("[8589934592 8589934592 0 0]"),
 		mediaBoxPDF("[-8589934592 -8589934592 0 0]"),
 		mediaBoxPDF("[0 0 1 1000000000000000000]"),
+		// Fuzz find: no content and an inherited MediaBox lexed as
+		// [0 0 1 10000000 0], a 1 × 5,000,000 px canvas at DPI 36 that the
+		// area cap admitted; clearing and encoding it, which the deadline did
+		// not stop, ran past renderDeadline+renderSlack under load. The side
+		// cap (maxCanvasSide) refuses it; testing/security/dos
+		// (canvas_dos_test.go) gates the canvas cost at the caps.
+		[]byte("%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 1 10000000\r00000000000] >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000153 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n200\n%%EOF\n"),
 		mediaBoxPDF("[0 0 99999999999999999999 10]"),
 		mediaBoxPDF("[0 0 " + strings.Repeat("9", 400) + ".0 10]"),
 		// Hostile strokes: segment length, coordinate magnitude and line width

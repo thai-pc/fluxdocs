@@ -159,6 +159,56 @@ worst case ≤ ~1 s native.
 in the browser, keeping one core and two targets with identical behavior. WASM
 callers that want a tighter wall-clock bound pass `timeoutMs` (§5).
 
+### 3.1 The canvas: its caps, its clear and its encode
+
+An empty page still clears its canvas to white and encodes it. The paint
+budget does not meter either. A fuzzed page with no content and an inherited
+`[0 0 1 10000000 0]` MediaBox, a 1 × 5,000,000 px canvas at 36 DPI, ran past
+the fuzz harness's deadline (2 s + 10 s slack) under load and coverage
+instrumentation. Measured natively (Apple M-series, idle), the clear and the
+PNG encode cost:
+
+| Canvas | clear | PNG encode |
+|---|---|---|
+| 1275 × 1650 (Letter, 150 DPI) | 12 ms | 27 ms |
+| 8192 × 8192 (area cap) | 0.28 s | 0.86 s |
+| 1 × 5,000,000 (the fuzz input) | 24 ms | 0.36 s |
+| 1 × 64 Mi | 0.34 s | 4.1 s |
+| 64 Mi × 1 | 0.30 s | 2.4 s, allocating 1,154 MiB (six 192 MiB row buffers) |
+| 16 × 4 Mi | 0.30 s | 1.7 s |
+
+Coverage instrumentation, which fuzzing uses, multiplies these by about 5.
+The area cap alone admitted slivers: their encode is dominated by per-row
+work and costs up to ≈ 5× a square canvas of the same area, a single long
+row makes the encoder allocate over a gigabyte (6 MiB for the square
+canvas, 3 MiB at 65,535 × 1,024), and JPEG (≤ 65,535 px a side)
+refused them only after the whole render. So:
+
+- **`maxCanvasSide` = 65,535 px** a side, on top of `maxCanvasPixels`
+  (`ErrCanvasTooLarge`, so `ErrRenderBudgetExceeded`). A page within ISO
+  32000-1's size limit (Annex C, 14,400 units, 200 in) still renders up to
+  327 DPI along its longer side. The fuzz input is refused before any canvas
+  is allocated. At the caps, every admitted shape costs ≈ 0.4× a normal
+  Letter page at 150 DPI per output pixel. Before the side cap, slivers cost
+  1.5–2.2×.
+- **The clear and the encode poll the context.** The canvas is cleared a
+  band of ≈ 1 Mi px at a time, with a poll between bands. The encoder
+  writes through a writer that polls before each write and fails once the
+  budget has stopped. PNG writes a chunk per 32 KiB of compressed data, so
+  even a blank canvas at the caps (≈ 140:1) has tens of polls, and JPEG
+  writes every 4 KiB. An empty page at the caps whose deadline passes
+  halfway through its render now returns at ≈ 0.5–0.6× of the full render.
+  Before, it ran to the end and returned an image.
+- Neither is charged to `MaxPaintPixels`. That would change what an
+  explicit limit means to callers. At ≈ 4 pixel visits per canvas pixel
+  (clear ≈ 1, encode ≈ 3), they are a fixed fraction of the default budget
+  (≥ 16 × canvas pixels).
+
+Gates: `TestDoS_EmptyPageCanvasIsBounded` and `TestDoS_CanvasHonoursDeadline`
+(`testing/security/dos/canvas_dos_test.go`), relative to a normal page and to
+the same render without a deadline, respectively. The fuzz input is a
+`FuzzOpenBytes` seed.
+
 ---
 
 ## 4. Public API (Go)

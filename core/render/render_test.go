@@ -236,16 +236,19 @@ func TestPage_HugeMediaBoxReturnsError(t *testing.T) {
 	}
 }
 
-// TestDeviceMatrix_CanvasCapBoundary pins the exact edges of the canvas cap: an
-// area of exactly maxCanvasPixels (and a single side of exactly maxCanvasPixels
-// with the other side 1px) is accepted, one pixel more on either axis — or a
-// fractional overshoot that Ceil rounds up — is rejected. Rotation must not let
-// a page slip past the cap by swapping its sides.
+// TestDeviceMatrix_CanvasCapBoundary pins the exact edges of the canvas caps:
+// an area of exactly maxCanvasPixels, and a side of exactly maxCanvasSide with
+// the other side as long as the area cap allows, are accepted; one pixel more
+// on either axis — or a fractional overshoot that Ceil rounds up — is
+// rejected. A sliver longer than maxCanvasSide is rejected however thin it is
+// (it was accepted up to maxCanvasPixels long before the side cap). Rotation
+// must not let a page slip past a cap by swapping its sides.
 func TestDeviceMatrix_CanvasCapBoundary(t *testing.T) {
 	const side = 8192 // side*side == maxCanvasPixels
 	if side*side != maxCanvasPixels {
 		t.Fatalf("test assumes maxCanvasPixels == %d, got %d", side*side, maxCanvasPixels)
 	}
+	const long, short = maxCanvasSide, maxCanvasPixels / maxCanvasSide // 65535 × 1024 ≤ the area cap
 	tests := []struct {
 		name         string
 		mb           parse.Rectangle
@@ -257,13 +260,17 @@ func TestDeviceMatrix_CanvasCapBoundary(t *testing.T) {
 		{"one column over cap", parse.Rectangle{URX: side + 1, URY: side}, 0, 0, 0},
 		{"one row over cap", parse.Rectangle{URX: side, URY: side + 1}, 0, 0, 0},
 		{"fraction over cap rounds up", parse.Rectangle{URX: side + 0.25, URY: side}, 0, 0, 0},
-		{"side exactly cap, other 1px", parse.Rectangle{URX: maxCanvasPixels, URY: 1}, 0, maxCanvasPixels, 1},
-		{"side exactly cap rotated 90", parse.Rectangle{URX: maxCanvasPixels, URY: 1}, 90, 1, maxCanvasPixels},
-		{"side exactly cap rotated 270", parse.Rectangle{URX: 1, URY: maxCanvasPixels}, 270, maxCanvasPixels, 1},
-		{"side cap+1, other 1px", parse.Rectangle{URX: maxCanvasPixels + 1, URY: 1}, 0, 0, 0},
-		{"side cap+1 rotated 90", parse.Rectangle{URX: maxCanvasPixels + 1, URY: 1}, 90, 0, 0},
-		{"side exactly cap, other 2px", parse.Rectangle{URX: maxCanvasPixels, URY: 2}, 0, 0, 0},
-		{"side exactly cap, other underflows", parse.Rectangle{URX: maxCanvasPixels, URY: 1e-300}, 0, maxCanvasPixels, 1},
+		{"side exactly cap, other 1px", parse.Rectangle{URX: long, URY: 1}, 0, long, 1},
+		{"side exactly cap rotated 90", parse.Rectangle{URX: long, URY: 1}, 90, 1, long},
+		{"side exactly cap rotated 270", parse.Rectangle{URX: 1, URY: long}, 270, long, 1},
+		{"side exactly cap, other at the area cap", parse.Rectangle{URX: long, URY: short}, 0, long, short},
+		{"side exactly cap, other one past the area cap", parse.Rectangle{URX: long, URY: short + 1}, 0, 0, 0},
+		{"side cap+1, other 1px", parse.Rectangle{URX: long + 1, URY: 1}, 0, 0, 0},
+		{"side cap+1 rotated 90", parse.Rectangle{URX: long + 1, URY: 1}, 90, 0, 0},
+		{"side fraction over cap", parse.Rectangle{URX: 1, URY: long + 0.5}, 0, 0, 0},
+		{"side at the area cap, other 1px", parse.Rectangle{URX: maxCanvasPixels, URY: 1}, 0, 0, 0},
+		{"side at the area cap rotated 270", parse.Rectangle{URX: 1, URY: maxCanvasPixels}, 270, 0, 0},
+		{"side exactly cap, other underflows", parse.Rectangle{URX: long, URY: 1e-300}, 0, long, 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

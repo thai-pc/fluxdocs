@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"image/jpeg"
 	"image/png"
 	"math"
@@ -36,6 +37,16 @@ var ErrUnsupportedFormat = errors.New("render: unsupported format")
 // MediaBox or DPI blowing up memory (SECURITY.md §2). 64 megapixels covers an
 // A0 page at 300 DPI with margin.
 const maxCanvasPixels = 64 << 20
+
+// maxCanvasSide bounds each side of the output bitmap, in pixels: 65,535, the
+// largest a JPEG frame can hold. Under the area cap alone a canvas could be
+// 1 × 64 Mi px. Encoding such a sliver costs ≈ 5× a square canvas of the same
+// area (the PNG encoder's per-row work dominates), and a single row of
+// 64 Mi px makes it allocate six row buffers of 192 MiB each. JPEG
+// refused it only after the whole render. A page within ISO 32000-1's page
+// size limit (Annex C, Table C.1: 14,400 units, 200 in) still renders at up
+// to 327 DPI along its longer side (render-budget.md §3).
+const maxCanvasSide = 1<<16 - 1
 
 // Options controls a single page render.
 type Options struct {
@@ -77,7 +88,7 @@ type Options struct {
 //
 // Returns ErrUnsupportedFormat for a format other than png/jpeg, an error if the
 // resolved canvas size is degenerate, ErrCanvasTooLarge (wrapped) if it exceeds
-// the pixel cap, ErrBudgetExceeded (wrapped, naming the resource) if the render
+// the pixel cap in area or on a side, ErrBudgetExceeded (wrapped, naming the resource) if the render
 // exceeds a limit, the wrapped context error (matching context.Canceled or
 // context.DeadlineExceeded) if opts.Context is done before or during the render,
 // or a content-decode error. On any error the result is nil: no partial image is
@@ -119,8 +130,12 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 		return nil, b.err // a deadline already past by the clock
 	}
 
-	rs := newRaster(pxW, pxH)
-	rs.b = b
+	// Clearing the canvas is not raster work (it is not charged), but at the
+	// caps it is ≈ 0.3 s native: it polls the context like the paint does.
+	rs := newPageRaster(pxW, pxH, b)
+	if rs == nil {
+		return nil, b.err
+	}
 	// The page's own content is decoded within what is left of the content
 	// counter (and parse.MaxPageContent), so a /Contents array repeating a
 	// bomb stops at the cap instead of materializing every copy first.
@@ -149,11 +164,35 @@ func Page(r *parse.Resolver, pi parse.PageInfo, opts Options) ([]byte, error) {
 		drawAnnotations(rs, base, opts.Annotations)
 	}
 	// Poll once more before encoding: the encode is not metered, and a render
-	// that ran past its deadline should not spend more time.
+	// that ran past its deadline should not spend more time. The encode polls
+	// too, at every write (pollWriter): at the canvas caps it is ≈ 1 s native,
+	// ≈ 10 s with coverage instrumentation, and a deadline must stop it.
 	if !b.poll() {
 		return nil, b.err
 	}
-	return encode(rs, format, opts.Quality)
+	out, err := encode(rs, format, opts.Quality, b)
+	if b.stopped() {
+		return nil, b.err
+	}
+	return out, err
+}
+
+// newPageRaster is newRaster for Page: a canvas of w × h pixels, cleared to
+// white a band of rows at a time with a poll of b between bands, and metered
+// by b. Returns nil when b stops (a done context) before the canvas is clear.
+func newPageRaster(w, h int, b *budget) *raster {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	band := max(pollPaintQuantum/w, 1) * img.Stride // ≈ 1 Mi px per poll
+	for at := 0; at < len(img.Pix); at += band {
+		if !b.poll() {
+			return nil
+		}
+		row := img.Pix[at:min(at+band, len(img.Pix))]
+		for i := range row {
+			row[i] = 0xff // R=G=B=A=255
+		}
+	}
+	return &raster{img: img, w: w, h: h, clip: fullClip(w, h), b: b}
 }
 
 // deviceMatrix builds the transform from PDF user space (origin bottom-left,
@@ -192,10 +231,10 @@ func deviceMatrix(mb parse.Rectangle, rotate int, s float64) (matrix, int, int, 
 	// 1e18 pt) makes the float→int conversion implementation-defined (it
 	// saturates under js/wasm) and the int64 area product below overflow. NaN
 	// fails the `>= 0` test, +Inf the upper bound; an underflow to 0 is kept
-	// and clamped to 1px below. With both sides ≤ maxCanvasPixels the int64
+	// and clamped to 1px below. With both sides ≤ maxCanvasSide the int64
 	// product cannot overflow.
-	if !(pxWf >= 0 && pxHf >= 0) || pxWf > maxCanvasPixels || pxHf > maxCanvasPixels {
-		return matrix{}, 0, 0, fmt.Errorf("%w: %gx%g px exceeds %d pixels", ErrCanvasTooLarge, pxWf, pxHf, maxCanvasPixels)
+	if !(pxWf >= 0 && pxHf >= 0) || pxWf > maxCanvasSide || pxHf > maxCanvasSide {
+		return matrix{}, 0, 0, fmt.Errorf("%w: %gx%g px exceeds %d pixels per side", ErrCanvasTooLarge, pxWf, pxHf, maxCanvasSide)
 	}
 	pxW := int(math.Ceil(pxWf))
 	pxH := int(math.Ceil(pxHf))
@@ -211,21 +250,41 @@ func deviceMatrix(mb parse.Rectangle, rotate int, s float64) (matrix, int, int, 
 	return m, pxW, pxH, nil
 }
 
-// encode serializes the raster as PNG or JPEG bytes.
-func encode(rs *raster, format string, quality int) ([]byte, error) {
+// encode serializes the raster as PNG or JPEG bytes, polling b at every write
+// of the encoder (pollWriter). Returns b's error when b stops during the
+// encode.
+func encode(rs *raster, format string, quality int, b *budget) ([]byte, error) {
 	var buf bytes.Buffer
+	w := pollWriter{buf: &buf, b: b}
 	switch format {
 	case "jpeg", "jpg":
 		if quality <= 0 || quality > 100 {
 			quality = 90
 		}
-		if err := jpeg.Encode(&buf, rs.img, &jpeg.Options{Quality: quality}); err != nil {
+		if err := jpeg.Encode(w, rs.img, &jpeg.Options{Quality: quality}); err != nil {
 			return nil, err
 		}
 	default:
-		if err := png.Encode(&buf, rs.img); err != nil {
+		if err := png.Encode(w, rs.img); err != nil {
 			return nil, err
 		}
 	}
 	return buf.Bytes(), nil
+}
+
+// pollWriter is the encoders' destination: each write polls b first and fails
+// with b's error once it has stopped, which ends the encode (image/png and
+// image/jpeg return the first write error). The PNG encoder writes a chunk
+// per 32 KiB of compressed data — tens of polls for a blank canvas at the
+// caps, which compresses ≈ 140:1 — and the JPEG encoder every 4 KiB.
+type pollWriter struct {
+	buf *bytes.Buffer
+	b   *budget
+}
+
+func (w pollWriter) Write(p []byte) (int, error) {
+	if !w.b.poll() {
+		return 0, w.b.err
+	}
+	return w.buf.Write(p)
 }
