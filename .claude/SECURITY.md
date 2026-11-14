@@ -78,9 +78,20 @@ and copyable. Many governments and organizations have leaked information this wa
   their operator (ISO 32000-1 Annex A) or have the wrong type, an operator out
   of place in a text object, a token or comment split across content streams,
   an inline image whose end or decoding readers could disagree on, a vertical
-  font whose metrics it does not model. Every route by which a page paints
-  another content stream (forms, tiling patterns, soft-mask groups, Type 3
-  glyph procedures) is walked under a budget. A refusal is a
+  font whose metrics it does not model, a font whose text it cannot read in
+  full — a `/ToUnicode` destination, a `/Differences` glyph name or a
+  `/Differences` array past the bounds text decoding reads; a `/ToUnicode`
+  CMap that names a parent with `usecmap`; a Type 0 font with no usable
+  `/ToUnicode`, whose `/ToUnicode` does not map a code it shows or maps it to
+  no text, or whose encoding splits a string into codes differently from its
+  `/ToUnicode` or cannot be split for certain (other readers derive that text
+  from the Adobe-GB1, CNS1, Japan1 or Korea1 collection or a predefined
+  encoding CMap, ISO 32000-1 §9.10.2, or read an Identity font's codes as
+  Unicode). Such a font refuses the page wherever it
+  shows text, `RedactArea` regions included, and refuses a redaction whose
+  automatic extension must search a page that shows it. Every route by which
+  a page paints another content stream (forms, tiling patterns, soft-mask
+  groups, Type 3 glyph procedures) is walked under a budget. A refusal is a
   `*core.RedactionError` (`Page`, `Reason`, `Detail`) that matches
   `ErrRedactionUnsupported` and never `ErrInvalidPDF`; its message never holds
   document text. Reasons: `content_ambiguous`, `inline_image`, `form_text`,
@@ -101,7 +112,20 @@ and copyable. Many governments and organizations have leaked information this wa
   Removal is per operator, not per glyph (2.5), and per image, not per pixel
   (2.8). Inline images are accepted only unfiltered, ASCIIHex or zlib Flate, in
   device colour spaces (2.7). A font whose glyphs draw something other than
-  its `/ToUnicode` says is out of scope for `RedactText`: use `RedactArea`.
+  its `/ToUnicode` says is out of scope for `RedactText`: use `RedactArea` —
+  except a font whose text redaction cannot read in full (strict content
+  model above), which `RedactArea` refuses too. Documents whose Type 0 fonts
+  have no `/ToUnicode` (typically CJK: about 5% of the extra corpus's
+  redaction outcomes) cannot be redacted until the Adobe collections'
+  CID-to-Unicode mappings are modelled as readings. Simple fonts' base
+  encodings are not read (step 2.12): without `/ToUnicode`, redaction reads
+  the codes `/Differences` does not rename as Latin-1, so `/WinAnsiEncoding`
+  0x80–0x9F (curly quotes, €, Ž), every `/MacRomanEncoding` code from 0x80,
+  `/StandardEncoding` codes that differ from Latin-1, and Symbol or built-in
+  encodings read as other characters than viewers show. A `RedactText`
+  pattern holding such characters may match nothing, and the text then
+  stays, on the page and on pages automatic extension searches: use
+  `RedactArea` for such text until 2.12 lands.
 
 **Test gate (non-negotiable):**
 - After any redaction, the removed text must not be found by `ExtractText()`,
