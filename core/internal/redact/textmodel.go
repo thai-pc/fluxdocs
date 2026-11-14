@@ -1005,6 +1005,34 @@ func (it *interp) markedContent(s *parse.ContentOpSpan) error {
 	return nil
 }
 
+// showsUnknown reports whether a string the operator shows (str, or every
+// string of arr, nested arrays included) is one whose text a reader may
+// derive and no reading holds, with a font of fs or extraction's font. The
+// parser bounds how deeply arrays nest.
+func showsUnknown(fs fontSet, flow *textflow.Flow, arr parse.Array, str parse.Object) bool {
+	if flow != nil {
+		fs = append(fs[:len(fs):len(fs)], flow.Font())
+	}
+	var walk func(e parse.Object) bool
+	walk = func(e parse.Object) bool {
+		switch v := e.(type) {
+		case parse.String:
+			return fs.textUnknown(v.Value)
+		case parse.Array:
+			for _, el := range v {
+				if walk(el) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if arr != nil {
+		return walk(arr)
+	}
+	return walk(str)
+}
+
 // show interprets one text-showing operator: str for Tj, ' and ", arr for TJ.
 // In a child unit it refuses; on the page it adds a run whose box covers
 // every position its glyphs can take with any font of the set (§6.6), and
@@ -1024,6 +1052,31 @@ func (it *interp) show(s *parse.ContentOpSpan, arr parse.Array, str parse.Object
 		if err := checkVertical(fs); err != nil {
 			return err
 		}
+	}
+	if fs.textCut() || (it.flow != nil && it.flow.Font().TextCut()) {
+		// The readings below (and extraction's, whose font may be bound
+		// otherwise) are cut to fontmodel's bounds; a reader that does not
+		// bound them reads more, which no match or search here sees. A text
+		// search records the dispute (its finding nothing proves nothing)
+		// and reads on.
+		rf := &Refusal{Reason: ReasonContentAmbiguous,
+			Detail: "page content: a font maps a code to more text than redaction reads"}
+		if it.w.texts == nil {
+			return rf
+		}
+		it.w.dispute(rf)
+	}
+	if showsUnknown(fs, it.flow, arr, str) {
+		// A reader derives text for these codes (an Adobe collection, a
+		// predefined encoding, a usecmap parent; fontmodel
+		// Font.TextUnknown) that no reading below holds. Refused, or a
+		// dispute in a text search, as above.
+		rf := &Refusal{Reason: ReasonContentAmbiguous,
+			Detail: "page content: a font shows codes whose text redaction does not read"}
+		if it.w.texts == nil {
+			return rf
+		}
+		it.w.dispute(rf)
 	}
 	p0X, p0Y := it.penX, it.penY
 	size := gs.size

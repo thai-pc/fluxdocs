@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/thai-pc/fluxdocs/core"
@@ -214,6 +215,134 @@ func utf16Hex(s string) string {
 	}
 	b.WriteByte('>')
 	return b.String()
+}
+
+// cutText is the text of one code in the cut-font rows: 70 "x" then the
+// secret, 81 characters, past the 64 bytes fontmodel reads of a one-byte
+// code.
+var cutText = strings.Repeat("x", 70) + secret
+
+// cutFont is a simple font whose /ToUnicode is object 10 (cutCMap).
+const cutFont = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 10 0 R >>"
+
+// cutCMap is a one-byte /ToUnicode CMap with the given mapping sections.
+func cutCMap(sections string) string {
+	return "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n" +
+		"1 begincodespacerange <00> <FF> endcodespacerange\n" + sections +
+		"\nendcmap CMapName currentdict /CMap defineresource pop end end"
+}
+
+// cutFontPage is a one-page fixture showing code <01> with cutFont, whose
+// CMap holds sections.
+func cutFontPage(sections string) func() []byte {
+	return onePage{content: []string{"BT /F2 24 Tf 10 700 Td <01> Tj ET"},
+		res: "<< /Font << /F2 9 0 R >> >>", extra: map[int]string{
+			9:  cutFont,
+			10: stm("", cutCMap(sections))}}.pdf
+}
+
+// uniName is the glyph name uniXXXX… of s (BMP characters).
+func uniName(s string) string {
+	var b strings.Builder
+	b.WriteString("uni")
+	for _, r := range s {
+		fmt.Fprintf(&b, "%04X", r)
+	}
+	return b.String()
+}
+
+// japan1CIDs is s (printable ASCII) as a hex string of the two-byte
+// Identity-H codes of its Adobe-Japan1 CIDs: CID 1 is U+0020, through CID 95,
+// U+007E.
+func japan1CIDs(s string) string {
+	var b strings.Builder
+	b.WriteByte('<')
+	for _, r := range s {
+		fmt.Fprintf(&b, "%04X", r-0x1F)
+	}
+	b.WriteByte('>')
+	return b.String()
+}
+
+// japan1Font is a Type 0 font (Identity-H, no embedded program) whose CIDFont
+// names the Adobe character collection ordering, with more font entries.
+func japan1Font(ordering, entries string) string {
+	return "<< /Type /Font /Subtype /Type0 /BaseFont /KozMinPr6N-Regular /Encoding /Identity-H /DescendantFonts [<< /Type /Font " +
+		"/Subtype /CIDFontType0 /BaseFont /KozMinPr6N-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (" + ordering +
+		") /Supplement 6 >> /FontDescriptor << /Type /FontDescriptor /FontName /KozMinPr6N-Regular /Flags 4 " +
+		"/FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >> >>]" + entries + " >>"
+}
+
+// japan1CMap is a two-byte /ToUnicode CMap with the given mapping sections.
+func japan1CMap(sections string) string {
+	return "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n" +
+		"1 begincodespacerange <0000> <FFFF> endcodespacerange\n" + sections +
+		"\nendcmap CMapName currentdict /CMap defineresource pop end end"
+}
+
+// japan1Page is a one-page fixture showing codes (a hex string) with
+// japan1Font(ordering, entries) as /F2, object 9; obj10, unless "", is
+// object 10.
+func japan1Page(codes, ordering, entries, obj10 string) func() []byte {
+	extra := map[int]string{9: japan1Font(ordering, entries)}
+	if obj10 != "" {
+		extra[10] = obj10
+	}
+	return onePage{content: []string{"BT /F2 24 Tf 10 700 Td " + codes + " Tj ET"},
+		res: "<< /Font << /F2 9 0 R >> >>", extra: extra}.pdf
+}
+
+// japan1Prefixed is s (printable ASCII) as a hex string of codes prefix
+// (hex) followed by one byte, its Adobe-Japan1 CID (japan1CIDs).
+func japan1Prefixed(prefix, s string) string {
+	var b strings.Builder
+	b.WriteByte('<')
+	for _, r := range s {
+		fmt.Fprintf(&b, "%s%02X", prefix, r-0x1F)
+	}
+	b.WriteByte('>')
+	return b.String()
+}
+
+// japan1EncPage is japan1Page with /Encoding object 11, an embedded encoding
+// CMap of codespace space mapping each code of cidranges, and a /ToUnicode
+// (object 10) CMap of codespace tuSpace with mapping sections tu.
+func japan1EncPage(content, space, cidranges, tuSpace, tu string) func() []byte {
+	cmapStream := func(dict, body string) string {
+		data := "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n" + body +
+			"\nendcmap CMapName currentdict /CMap defineresource pop end end"
+		return "<< " + dict + " /Length " + strconv.Itoa(len(data)) + " >>\nstream\n" + data + "\nendstream"
+	}
+	font := strings.Replace(japan1Font("Japan1", " /ToUnicode 10 0 R"), "/Encoding /Identity-H", "/Encoding 11 0 R", 1)
+	return onePage{content: []string{"BT /F2 24 Tf 10 700 Td " + content + " Tj ET"},
+		res: "<< /Font << /F2 9 0 R >> >>", extra: map[int]string{
+			9:  font,
+			10: cmapStream("", tuSpace+"\n"+tu),
+			11: cmapStream("/Type /CMap /CMapName /OneByte /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >>",
+				"/CMapName /OneByte def\n"+space+"\n"+cidranges),
+		}}.pdf
+}
+
+// twoPageOther is a two-page fixture: page 0 shows S with Helvetica, page 1
+// shows content with font, object 9 (its /F2), and obj10, unless "", is
+// object 10.
+func twoPageOther(content, font, obj10 string) func() []byte {
+	return func() []byte {
+		objs := map[int]string{
+			1: "<< /Type /Catalog /Pages 2 0 R >>",
+			2: "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+			3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+			4: stm("", show(S)),
+			5: helvetica,
+			6: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F2 9 0 R >> >> /Contents 8 0 R >>",
+			8: stm("", content),
+			9: font,
+		}
+		if obj10 != "" {
+			objs[10] = obj10
+		}
+		return leakPDF(objs, "")
+	}
 }
 
 // perChar shows each character of s with its own Tj.
@@ -516,6 +645,157 @@ func leakCases() []leakCase {
 			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
 				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Differences [1 /hyphen] >> >>"}}.pdf,
 			ops: both, want: clean},
+		// A /ToUnicode destination or a /Differences glyph name longer than
+		// fontmodel reads (64 bytes of text per one-byte code, 512 bytes of
+		// destination, 127-byte names): the readings are cut, so the secret
+		// after 70 "x" is in no reading RedactText matches, yet a reader that
+		// does not cut shows it. Refused wherever such a font shows text, on
+		// the marked page or (extension) on another one.
+		{name: "tounicode_cut_bfchar", pdf: cutFontPage("1 beginbfchar <01> " + utf16Hex(cutText) + " endbfchar"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "tounicode_cut_long_dst", pdf: cutFontPage("1 beginbfchar <01> " + utf16Hex(strings.Repeat("x", 300)+secret) + " endbfchar"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "tounicode_cut_bfrange_array", pdf: cutFontPage("1 beginbfrange <01> <02> [<0041> " + utf16Hex(cutText) + "] endbfrange"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "tounicode_cut_bfrange_base", pdf: cutFontPage("1 beginbfrange <01> <01> " + utf16Hex(cutText) + " endbfrange"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "differences_cut_uni_name", pdf: onePage{content: []string{"BT /F2 24 Tf 10 700 Td (\001\002) Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
+				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Differences [1 /" + uniName(cutText) + " /" + uniName(secret) + ".sc] >> >>"}}.pdf,
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "tounicode_cut_other_page", pdf: func() []byte {
+			return leakPDF(map[int]string{
+				1:  "<< /Type /Catalog /Pages 2 0 R >>",
+				2:  "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+				3:  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+				4:  stm("", show(S)),
+				5:  helvetica,
+				6:  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F2 9 0 R >> >> /Contents 8 0 R >>",
+				8:  stm("", "BT /F2 24 Tf 10 700 Td <01> Tj ET"),
+				9:  cutFont,
+				10: stm("", cutCMap("1 beginbfchar <01> "+utf16Hex(cutText)+" endbfchar")),
+			}, "")
+		},
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		// /Differences past the 4096 items fontmodel reads: the renaming of
+		// codes 1-6 to S E C R E T comes after 2048 "0 /a" pairs. A reader
+		// that reads the whole array shows SECRET, which no reading holds.
+		{name: "differences_past_item_cap", pdf: onePage{content: []string{"BT /F2 24 Tf 10 700 Td (\001\002\003\004\005\006) Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
+				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Differences [" +
+					strings.Repeat("0 /a ", 2048) + "1 /S /E /C /R /E /T] >> >>"}}.pdf,
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		// A Type 0 font whose /ToUnicode is silent for the codes it shows:
+		// Text reads nothing, while a reader derives the text from the
+		// Adobe-Japan1 collection (§9.10.2), from a usecmap parent, or from
+		// an Identity font's codes as Unicode (Ghostscript). Refused
+		// wherever such a font shows text, on the marked page or
+		// (extension) on another one.
+		{name: "tounicode_usecmap_japan1", pdf: japan1Page(japan1CIDs(secret), "Japan1", " /ToUnicode 10 0 R",
+			stm("", "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/Adobe-Japan1-UCS2 usecmap\n"+
+				"1 begincodespacerange <0000> <FFFF> endcodespacerange\nendcmap CMapName currentdict /CMap defineresource pop end end")),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "composite_no_tounicode_japan1", pdf: japan1Page(japan1CIDs(secret), "Japan1", "", ""),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "composite_no_tounicode_identity", pdf: japan1Page(utf16Hex(secret), "Identity", "", ""),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "composite_tounicode_partial_japan1", pdf: japan1Page(japan1CIDs(secret), "Japan1", " /ToUnicode 10 0 R",
+			stm("", japan1CMap("1 beginbfchar <0001> <0020> endbfchar"))),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "composite_no_tounicode_other_page", pdf: func() []byte {
+			return leakPDF(map[int]string{
+				1: "<< /Type /Catalog /Pages 2 0 R >>",
+				2: "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+				3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+				4: stm("", show(S)),
+				5: helvetica,
+				6: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F2 9 0 R >> >> /Contents 8 0 R >>",
+				8: stm("", "BT /F2 24 Tf 10 700 Td "+japan1CIDs(secret)+" Tj ET"),
+				9: japan1Font("Japan1", ""),
+			}, "")
+		},
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		// A /ToUnicode destination that is empty maps its code to no text:
+		// Text reads nothing, while Ghostscript reads the code as one
+		// /ToUnicode does not map — from the Adobe-Japan1 collection for a
+		// Type 0 font, so it shows the secret. Refused (fontmodel
+		// Font.TextUnknown), on the marked page or (extension) on another
+		// one. For a simple font Ghostscript reads the glyph name instead,
+		// and so does ByteText now: the secret is matched and removed.
+		{name: "composite_tounicode_empty_dst", pdf: japan1Page(japan1CIDs(secret), "Japan1", " /ToUnicode 10 0 R",
+			stm("", japan1CMap("1 beginbfrange <0000> <FFFF> <> endbfrange"))),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "composite_tounicode_empty_dst_other_page", pdf: twoPageOther("BT /F2 24 Tf 10 700 Td "+japan1CIDs(secret)+" Tj ET",
+			japan1Font("Japan1", " /ToUnicode 10 0 R"), stm("", japan1CMap("1 beginbfrange <0000> <FFFF> <> endbfrange"))),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "simple_tounicode_empty_dst_diffs", pdf: onePage{content: []string{"BT /F2 24 Tf 10 700 Td (\001\002\003\004\005\006\007\010\011\012\013) Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
+				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 7 0 R /Encoding << /Differences [1 /S /E /C /R /E /T /hyphen /one /two /three /four] >> >>",
+				7: stm("", cutCMap("1 beginbfrange <00> <FF> <> endbfrange"))}}.pdf,
+			ops: both, want: clean},
+		// The encoding splits a shown string into other codes than Text,
+		// which reads codes at the /ToUnicode code length: a one-byte
+		// embedded encoding CMap with a two-byte /ToUnicode, alone or in
+		// mixed-width codespaces. Text reads byte pairs ("SE" as U+E000 +
+		// 0x5345), every one mapped; Ghostscript reads each one-byte code
+		// through the /ToUnicode mapping of its value and shows the secret.
+		// Refused (fontmodel Font.TextUnknown).
+		{name: "composite_split_onebyte_encoding", pdf: japan1EncPage("("+secret+" )",
+			"1 begincodespacerange <00> <FF> endcodespacerange", "1 begincidrange <20> <7E> 1 endcidrange",
+			"1 begincodespacerange <0000> <FFFF> endcodespacerange",
+			"2 beginbfrange <0020> <007E> <0020> <0100> <FFFF> <E000> endbfrange"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "composite_split_mixed_width", pdf: japan1EncPage("("+secret+" )",
+			"2 begincodespacerange <00> <7F> <8000> <FFFF> endcodespacerange", "1 begincidrange <20> <7E> 1 endcidrange",
+			"2 begincodespacerange <00> <7F> <8000> <FFFF> endcodespacerange",
+			"1 beginbfrange <20> <7E> <0020> endbfrange 1 beginbfrange <0100> <7FFF> <E000> endbfrange"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		// An embedded encoding CMap whose one-byte range <00>-<FF> overlaps
+		// its two-byte range <0100>-<01FF>, in either order: the codes are
+		// shown as <01xx>, xx the Adobe-Japan1 CID. Codes (the shortest
+		// range) splits them into one-byte codes, as the one-byte
+		// /ToUnicode does, all mapped (from U+0078 up); Ghostscript takes the
+		// two-byte code, which /ToUnicode does not map, and reads the CID:
+		// the secret. Refused: the split is uncertain (fontmodel
+		// spaceOverlaps).
+		{name: "composite_codespace_overlap", pdf: japan1EncPage(japan1Prefixed("01", secret),
+			"2 begincodespacerange <00> <FF> <0100> <01FF> endcodespacerange", "2 begincidrange <00> <FF> 1 <0100> <01FF> 0 endcidrange",
+			"1 begincodespacerange <00> <FF> endcodespacerange", "1 beginbfrange <00> <FF> <0078> endbfrange"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		{name: "composite_codespace_overlap_longer_first", pdf: japan1EncPage(japan1Prefixed("01", secret),
+			"2 begincodespacerange <0100> <01FF> <00> <FF> endcodespacerange", "2 begincidrange <00> <FF> 1 <0100> <01FF> 0 endcidrange",
+			"1 begincodespacerange <00> <FF> endcodespacerange", "1 beginbfrange <00> <FF> <0078> endbfrange"),
+			ops: both, want: refuse, reason: "content_ambiguous"},
+		// S1 (pre-existing): a simple font's base encoding is not read.
+		// Without /ToUnicode, Text and ByteText read the bytes as Latin-1,
+		// so WinAnsi 0x93/0x94 (“ ”) and MacRoman 0x8E (é) read as C1
+		// controls: a pattern holding those characters matches nothing,
+		// and the text stays, on the marked page or (extension) on another
+		// one. Ghostscript reads them through the encoding. The same holds
+		// for a code a simple font's /ToUnicode maps to no text: ByteText
+		// falls through to its /Differences name, else to Latin-1, not to
+		// the base encoding.
+		{name: "base_encoding_winansi", pdf: onePage{content: []string{"BT /F2 24 Tf 10 700 Td (\223" + secret + "\224) Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
+				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"}}.pdf,
+			ops: []leakOp{opText}, pattern: `“SECRET-\d+”`, want: knownLeak, closesIn: "2.12 (base-encoding readings) -> clean"},
+		{name: "base_encoding_macroman", pdf: onePage{content: []string{"BT /F2 24 Tf 10 700 Td (r\216sum\216 " + secret + ") Tj ET"},
+			res: "<< /Font << /F2 6 0 R >> >>", extra: map[int]string{
+				6: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /MacRomanEncoding >>"}}.pdf,
+			ops: []leakOp{opText}, pattern: `résumé SECRET-\d+`, want: knownLeak, closesIn: "2.12 (base-encoding readings) -> clean"},
+		{name: "base_encoding_macroman_other_page", pdf: func() []byte {
+			return leakPDF(map[int]string{
+				1: "<< /Type /Catalog /Pages 2 0 R >>",
+				2: "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 /MediaBox [0 0 400 800] >>",
+				3: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+				4: stm("", show("(CONFIDENTIAL r\351sum\351 "+secret+")")),
+				5: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+				6: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F2 9 0 R >> >> /Contents 8 0 R >>",
+				8: stm("", "BT /F2 24 Tf 10 700 Td (CONFIDENTIAL r\216sum\216 "+secret+") Tj ET"),
+				9: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /MacRomanEncoding >>",
+			}, "")
+		},
+			ops: []leakOp{opText}, pattern: `CONFIDENTIAL résumé SECRET-\d+`, want: knownLeak, closesIn: "2.12 (base-encoding readings) -> clean"},
 		// S2: removing a quote operator keeps its line move, so later text stays
 		// on its own line (the region covers the secret's line only).
 		{name: "quote_layout", pdf: page("BT /F1 24 Tf 30 TL 72 700 Td (keep1) Tj 0 0 " + S + " \" (keep2) ' ET"),

@@ -21,6 +21,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
 )
@@ -114,6 +115,18 @@ type Font struct {
 	vx, vy, wy [2]float64
 	vertOK     bool
 
+	// cut is set when some /Differences glyph name's reading is cut by the
+	// bounds (glyphCut), or the array is not read to its end (past
+	// maxDiffItems, or at an item that cannot be resolved); the /ToUnicode
+	// CMap records its own, cmap.cut.
+	cut bool
+
+	// composite is set for a Type 0 font by its resolved /Subtype, with or
+	// without Options.Metrics (TextUnknown). tuRead is set when /ToUnicode
+	// was looked for (not Options.SkipToUnicode).
+	composite bool
+	tuRead    bool
+
 	// substituted is set for a font with no embedded program (not Type 3):
 	// a reader paints it with a font of its own, whose glyphs may reach
 	// past the em defaults.
@@ -172,6 +185,10 @@ func Load(r *parse.Resolver, obj parse.Object, opts Options) *Font {
 	if sub, ok := fd.GetName("Subtype"); ok && sub == "Type0" {
 		f.twoByte = true
 	}
+	if sub, ok := resolveName(r, fd["Subtype"]); f.twoByte || ok && sub == "Type0" {
+		f.composite = true
+	}
+	f.tuRead = !opts.SkipToUnicode
 	if st, ok := resolveStream(r, fd["ToUnicode"]); ok && !opts.SkipToUnicode {
 		if dec, err := decode(st); err == nil {
 			f.toUni = parseCMap(dec)
@@ -239,9 +256,34 @@ func (f *Font) Text(raw []byte) string {
 	return b.String()
 }
 
-// decodeWithCMap reads codes of the CMap's width and maps each to Unicode. An
-// unmapped single-byte code falls back to Latin-1; an unmapped wide code is
-// dropped.
+// maxTextPerCodeByte bounds the text one character code reads to, in bytes of
+// UTF-8 per byte of the code as it is read (codeText): 64, so one-byte codes
+// read to at most 64 bytes (21 or more characters) and two-byte codes to 128.
+// The test corpus's largest is 15 bytes for a one-byte code (five Devanagari
+// characters); Unicode's longest decomposition, U+FDFA, is 33 bytes. Every
+// reading of a shown string — Text, AltText, ByteText and the ByteTables
+// built from them — is then at most 64 × its length, whatever its font's
+// /ToUnicode destinations and /Differences glyph names hold.
+const maxTextPerCodeByte = 64
+
+// codeText returns s, the text of one code of n bytes, cut to at most
+// maxTextPerCodeByte × n bytes at a character boundary. Cutting each code's
+// text, not a string's, keeps a string's reading the concatenation of its
+// codes' (ByteTables relies on it).
+func codeText(s string, n int) string {
+	limit := maxTextPerCodeByte * n
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
+}
+
+// decodeWithCMap reads codes of the CMap's width and maps each to Unicode
+// (codeText bounds each code's text). An unmapped single-byte code falls back
+// to Latin-1; an unmapped wide code is dropped.
 func decodeWithCMap(c *cmap, raw []byte) string {
 	w := c.codeLen
 	if w < 1 {
@@ -251,7 +293,7 @@ func decodeWithCMap(c *cmap, raw []byte) string {
 	for i := 0; i+w <= len(raw); i += w {
 		code := bytesToCode(raw[i : i+w])
 		if s, ok := c.lookup(code); ok {
-			b.WriteString(s)
+			b.WriteString(codeText(s, w))
 		} else if w == 1 {
 			b.WriteRune(rune(code))
 		}
@@ -274,6 +316,7 @@ func (f *Font) AltText(raw []byte) (string, bool) {
 	for _, c := range raw {
 		if name, ok := f.diffs[c]; ok {
 			if r, ok := glyphRune(name); ok {
+				r = codeText(r, 1)
 				b.WriteString(r)
 				changed = changed || r != string(rune(c))
 				continue
@@ -289,8 +332,10 @@ func (f *Font) AltText(raw []byte) (string, bool) {
 
 // ByteText reads a shown string one byte per code, as a reader that treats the
 // font as simple does whatever its /ToUnicode codespace says: each byte is
-// mapped by /ToUnicode as a one-byte code if it maps it, else through its
-// /Differences glyph name, else as Latin-1. Returns false for a Type 0 font
+// mapped by /ToUnicode as a one-byte code if it maps it to some text, else
+// through its /Differences glyph name, else as Latin-1 (a byte /ToUnicode
+// maps to no text reads as one it does not map, as Ghostscript reads it,
+// where Text reads nothing). Returns false for a Type 0 font
 // (whose codes are not single bytes). Redaction matches it in addition to
 // Text, so a simple font whose /ToUnicode declares two-byte codes, which Text
 // then reads in pairs, is still matched by its bytes.
@@ -301,15 +346,15 @@ func (f *Font) ByteText(raw []byte) (string, bool) {
 	var b strings.Builder
 	for _, c := range raw {
 		if f != nil && f.toUni != nil {
-			if s, ok := f.toUni.lookup(uint32(c)); ok {
-				b.WriteString(s)
+			if s, ok := f.toUni.lookupText(uint32(c)); ok {
+				b.WriteString(codeText(s, 1))
 				continue
 			}
 		}
 		if f != nil {
 			if name, ok := f.diffs[c]; ok {
 				if r, ok := glyphRune(name); ok {
-					b.WriteString(r)
+					b.WriteString(codeText(r, 1))
 					continue
 				}
 			}
@@ -389,6 +434,92 @@ func matchSpace(space []spaceRange, b []byte) int {
 		}
 	}
 	return 0
+}
+
+// TextCut reports whether the bounds on what a code reads to cut a reading of
+// this font: a /ToUnicode destination longer than maxDstBytes or than
+// maxTextPerCodeByte bytes of text (the one-byte-code bound, as ByteText
+// reads codes), a /Differences glyph name longer than maxGlyphName or whose
+// text is longer than maxTextPerCodeByte, or a /Differences array not read
+// to its end (past maxDiffItems items, or at one that does not resolve; the
+// names are read only with Options.Metrics). Text, AltText and ByteText of
+// such a font return less text than a reader that does not bound it may
+// read, so text matching on them proves nothing: redaction refuses the font.
+// No font in the test corpus has one. False for nil.
+func (f *Font) TextCut() bool {
+	return f != nil && (f.cut || (f.toUni != nil && f.toUni.cut))
+}
+
+// TextUnknown reports whether a reader may derive text for the shown string
+// raw that Text, AltText and ByteText do not read, so text matching on them
+// proves nothing about raw: redaction refuses it. That is so when the font's
+// /ToUnicode CMap names a parent with usecmap (whose mappings fontmodel does
+// not read; Ghostscript reads, e.g., /Adobe-Japan1-UCS2), and for a Type 0
+// font (by its resolved /Subtype) whose /ToUnicode may not be what a reader
+// reads raw by: where /ToUnicode is silent, §9.10.2 derives Unicode from a
+// predefined encoding CMap or the Adobe-GB1, CNS1, Japan1 and Korea1
+// collections, and Ghostscript also reads an Identity font's codes as
+// Unicode, while Text reads nothing. For a Type 0 font it is so when
+//   - it has no usable /ToUnicode;
+//   - raw holds a code its /ToUnicode does not map, or maps to no text (an
+//     empty destination, which Ghostscript reads as unmapped), with codes
+//     split as Text splits them, at the /ToUnicode code length;
+//   - the encoding's split of raw (Codes) is uncertain — the codespace is
+//     unknown, bytes match no range, or the font was loaded without
+//     Options.Metrics — or has a code of another length than Text's: a
+//     reader splitting raw by the encoding then looks up other codes.
+//
+// False for nil, for an empty raw, and for a font loaded with
+// Options.SkipToUnicode. Extraction is unchanged: it reads what Text reads.
+func (f *Font) TextUnknown(raw []byte) bool { return f.unknownCause(raw) != "" }
+
+// unknownCause is TextUnknown with its cause: "" when false, else one of
+// "usecmap", "no_tounicode", "trailing", "unmapped", "empty_dst",
+// "split_uncertain" and "split_mismatch", the first that holds in that
+// order.
+func (f *Font) unknownCause(raw []byte) string {
+	if f == nil || !f.tuRead || len(raw) == 0 {
+		return ""
+	}
+	if f.toUni != nil && f.toUni.usesParent {
+		return "usecmap"
+	}
+	if !f.composite {
+		return ""
+	}
+	if f.toUni == nil {
+		return "no_tounicode"
+	}
+	w := max(f.toUni.codeLen, 1)
+	if len(raw)%w != 0 {
+		return "trailing" // trailing bytes Text drops
+	}
+	empty := false
+	for i := 0; i < len(raw); i += w {
+		s, ok := f.toUni.lookup(bytesToCode(raw[i : i+w]))
+		if !ok {
+			return "unmapped"
+		}
+		empty = empty || s == ""
+	}
+	if empty {
+		return "empty_dst"
+	}
+	if !f.metrics || !f.spaceOK {
+		return "split_uncertain"
+	}
+	codes, ok := f.Codes(raw)
+	if !ok {
+		return "split_uncertain"
+	}
+	// Every code w bytes long splits raw as Text does, into the codes the
+	// loop above found mapped.
+	for _, c := range codes {
+		if c.End-c.Start != w {
+			return "split_mismatch"
+		}
+	}
+	return ""
 }
 
 // Vertical reports whether the font writes vertically (a Type 0 font whose
@@ -723,10 +854,56 @@ func (f *Font) loadEncodingCMap(r *parse.Resolver, decode func(*parse.Stream) ([
 			space = append(append([]spaceRange(nil), space...), parent...)
 			f.vertical = f.vertical || strings.HasSuffix(string(c.useCMap), "-V")
 		}
-		if len(space) > 0 {
+		if len(space) > 0 && !spaceOverlaps(space) {
 			f.space, f.spaceOK = space, true
 		}
 	}
+}
+
+// maxOverlapPairs bounds the pairs of codespace ranges of different lengths
+// spaceOverlaps compares: real CMaps hold a handful of ranges, so a CMap past
+// it (up to maxSpaceRanges² / 4 pairs) is treated as overlapping.
+const maxOverlapPairs = 1 << 16
+
+// spaceOverlaps reports whether two codespace ranges of different lengths
+// n1 < n2 meet on their first n1 bytes: a code the longer one holds starts
+// with a code of the shorter, and readers split it differently — Codes
+// (matchSpace) takes the shorter, Ghostscript the longer, whatever the
+// order of the ranges. Such a codespace leaves the split uncertain
+// (spaceOK false). The predefined UTF16 codespace's four-byte range starts
+// with D800–DBFF, outside its two-byte ranges, so it does not overlap.
+func spaceOverlaps(space []spaceRange) bool {
+	var count [5]int
+	for _, r := range space {
+		count[r.n]++
+	}
+	pairs := 0
+	for n1 := 1; n1 <= 4; n1++ {
+		for n2 := n1 + 1; n2 <= 4; n2++ {
+			pairs += count[n1] * count[n2]
+		}
+	}
+	if pairs > maxOverlapPairs {
+		return true
+	}
+	if pairs == 0 {
+		return false
+	}
+	for _, a := range space {
+		for _, b := range space {
+			if a.n >= b.n {
+				continue
+			}
+			meet := true
+			for i := 0; i < a.n && meet; i++ {
+				meet = a.lo[i] <= b.hi[i] && b.lo[i] <= a.hi[i]
+			}
+			if meet {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // predefinedSpace returns the codespace of a predefined CMap whose codespace
@@ -1068,10 +1245,16 @@ func (f *Font) loadDifferences(r *parse.Resolver) {
 	code := -1
 	for i, e := range diffs {
 		if i >= maxDiffItems {
+			// Items past the bound are not read, yet a reader that does
+			// not bound the array renames codes with them: the readings
+			// are cut (TextCut).
+			f.cut = true
 			break
 		}
 		obj, err := r.Resolve(e)
 		if err != nil {
+			// Likewise for the items after one that cannot be resolved.
+			f.cut = true
 			return
 		}
 		switch v := obj.(type) {
@@ -1088,6 +1271,9 @@ func (f *Font) loadDifferences(r *parse.Resolver) {
 				code++
 			}
 		}
+	}
+	for _, n := range f.diffs {
+		f.cut = f.cut || glyphCut(n)
 	}
 }
 

@@ -100,6 +100,29 @@ func (s fontSet) vertical() bool {
 	return false
 }
 
+// textCut reports whether any font of the set maps a code to more text than
+// its readings return (fontmodel Font.TextCut).
+func (s fontSet) textCut() bool {
+	for _, f := range s.fonts() {
+		if f.TextCut() {
+			return true
+		}
+	}
+	return false
+}
+
+// textUnknown reports whether any font of the set shows raw as codes a
+// reader may derive text for that its readings do not hold (fontmodel
+// Font.TextUnknown).
+func (s fontSet) textUnknown(raw []byte) bool {
+	for _, f := range s.fonts() {
+		if f.TextUnknown(raw) {
+			return true
+		}
+	}
+	return false
+}
+
 // unbounded reports whether any font of the set cannot be bounded.
 func (s fontSet) unbounded() bool {
 	for _, f := range s.fonts() {

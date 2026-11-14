@@ -30,17 +30,53 @@ func runTexts(p *Page, runs []int) []string {
 func markedTexts(p *Page, m Match) []string { return runTexts(p, p.MarkedRuns(m.Marks)) }
 
 const (
-	// fallbackRes binds /F1 on the page to a two-byte font with no
-	// /ToUnicode (its Text reading is empty) and on the /Pages node to
-	// Helvetica: the run reads Latin-1 through the fallback candidate.
+	// fallbackRes binds /F1 on the page to a two-byte font whose /ToUnicode
+	// maps every code c to U+E000 + c (its Text reading matches no pattern
+	// here) and on the /Pages node to Helvetica: the run reads Latin-1
+	// through the fallback candidate.
 	fallbackRes = "<< /Font << /F1 6 0 R >> >>"
 	// diffFont is a simple font whose /Differences name the glyphs of A, B,
 	// C as S, E, C.
 	diffFont = "<< /Type /Font /Subtype /Type1 /BaseFont /X /Encoding << /Differences [65 /S /E /C] >> >>"
-	// idHNoUnicode is an Identity-H font without /ToUnicode.
+	// idHNoUnicode is an Identity-H font without /ToUnicode: a reader
+	// derives text for its codes that no reading holds, so redaction
+	// refuses it (fontmodel Font.TextUnknown).
 	idHNoUnicode = "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [7 0 R] >>"
-	cidFont      = "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X >>"
+	// idHPUAUnicode is an Identity-H font whose /ToUnicode (object 12,
+	// puaUnicode) maps every two-byte code c to U+E000 + c, from the
+	// private-use area up: Text reads characters no pattern here matches,
+	// and every code is mapped to some text (one mapped to none is refused:
+	// fontmodel Font.TextUnknown).
+	idHPUAUnicode = "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [7 0 R] /ToUnicode 12 0 R >>"
+	cidFont       = "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X >>"
 )
+
+// puaUnicode is the /ToUnicode stream of idHPUAUnicode.
+var puaUnicode = stm("", "1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfrange <0000> <FFFF> <E000> endbfrange")
+
+// TestAnalyze_CompositeWithoutToUnicodeRefused: a Type 0 font with no
+// /ToUnicode shows codes a reader derives text for (an Adobe collection, or
+// an Identity font's codes as Unicode) that no reading holds: the page is
+// refused, whether the font is the page's or a fallback scope's candidate.
+func TestAnalyze_CompositeWithoutToUnicodeRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    fixture
+	}{
+		{"the page's font", fixture{content: "BT /H 24 Tf 72 700 Td <00530045> Tj ET",
+			res: "<< /Font << /H 6 0 R >> >>", extra: map[int]string{6: idHNoUnicode, 7: cidFont}}},
+		{"a fallback scope's candidate", fixture{content: "BT /F1 24 Tf 72 700 Td (SECRET-1) Tj ET",
+			res: fallbackRes, pagesRes: "<< /Font << /F1 5 0 R >> >>", extra: map[int]string{6: idHNoUnicode, 7: cidFont}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := analyze(t, tc.f, nil)
+			var rf *Refusal
+			if !errors.As(err, &rf) || rf.Reason != ReasonContentAmbiguous {
+				t.Fatalf("err = %v, want a %s refusal", err, ReasonContentAmbiguous)
+			}
+		})
+	}
+}
 
 func TestMatch_AcrossOperators(t *testing.T) {
 	for _, tc := range []struct {
@@ -79,12 +115,12 @@ func TestMatch_AcrossOperators(t *testing.T) {
 		{name: "Differences glyph names across runs (alt slot)", content: "BT /D 24 Tf 72 700 Td (AB) Tj (C) Tj ET",
 			f: fixture{res: "<< /Font << /D 6 0 R >> >>", extra: map[int]string{6: diffFont}}, pattern: `SEC`,
 			want: []string{"AB", "C"}},
-		{name: "Identity-H without /ToUnicode: the Latin-1 slot", content: "BT /H 24 Tf 72 700 Td <00530045> Tj <0043> Tj ET",
-			f: fixture{res: "<< /Font << /H 6 0 R >> >>", extra: map[int]string{6: idHNoUnicode, 7: cidFont}}, pattern: "S\x00E\x00C",
-			want: []string{"", ""}},
-		{name: "a fallback scope's candidate font", content: "BT /F1 24 Tf 72 700 Td (SECRET-) Tj (1234) Tj ET",
-			f:       fixture{res: fallbackRes, pagesRes: "<< /Font << /F1 5 0 R >> >>", extra: map[int]string{6: idHNoUnicode, 7: cidFont}},
-			pattern: `SECRET-\d+`, want: []string{"", ""}},
+		{name: "Identity-H whose /ToUnicode reads other characters: the Latin-1 slot", content: "BT /H 24 Tf 72 700 Td <00530045> Tj <0043> Tj ET",
+			f: fixture{res: "<< /Font << /H 6 0 R >> >>", extra: map[int]string{6: idHPUAUnicode, 7: cidFont, 12: puaUnicode}}, pattern: "S\x00E\x00C",
+			want: []string{"\U0000E053\U0000E045", "\U0000E043"}},
+		{name: "a fallback scope's candidate font", content: "BT /F1 24 Tf 72 700 Td (SECRET-1) Tj (2345) Tj ET",
+			f:       fixture{res: fallbackRes, pagesRes: "<< /Font << /F1 5 0 R >> >>", extra: map[int]string{6: idHPUAUnicode, 7: cidFont, 12: puaUnicode}},
+			pattern: `SECRET-\d+`, want: []string{"\U00013345\U00012352\U00012554\U00010D31", "\U00011233\U00011435"}},
 		{name: "closure: removal joins the neighbours", content: "BT /F1 24 Tf 72 700 Td (SECRET-) Tj (X) Tj (1234) Tj ET",
 			pattern: `SECRET-\d+|X`, want: []string{"SECRET-", "X", "1234"}},
 	} {

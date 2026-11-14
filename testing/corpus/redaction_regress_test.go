@@ -40,11 +40,27 @@ const redactionBaseline = "testdata/redaction_baseline.tsv"
 // ambiguous (decision D1), and text in a form that automatic extension
 // (D4) reaches on another page. A refusal automatic extension causes is
 // classified as "<reason>/d4" (its detail starts with "automatic
-// extension"); each one is listed.
+// extension"); each one is listed. content_ambiguous covers fonts whose
+// text redaction cannot read in full (a cut /ToUnicode or /Differences
+// reading, usecmap, a Type 0 font without a usable /ToUnicode, or one whose
+// /ToUnicode or codespace leaves its codes' text unknown): other readers
+// derive text there, so refusing is required (SECURITY.md §1). Only those
+// refusals are allowed, classified "content_ambiguous/font" (fontDetails);
+// any other new content_ambiguous fails.
 var allowedNewRefusals = map[string]bool{
 	"inline_image": true, "pattern_text": true, "softmask_text": true, "type3_text": true,
 	"inline_image/d4": true, "pattern_text/d4": true, "softmask_text/d4": true, "type3_text/d4": true,
-	"form_text/d4": true,
+	"form_text/d4": true, "content_ambiguous/font": true, "content_ambiguous/font/d4": true,
+}
+
+// fontDetails are the details of redaction's font-reading refusals
+// (core/internal/redact textmodel.go, interp.show: fontmodel Font.TextCut and
+// Font.TextUnknown). A content_ambiguous refusal whose detail starts with one
+// of them, after the "automatic extension: " prefix of an extension's, is
+// classified "content_ambiguous/font".
+var fontDetails = []string{
+	"page content: a font maps a code to more text than redaction reads",
+	"page content: a font shows codes whose text redaction does not read",
 }
 
 // mustNotOccur are outcomes that fail the check whatever the baseline says: a
@@ -72,10 +88,20 @@ func refusalReason(err error) string {
 		if !errors.Is(err, core.ErrRedactionUnsupported) || errors.Is(err, core.ErrInvalidPDF) {
 			return "bad_chain" // D2: a refusal matches ErrRedactionUnsupported, never ErrInvalidPDF
 		}
-		if strings.HasPrefix(re.Detail, "automatic extension") {
-			return string(re.Reason) + "/d4"
+		reason := string(re.Reason)
+		if re.Reason == core.RedactionContentAmbiguous {
+			detail := strings.TrimPrefix(re.Detail, "automatic extension: ")
+			for _, d := range fontDetails {
+				if strings.HasPrefix(detail, d) {
+					reason += "/font"
+					break
+				}
+			}
 		}
-		return string(re.Reason)
+		if strings.HasPrefix(re.Detail, "automatic extension") {
+			return reason + "/d4"
+		}
+		return reason
 	case errors.Is(err, core.ErrEncryptedDocument):
 		return "encrypted"
 	}

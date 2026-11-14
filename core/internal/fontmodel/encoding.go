@@ -2,6 +2,7 @@ package fontmodel
 
 import (
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/thai-pc/fluxdocs/core/parse"
@@ -37,17 +38,46 @@ var glyphNames = map[parse.Name]string{
 	"guillemotleft": "«", "guillemotright": "»", "germandbls": "ß",
 }
 
+// maxGlyphName bounds the glyph names glyphRune reads: 127 bytes, the limit
+// ISO 32000-1 Annex C (Table C.1) gives for a name. A uniXXXX name decodes to
+// text in proportion to its length, and AltText and ByteText decode it once
+// per byte shown: a 1 MiB name would cost 1 MiB per glyph before codeText
+// cut it down. Longer names have no reading (their codes read as Latin-1).
+const maxGlyphName = 127
+
+// glyphBase returns name without its suffix: what follows the first period
+// after its first character ("a.sc" is "a").
+func glyphBase(name parse.Name) string {
+	n := string(name)
+	if len(n) > 1 {
+		if i := strings.IndexByte(n[1:], '.'); i >= 0 {
+			n = n[:i+1]
+		}
+	}
+	return n
+}
+
+// glyphCut reports whether the reading of glyph name is cut by the bounds: the
+// name (without its suffix) is longer than maxGlyphName, so glyphRune gives it
+// no reading, or its reading is longer than maxTextPerCodeByte, so codeText
+// cuts it (Font.TextCut).
+func glyphCut(name parse.Name) bool {
+	if len(glyphBase(name)) > maxGlyphName {
+		return true
+	}
+	s, ok := glyphRune(name)
+	return ok && len(s) > maxTextPerCodeByte
+}
+
 // glyphRune returns the Unicode text a glyph name stands for: a name from
 // glyphNames, a single-character name, uniXXXX (one or more BMP code units
 // of four hex digits each) or uXXXX–uXXXXXX. A suffix after a period
-// ("a.sc") is ignored. Returns false for any other name.
+// ("a.sc") is ignored. Returns false for any other name, and for a name
+// (without its suffix) longer than maxGlyphName.
 func glyphRune(name parse.Name) (string, bool) {
-	n := string(name)
-	for i := 0; i < len(n); i++ {
-		if n[i] == '.' && i > 0 {
-			n = n[:i]
-			break
-		}
+	n := glyphBase(name)
+	if len(n) > maxGlyphName {
+		return "", false
 	}
 	if s, ok := glyphNames[parse.Name(n)]; ok {
 		return s, true

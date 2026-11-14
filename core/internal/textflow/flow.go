@@ -202,6 +202,10 @@ func (f *Flow) event(kind EventKind, owner int32, start, end int) {
 // until the next Apply and must not be modified.
 func (f *Flow) Owned() []Piece { return f.pieces }
 
+// Font returns the font the last Tf selected, as extraction binds it (nil:
+// none, or one that decodes as Latin-1).
+func (f *Flow) Font() *fontmodel.Font { return f.cur }
+
 // Apply interprets one content operator with its operands (in content order,
 // as parse.ScanContent yields them). Shown text and TJ-gap spaces it writes
 // are attributed to owner; a newline it writes for a line move is attributed

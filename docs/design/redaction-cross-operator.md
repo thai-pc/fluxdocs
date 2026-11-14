@@ -850,13 +850,141 @@ anyway.
   page is rewritten once.
 - Closure runs when nothing was removed would only repeat the streams just
   matched; `Match` skips it.
-- Follow-up (open, pre-existing; parser hardening, not 2.6): a `/ToUnicode`
-  `bfchar`/`bfrange` destination has no length cap
-  (`core/internal/fontmodel/cmap.go`), so one `Tj` through a crafted CMap can
-  allocate about 700 MiB before the operator budget refuses the page; it
-  hits `ExtractTextByPage` too. The CMap parser should cap a destination's
-  length (a few hundred bytes covers any ligature or decomposition) and the
-  decoded text per string.
+- Follow-up (pre-existing; parser hardening, not 2.6), now closed: a
+  `/ToUnicode` `bfchar`/`bfrange` destination had no length cap
+  (`core/internal/fontmodel/cmap.go`), so one `Tj` through a crafted CMap
+  allocated about 4.7 GiB (700 MiB of text) before the reading budget
+  refused the page; `ExtractTextByPage` did the same with no budget at all.
+  `fontmodel` now cuts a destination to 512 bytes of UTF-16BE
+  (`maxDstBytes`; the corpus's longest of 19,002 is 10 bytes), each code's
+  text to 64 bytes of UTF-8 per byte of the code (`maxTextPerCodeByte`,
+  `codeText`; the corpus's largest is 15 bytes for a one-byte code, and
+  Unicode's longest decomposition, U+FDFA, is 33 bytes), and reads no
+  glyph name longer than 127 bytes (`maxGlyphName`, Annex C) for `AltText`
+  and `ByteText`. The cut is per code, not per string, so a string's
+  reading stays the concatenation of its codes' and `ByteTables` still
+  matches `Text`, `AltText` and `ByteText` byte for byte. Every reading of
+  a shown string is then at most 64× its length. Extraction over the corpus
+  and the extra list is byte-identical. Gate:
+  `TestDoS_ToUnicodeExpansionIsBounded` (the 700 MiB case costs ≈ 1.0–1.1×
+  the same page showing a one-letter code; before, 243× CPU and 191×
+  allocation).
+  A cut reading is less text than a reader that does not cut reads, so
+  matching on it alone would under-remove: a destination of 70 "x" and
+  `SECRET-4242` read as 64 "x", `RedactText` found nothing and the output
+  kept the CMap. `fontmodel` therefore records at load time that a reading
+  is cut (`Font.TextCut`): a `bfchar` or `bfrange` destination (each array
+  element; a base string once, counting its incremented final character as
+  4 bytes) longer than 512 bytes or than 64 bytes of text — the one-byte
+  bound whatever the CMap's code length, since `ByteText` reads every code
+  as one byte — or a `/Differences` name longer than 127 bytes without its
+  suffix, or whose text is longer than 64 bytes. Redaction refuses
+  (`content_ambiguous`) any text-showing operator whose font set, or
+  extraction's font, is cut; a text search (extension, verification,
+  annotation appearances) records the same reason as a dispute, so a page
+  showing such a font fails the extension instead of passing it, and an
+  appearance showing it is removed with its annotation. No font in the test
+  corpus or the extra list is cut (`TestTextCutCorpus`). Leak rows
+  `tounicode_cut_*`, `differences_cut_uni_name`.
+  A `/Differences` array longer than the 4,096 items `loadDifferences`
+  reads (`maxDiffItems`) was cut silently: 2,048 `0 /a` pairs then
+  `1 /S /E /C /R /E /T` read as control codes for us and as `SECRET` for
+  Ghostscript. An array not read to its end — past the bound, or at an item
+  that does not resolve — now sets `TextCut` too. Leak row
+  `differences_past_item_cap`.
+- Found in review of the above, pre-existing, same mechanism (a reading
+  other readers have and redaction does not): where a Type 0 font's
+  `/ToUnicode` is silent, `Text` reads nothing, while §9.10.2 derives
+  Unicode from a predefined encoding CMap or the Adobe-GB1, CNS1, Japan1 and
+  Korea1 collections, and Ghostscript 10.07 also reads an Identity font's
+  codes as Unicode. Probes, each read as `SECRET` by Ghostscript in the
+  redacted output: no `/ToUnicode` with each of Japan1, Identity and a
+  `UniJIS-UCS2-H` encoding; a `/ToUnicode` that is a name, empty, or maps one
+  code but not the codes shown; and a `/ToUnicode` whose only mapping is
+  `/Adobe-Japan1-UCS2 usecmap` (the parent's mappings are not read). The
+  model now records it: `Font.TextUnknown(raw)` is true for a `/ToUnicode`
+  CMap holding `usecmap` (any font), and for a Type 0 font, by its resolved
+  `/Subtype`, with no usable `/ToUnicode` or one that does not map a code
+  of `raw` (split at the CMap's code length and, with metrics, by the
+  encoding's codespace; trailing bytes count as unmapped). Redaction treats
+  it as `TextCut`: `content_ambiguous` on the page, a dispute in a text
+  search, so `RedactArea` refuses a page showing such a font wherever its
+  region lies and extension fails closed on a page it must search.
+  Extraction is unchanged (byte-identical over the corpus and the extra
+  list). Census (corpus and extra list, every page): 0 fonts with
+  `usecmap` in `/ToUnicode`; 0 shown strings with a code a present
+  `/ToUnicode` leaves unmapped or maps to an empty destination, or that the
+  encoding splits otherwise than `Text` (or cannot be known to split alike;
+  see the next item); 145 Type 0 fonts without `/ToUnicode` are
+  selected by `Tf`, and show text on 112 of 3,520 pages in 79 files (Japan1 72 files, Korea1 49, CNS1
+  1, Identity 3; 73 are Apple regulatory-certification PDFs). Redaction
+  corpus delta: 320 of 6,244 outcomes (5.1%) go from `ok` to
+  `content_ambiguous`, all in the extra list (308 from the four Adobe
+  collections, 12 from Identity); `testing/corpus` is unchanged. Leak rows
+  `tounicode_usecmap_japan1`, `composite_no_tounicode_japan1`,
+  `composite_no_tounicode_identity`, `composite_tounicode_partial_japan1`,
+  `composite_no_tounicode_other_page`. Lifting the refusal needs the Adobe
+  collections' CID-to-Unicode tables (as readings, not for extraction) and
+  a model of the Identity code-as-Unicode reading.
+- Found in re-review of the above, same mechanism. (a) An empty
+  destination (`<>` in a `bfchar`, or a `bfrange` base) counted as mapped:
+  `Text` reads nothing for the code, while Ghostscript reads it as a code
+  `/ToUnicode` does not map — from the Adobe-Japan1 collection for a Type 0
+  font (`SECRET` read from a `<0000> <FFFF> <>` range, on the marked page or
+  on another one automatic extension searches), through the `/Differences`
+  glyph name for a simple font, where `ByteText` stopped at the empty
+  lookup. `TextUnknown` now counts a code mapped to no text as unmapped for
+  a Type 0 font, and `ByteText` reads a byte `/ToUnicode` maps to no text as
+  one it does not map (glyph name, else Latin-1); `Text` and extraction are
+  unchanged. (b) `TextUnknown` checked that codes were mapped, not that
+  readers split them alike: `bytesToCode` drops the code length, so a
+  one-byte embedded encoding CMap with a two-byte `/ToUnicode` read as
+  byte pairs (all mapped) for us and as one-byte codes, each looked up by
+  value, for Ghostscript (`ＳＥＣＲＥＴ`; 0 rectangles). A Type 0 font now
+  reports `TextUnknown` when the encoding's split (`Codes`) has a code of
+  another length than `Text`'s (one-byte against two-byte, mixed-width
+  codespaces, a UTF16 surrogate pair) or is uncertain (unknown codespace,
+  bytes in no range, no metrics). A `/ToUnicode` mapping whose source has
+  another length than the code read is found by value for us and for
+  Ghostscript alike, so it is not refused. Census: 0 shown strings in the
+  corpus and the extra list for each new cause, so the redaction corpus
+  delta is unchanged. Found in the next review: an embedded encoding CMap
+  whose codespace ranges of different lengths overlap (`<00> <FF>` with
+  `<0100> <01FF>`, in either order) was split by `Codes` (shortest range)
+  into one-byte codes, matching a one-byte `/ToUnicode`, while Ghostscript
+  takes the two-byte code, finds no mapping and reads the Japan1 CID
+  (`SECRET`; 0 rectangles, the flatten succeeded). `loadEncodingCMap` now
+  leaves the codespace unknown when two ranges of lengths n1 < n2 meet on
+  their first n1 bytes (`spaceOverlaps`; more than 65,536 such pairs count
+  as overlapping), so `TextUnknown` reports `split_uncertain` and `Codes`,
+  which the run geometry also uses, reports the split uncertain. The
+  predefined UTF16 codespace does not overlap. Census: no font of the
+  corpus or the extra list has an embedded encoding CMap (a stream
+  /Encoding), so none overlaps, and no shown string is newly
+  reported. Leak rows
+  `composite_codespace_overlap`,
+  `composite_codespace_overlap_longer_first`. Leak rows `composite_tounicode_empty_dst`,
+  `composite_tounicode_empty_dst_other_page`,
+  `simple_tounicode_empty_dst_diffs` (now matched: clean),
+  `composite_split_onebyte_encoding`, `composite_split_mixed_width`.
+- Next step, 2.12 (base-encoding readings; pre-existing, open): a simple
+  font's base encoding — `/StandardEncoding`, `/WinAnsiEncoding`,
+  `/MacRomanEncoding`, Symbol, or the font program's built-in one — is never
+  read. Without `/ToUnicode`, `Text`, `AltText` and `ByteText` read the
+  codes `/Differences` does not rename as Latin-1, so WinAnsi 0x80–0x9F
+  (`“ ”`, `€`, `Ž` …), every MacRoman code from 0x80, and Standard codes
+  such as 0xE9 (`Oslash`) read as other characters than Ghostscript shows.
+  It covers a simple font whose `/ToUnicode` maps a code to no text too:
+  `ByteText` reads such a code through its `/Differences` name, else as
+  Latin-1, where Ghostscript uses the base encoding.
+  A pattern holding such a character matches nothing, and the text stays
+  on the page — and on another page automatic extension searches, where
+  the same text is in another encoding. Known-leak rows
+  `base_encoding_winansi`, `base_encoding_macroman`,
+  `base_encoding_macroman_other_page` (closes in 2.12 -> clean). Closing it
+  needs the four Latin base encodings (Annex D) and the built-in encodings
+  of the standard 14 and embedded programs as one more reading slot, not for
+  extraction, whose text must stay byte-identical.
 - Found by the new fuzz target, and present on `master`: content that ends
   inside a text object (a `BT` with no `ET`) got its black boxes inside the
   text object, so the output failed the strict re-read

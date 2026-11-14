@@ -51,7 +51,23 @@ import (
 // matched too: a match strips that entry and removes the text shown inside
 // the marked sequence, and the page is redacted even if the sequence shows no
 // text. A font whose glyphs draw something other than what its /ToUnicode
-// says is out of scope; use RedactArea for a geometric guarantee.
+// says is out of scope; use RedactArea for a geometric guarantee, except for
+// the fonts below, which it refuses too.
+//
+// Some fonts show codes whose text other readers derive where these readings
+// hold none, or less: a Type 0 font with no usable /ToUnicode, whose
+// /ToUnicode does not map a code a string shows or maps it to no text, or
+// whose encoding splits a string into other codes than its /ToUnicode reads
+// (readers derive the text from the Adobe-GB1, CNS1, Japan1 or Korea1
+// collection or a predefined encoding CMap, ISO 32000-1 §9.10.2, or read an
+// Identity font's codes as Unicode); a /ToUnicode CMap that names a parent
+// with usecmap; and a font whose /ToUnicode destination, /Differences glyph
+// name or /Differences array exceeds the bounds text decoding reads. A page
+// that shows text with such a font cannot be matched for certain and is
+// refused (a content_ambiguous *RedactionError) — by RedactText, and by
+// RedactAndFlatten for a RedactArea region on it, wherever the match or
+// region lies — and so is a redaction whose automatic extension must search
+// such a page. ExtractText reads these fonts as before.
 //
 // A matched string of 4 or more characters is also removed wherever else it
 // occurs in the document — on other pages, in annotations, in the document
@@ -149,7 +165,9 @@ func (d *Document) RedactText(pageIndex int, pattern string) (_ []Rect, err erro
 // marked-content /ActualText, /Alt and /E entries are stripped too. The text
 // of a run removed only because it met the region is, when it has 8 or more
 // characters, also removed wherever else it occurs in the document
-// (automatic extension; see RedactAndFlatten).
+// (automatic extension; see RedactAndFlatten). A page that shows text with a
+// font whose text redaction cannot read in full (see RedactText) is refused
+// by RedactAndFlatten, wherever on the page the region lies.
 //
 // Returns ErrPageNotFound if pageIndex is out of range, or ErrInvalidArgument
 // (and marks nothing) if any coordinate of rect is NaN or infinite.
@@ -250,7 +268,9 @@ func (d *Document) RedactArea(pageIndex int, rect Rect) error {
 // cannot be redacted safely (redaction fails closed rather than miss content
 // other viewers render; ExtractText and RenderPage stay lenient on such
 // content) — including a page automatic extension reaches that cannot be
-// redacted, e.g. one that shows the removed text through a form, and
+// redacted, e.g. one that shows the removed text through a form or that
+// shows text with a font whose text redaction cannot read in full (see
+// RedactText), and
 // removed text held by a form, pattern, soft-mask group or Type 3 glyph
 // procedure a redacted page paints (or an object it uses), which redaction
 // does not rewrite (the detail then starts with "automatic extension") —,

@@ -77,7 +77,10 @@ func TestRunBoxesWithMetrics(t *testing.T) {
 		6:  "<< /Type /Font /Subtype /TrueType /BaseFont /X /FirstChar 87 /LastChar 105 /Widths [3000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 250] /FontDescriptor 10 0 R >>",
 		10: "<< /FontFile2 11 0 R >>",
 		11: stm("", "x"),
-		7:  "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-V /DescendantFonts [8 0 R] >>",
+		// Identity-V; its /ToUnicode maps every code c to U+E000 + c (a
+		// Type 0 font without one is refused: fontmodel Font.TextUnknown).
+		7:  "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-V /DescendantFonts [8 0 R] /ToUnicode 12 0 R >>",
+		12: puaUnicode,
 		8:  "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X >>",
 		9:  "<< /Type /Font /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << >> >>",
 	}
