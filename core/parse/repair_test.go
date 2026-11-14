@@ -656,3 +656,154 @@ func TestRepairedLoad_ObjectNumberChecked(t *testing.T) {
 		t.Fatalf("repaired table: %v, %v; want errLex for the wrong object number", obj, err)
 	}
 }
+
+// TestRepair_EscapedNames: the encryption checks read names as the lexer
+// does, #xx escapes decoded (ISO 32000-1 §7.3.5). A file that spells a sign
+// of an encryption dictionary with escapes (/Filt#65r, /Stand#61rd) still
+// fails closed, and one that spells a signature marker with them is still a
+// signature — every name the lostShaped rules, encryptShaped and the trailer
+// check read, escaped.
+func TestRepair_EscapedNames(t *testing.T) {
+	plainDoc, _ := body(onePage...)
+	cut := func(s string) []byte { return append(append([]byte{}, plainDoc...), s...) }
+	for _, tc := range []struct{ name, tail string }{
+		// Rule 1: always a sign.
+		{"/Recipients", "5 0 obj<</Recipi#65nts [<00"},
+		{"/OE", "5 0 obj<</R 6/O#45 <00"},
+		{"/UE", "5 0 obj<</R 6/#55#45"},
+		{"/Filter /Standard, value escaped", "5 0 obj<</Filter/Stand#61rd/V 2"},
+		{"/Filter /Standard, key escaped", "5 0 obj<</Filt#65r/Standard/V 2"},
+		{"/Filter /Standard, lower-case hex", "5 0 obj<</F#69lter/St#61nd#61rd"},
+		{"/Filter /Adobe.PubSec", "5 0 obj<</Filter/Adobe#2EPubSec/V 4"},
+		{"public-key /SubFilter, key escaped", "5 0 obj<</SubFilt#65r/adbe.pkcs7.s4/V 4"},
+		{"public-key /SubFilter, digit escaped", "5 0 obj<</SubFilter/adbe.pkcs7.s#34/V 4"},
+		{"public-key /SubFilter, every byte escaped", "5 0 obj<</SubFilter/" + escapeAll("adbe.pkcs7.s5") + "/V 4"},
+		// Rule 2: /Filter (a stream filter: rule 6 does not apply) with a key.
+		{"/Filter with /O", "5 0 obj<</Filter/FlateDecode/#4F <00"},
+		{"/Filter with /U", "5 0 obj<</Filter/FlateDecode/#55 <00"},
+		{"/Filter with /CF", "5 0 obj<</Filter/FlateDecode/C#46<<"},
+		{"/Filter with /StmF", "5 0 obj<</Filter/FlateDecode/Stm#46/StdCF"},
+		{"/Filter with /StrF", "5 0 obj<</Filter/FlateDecode/Str#46/StdCF"},
+		{"escaped /Filter with /O, every byte escaped", "5 0 obj<</" + escapeAll("Filter") + "/FlateDecode/O <00"},
+		// Rule 4: /Filter with /P.
+		{"/Filter with /P", "5 0 obj<</Filter/FlateDecode/#50 -4"},
+		// Rule 6: a /Filter that is not a stream filter.
+		{"escaped /Filter naming another handler", "5 0 obj<</Filt#65r/Custom/V 2"},
+		// The trailer and cross-reference stream checks for /Encrypt.
+		{"trailer naming /Encrypt cut short", "trailer\n<< /Root 1 0 R /Encr#79pt 5 0 R /ID [<01> <02"},
+		{"cross-reference stream dictionary cut short", "8 0 obj\n<< /Type /XRef /Root 1 0 R /#45ncrypt 5 0 R /W [1 1 1] /Size (9"},
+	} {
+		t.Run("lost: "+tc.name, func(t *testing.T) {
+			r, err := NewRepairedResolver(cut(tc.tail))
+			if r != nil || !errors.Is(err, ErrEncryptionLost) {
+				t.Fatalf("NewRepairedResolver = %v, %v; want ErrEncryptionLost", r, err)
+			}
+		})
+	}
+
+	// encryptShaped: an encryption dictionary with escaped keys is found by
+	// shape, and shadowed it is still a lost one.
+	enc := "<< /Filt#65r /Stand#61rd /V 1 /R 2 /Length 40 /#50 -4 /#4F (0123456789) /#55 (abcdefghij) >>"
+	t.Run("found by shape", func(t *testing.T) {
+		data, _ := body(append(append([]repairObj{}, onePage...), repairObj{5, 0, enc})...)
+		r, err := NewRepairedResolver(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Trailer()["Encrypt"] != (Reference{Number: 5}) {
+			t.Fatalf("/Encrypt = %v, want 5 0 R by shape", r.Trailer()["Encrypt"])
+		}
+	})
+	for _, tc := range []struct{ name, obj string }{
+		{"standard handler", enc},
+		{"public-key handler", "<< /Filter /Adobe.PubSec /SubFilter /adbe.pkcs7.s4 /Recipi#65nts [<00>] >>"},
+		{"AES-256 keys", "<< /Filter /Standard /V 5 /R 6 /O <00> /U <00> /#4FE <00> /U#45 <00> /Perms <00> >>"},
+	} {
+		t.Run("lost: shadowed, "+tc.name, func(t *testing.T) {
+			data, _ := body(append(append([]repairObj{}, onePage...), repairObj{5, 0, tc.obj}, repairObj{5, 0, "<< /Type /Other >>"})...)
+			r, err := NewRepairedResolver(data)
+			if r != nil || !errors.Is(err, ErrEncryptionLost) {
+				t.Fatalf("NewRepairedResolver = %v, %v; want ErrEncryptionLost", r, err)
+			}
+		})
+	}
+
+	// The exclusions read escaped names too (as every parser does), and a '#'
+	// that does not start an escape is itself: /Filter#zz is not /Filter.
+	for _, tc := range []struct{ name, obj string }{
+		{"rule 3: /ByteRange", "<< /Filter /Adobe.PPKLite /ByteR#61nge [0 1 2 3] /P 2 /Contents <00"},
+		{"rule 3: /Type /Sig", "<< /Typ#65 /S#69g /Filter /Adobe.PPKLite /P 2 /Contents <00"},
+		{"rule 3: /Type /DocTimeStamp", "<< /Type /DocTim#65Stamp /Filter /Adobe.PPKLite /P 2 /Contents <00"},
+		{"rule 5: /Subtype with a stream filter", "<< /Subt#79pe /Image /Filter /DCT#44ecode ]] >>"},
+		{"rule 5: /Subtype with a cut-short filter", "<< /Subtype /Image /Filter /JB#49G2 ]] >>"},
+		{"rule 6: an escaped stream filter", "<< /Filter /Fl#61teDecode /Length (5"},
+		{"the adbe.pkcs7.sha1 SubFilter", "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.s#68a1 /Contents <00"},
+		{"'#' without two hex digits", "<< /Filter#zz /Standard /Filt#6 ]] >>"},
+		{"an escaped name inside a string", "<< /Title (a /Filt#65r /Stand#61rd b) ]] >>"},
+	} {
+		t.Run("not lost: "+tc.name, func(t *testing.T) {
+			data, _ := body(append(append([]repairObj{}, onePage...), repairObj{5, 0, tc.obj})...)
+			r, _, _ := repaired(t, data)
+			if _, ok := r.Trailer()["Encrypt"]; ok {
+				t.Errorf("/Encrypt = %v, want none", r.Trailer()["Encrypt"])
+			}
+		})
+	}
+}
+
+// escapeAll writes every byte of s as a #xx escape.
+func escapeAll(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		fmt.Fprintf(&b, "#%02X", s[i])
+	}
+	return b.String()
+}
+
+// TestAppendNameDecoded: the one decoding of a name's escapes (§7.3.5), which
+// the lexer and the repair scan's name search share.
+func TestAppendNameDecoded(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"Filter", "Filter"},
+		{"Filt#65r", "Filter"},
+		{"#46#69#6C#74#65#72", "Filter"},
+		{"#4f#4F", "OO"},
+		{"A#20B", "A B"},
+		{"A#2", "A#2"},
+		{"A#", "A#"},
+		{"A#zz", "A#zz"},
+		{"A#2G", "A#2G"},
+		{"##41", "#A"},
+		{"#00", "\x00"},
+	} {
+		if got := string(appendNameDecoded(nil, []byte(tc.raw))); got != tc.want {
+			t.Errorf("appendNameDecoded(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+		// lexName reads the same name.
+		if got, _, err := lexName([]byte("/"+tc.raw+" "), 0); err != nil || got != tc.want {
+			t.Errorf("lexName(/%s) = %q, %v; want %q", tc.raw, got, err, tc.want)
+		}
+	}
+}
+
+// TestInternedNameLength: the repair scan's names table holds no name longer
+// than maxInternedName, and a long name still reads in full.
+func TestInternedNameLength(t *testing.T) {
+	names := map[string]string{}
+	short := "/" + strings.Repeat("a", maxInternedName) + " "
+	long := "/" + strings.Repeat("b", maxInternedName+1) + " "
+	for _, in := range []string{short, long} {
+		tok, _, err := nextTokenInterned([]byte(in), 0, names)
+		if err != nil || tok.kind != tokName || tok.name != strings.TrimSpace(in[1:]) {
+			t.Fatalf("nextTokenInterned(%d-byte name) = %+v, %v", len(in)-2, tok, err)
+		}
+	}
+	if len(names) != 1 {
+		t.Fatalf("names table holds %d names, want only the %d-byte one", len(names), maxInternedName)
+	}
+	for k := range names {
+		if len(k) > maxInternedName {
+			t.Errorf("interned a %d-byte name", len(k))
+		}
+	}
+}

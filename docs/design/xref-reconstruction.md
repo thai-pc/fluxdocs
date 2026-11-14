@@ -317,7 +317,13 @@ hand redaction a model that contains none of the real text. So:
   string not terminated in the bytes is not trusted to be one: from a stray
   `(` or `<` on, the rest is searched plainly, so damage cannot hide the
   names after it. The search is one pass (two with that fallback), whatever
-  the bytes hold.
+  the bytes hold. Names, keys and values alike, are compared decoded, by
+  the lexer's own decoding (`appendNameDecoded`, ISO 32000-1 §7.3.5: `#`
+  and two hexadecimal digits are one byte, any other `#` is itself): every
+  parser reads `/Filt#65r /Stand#61rd` as `/Filter /Standard`, so the checks
+  must too, or a file could spell an encryption dictionary — lost, or
+  whole with its trailer gone — past them and be opened as plaintext. The
+  exclusions (`/ByteR#61nge`, `/Type /S#69g`) decode the same way.
 - After that the normal path applies: `EnableDecryption` either succeeds or
   ends the ladder with `ErrEncryptedDocument`. Handlers R2–R4 derive the key
   from `/ID[0]`. If `/ID` is lost, the key is wrong, which only a password
@@ -341,6 +347,7 @@ complete.
 | `maxRepairObjStmBytes` (stage 2 decode, total) | 256 MiB (= `maxObjStmCache`) | N ObjStm bombs without a trailer would otherwise inflate N × 256 MiB at open |
 | Trailer and catalog candidates parsed | 64 each, last first | bounded parse count |
 | Look-back window | 32 bytes | constant work per `obj` hit |
+| Interned names (the scan's shared names table) | 4096 names of at most 127 bytes (ISO 32000-1 Annex C, Table C.1) | a longer name still parses, it is just not kept: the table holds at most 512 KiB, where a file of 4096 distinct 16 KiB keys kept 65 MiB alive for the whole scan (1.2 MiB with the bound; no name of 100 bytes or more in the dictionaries of the 1,524 corpus files) |
 
 The **render budget** (`render-budget.md`) is not involved. The repair runs
 inside `OpenBytes`, before any render, and renders of a repaired document load
@@ -516,7 +523,9 @@ resolved bodies of the objects named; the `RepairInfo` fields; and no
 11. Encryption: trailer lost, `/Encrypt` found by shape; an ObjStm in an RC4
     file expanded only after `EnableDecryption` (extends
     `TestResolver_DecryptionClearsFailureCaches`); an encryption-shaped
-    object with no trailer never opens as plaintext.
+    object with no trailer never opens as plaintext; every name the
+    encryption checks read, written with `#xx` escapes
+    (`TestRepair_EscapedNames`).
 12. No catalog anywhere → error. Caps: candidates, objects, ObjStm bytes, each
     one past its limit → error naming the cap.
 

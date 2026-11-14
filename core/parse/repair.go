@@ -959,15 +959,25 @@ type dictNames struct {
 
 func (n dictNames) has(bit int) bool { return n.bits&bit != 0 }
 
-// namesOf scans b once (scanNames) and returns its dictNames.
+// maxKeyName is the length of the longest name namesOf looks for
+// ("Recipients"): a name longer than three times it, every byte written as a
+// #xx escape, cannot decode to one.
+const maxKeyName = len("Recipients")
+
+// namesOf scans b once (scanNames) and returns its dictNames. Names are
+// compared decoded, as the lexer reads them (appendNameDecoded, §7.3.5): a
+// /Filt#65r is a /Filter to every parser, so it must be one here too, or a
+// file could spell an encryption dictionary past these checks.
 func namesOf(b []byte) dictNames {
 	var n dictNames
+	var buf [3 * maxKeyName]byte // decoded keys: no allocation
 	scanNames(b, func(at int) bool {
-		j := at + 1
-		for j < len(b) && isRegular(b[j]) {
-			j++
+		j := nameEnd(b, at)
+		key := b[at+1 : j]
+		if len(key) <= 3*maxKeyName {
+			key = decodedName(key, buf[:0])
 		}
-		switch string(b[at+1 : j]) { // no allocation: compared in place
+		switch string(key) { // no allocation: compared in place
 		case "Filter":
 			if !n.has(nFilter) {
 				n.filter, n.filterIsStream = filterValue(b, j)
@@ -1012,8 +1022,8 @@ func namesOf(b []byte) dictNames {
 }
 
 // filterValue reads the /Filter value whose key ends at i: its name (without
-// the slash, aliasing b; nil when it is not a name) and whether it is a
-// stream filter (a standard filter name, an array of filters, or a
+// the slash, decoded; nameAfterBytes; nil when it is not a name) and whether
+// it is a stream filter (a standard filter name, an array of filters, or a
 // reference).
 func filterValue(b []byte, i int) ([]byte, bool) {
 	i = skipBlank(b, i)
@@ -1031,42 +1041,52 @@ func filterValue(b []byte, i int) ([]byte, bool) {
 }
 
 // nameAfterBytes returns the name value at or after offset i in b (white-space
-// skipped), without its slash, or nil when the value there is not a name. It
-// aliases b.
+// skipped), without its slash and decoded (decodedName), or nil when the
+// value there is not a name. It aliases b unless the name has an escape.
 func nameAfterBytes(b []byte, i int) []byte {
 	i = skipBlank(b, i)
 	if i >= len(b) || b[i] != '/' {
 		return nil
 	}
-	j := i + 1
+	return decodedName(b[i+1:nameEnd(b, i)], nil)
+}
+
+// nameEnd returns the offset just past the name whose '/' is at b[at]: the
+// end of the run of regular characters after it (§7.3.5).
+func nameEnd(b []byte, at int) int {
+	j := at + 1
 	for j < len(b) && isRegular(b[j]) {
 		j++
 	}
-	return b[i+1 : j]
+	return j
 }
 
-// hasName reports whether b holds the name pat ("/Filter") as a whole token:
-// followed by a white-space or delimiter character or the end of b, and not
-// inside a literal or hexadecimal string.
-func hasName(b []byte, pat string) bool { return nameAt(b, pat) >= 0 }
+// decodedName returns raw, a name's characters after its '/', with its #xx
+// escapes decoded as the lexer decodes them (appendNameDecoded): raw itself
+// when it holds no '#', else the decoded bytes appended to dst[:0]. The
+// result is non-nil whenever raw is (an empty name is not a missing one).
+func decodedName(raw, dst []byte) []byte {
+	if bytes.IndexByte(raw, '#') < 0 {
+		return raw
+	}
+	return appendNameDecoded(dst[:0], raw)
+}
 
-// nameAt returns the offset of the first whole-token name pat in b outside
-// strings (scanNames), or -1.
-func nameAt(b []byte, pat string) int {
-	at := -1
-	scanNames(b, func(i int) bool {
-		if isNameAt(b, i, pat) {
-			at = i
-			return true
+// hasName reports whether b holds the name pat ("/Filter", as it decodes) as
+// a whole token, written plainly or with #xx escapes: outside literal and
+// hexadecimal strings (scanNames).
+func hasName(b []byte, pat string) bool {
+	found := false
+	var buf [32]byte
+	scanNames(b, func(at int) bool {
+		raw := b[at+1 : nameEnd(b, at)]
+		if len(raw) > 3*len(pat) {
+			return false // too long to decode to pat
 		}
-		return false
+		found = string(decodedName(raw, buf[:0])) == pat[1:]
+		return found
 	})
-	return at
-}
-
-// isNameAt reports whether the whole-token name pat starts at b[i].
-func isNameAt(b []byte, i int, pat string) bool {
-	return bytes.HasPrefix(b[i:], []byte(pat)) && (i+len(pat) == len(b) || !isRegular(b[i+len(pat)]))
+	return found
 }
 
 // scanNames calls fn with the offset of every '/' in b outside strings, in

@@ -81,10 +81,19 @@ func nextTokenQuiet(data []byte, i int) (token, int, error) { return lex(data, i
 // repeats, small enough that a file of distinct names cannot grow it.
 const maxInterned = 4096
 
+// maxInternedName bounds the length of a name a names table holds: the
+// implementation limit ISO 32000-1 Annex C (Table C.1) gives for a name, 127
+// bytes. A longer name is still read — real files exceed the limit (see
+// docs/design/xref-reconstruction.md §4) — but not interned, so the table
+// holds at most maxInterned × maxInternedName bytes of names (512 KiB)
+// instead of keeping every long name a scan meets alive until it ends.
+const maxInternedName = 127
+
 // nextTokenInterned is nextTokenQuiet with name tokens taken from names, a
 // table shared by one repair scan: a name it already holds costs no
 // allocation (a hostile file repeats a few names in millions of headers).
-// New names are added until the table holds maxInterned.
+// New names of at most maxInternedName bytes are added until the table holds
+// maxInterned.
 func nextTokenInterned(data []byte, i int, names map[string]string) (token, int, error) {
 	return lex(data, i, true, names)
 }
@@ -159,7 +168,7 @@ func lex(data []byte, i int, quiet bool, names map[string]string) (token, int, e
 					return token{kind: tokName, name: v}, j, nil
 				}
 				v := string(data[i+1 : j])
-				if len(names) < maxInterned {
+				if len(names) < maxInterned && len(v) <= maxInternedName {
 					names[v] = v
 				}
 				return token{kind: tokName, name: v}, j, nil
@@ -300,18 +309,29 @@ func lexName(data []byte, i int) (string, int, error) {
 	if j == n || !isRegular(data[j]) {
 		return string(data[i:j]), j, nil
 	}
-	var out []byte
-	for i < n && isRegular(data[i]) {
-		c := data[i]
-		if c == '#' && i+2 < n && isHex(data[i+1]) && isHex(data[i+2]) {
-			out = append(out, hexVal(data[i+1])<<4|hexVal(data[i+2]))
-			i += 3
+	for j < n && isRegular(data[j]) {
+		j++
+	}
+	return string(appendNameDecoded(nil, data[i:j])), j, nil
+}
+
+// appendNameDecoded appends to dst the name whose characters (after the '/',
+// a run of regular characters) are raw, with its escapes decoded (§7.3.5): a
+// '#' followed by two hexadecimal digits is the byte they encode; any other
+// '#' is itself. Every reading of a name decodes it here — the lexer and the
+// repair scan's byte-level name search (repair.go) — so the two cannot
+// disagree on what a name is.
+func appendNameDecoded(dst, raw []byte) []byte {
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '#' && i+2 < len(raw) && isHex(raw[i+1]) && isHex(raw[i+2]) {
+			dst = append(dst, hexVal(raw[i+1])<<4|hexVal(raw[i+2]))
+			i += 2
 			continue
 		}
-		out = append(out, c)
-		i++
+		dst = append(dst, c)
 	}
-	return string(out), i, nil
+	return dst
 }
 
 func lexLiteralString(data []byte, i int, quiet bool) ([]byte, int, error) {
